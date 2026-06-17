@@ -1,0 +1,110 @@
+version: "3.9"
+
+services:
+  # ── FastAPI Application ────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nl_to_sql_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - api_data:/app/data
+    environment:
+      - APP_ENV=production
+      - APP_LOG_LEVEL=INFO
+      - APP_LOG_FILE=/app/data/logs/application.log
+
+      # ── LLM ───────────────────────────────────────────────────────────────
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - LLM_MODEL=${LLM_MODEL:-llama-3.3-70b-versatile}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+      # ── Fine-tuning ────────────────────────────────────────────────────────
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY}
+      - FINE_TUNING_PROVIDER=${FINE_TUNING_PROVIDER:-together}
+
+      # ── Databases (Supabase) ──────────────────────────────────────────────
+      - DATABASE_URL=${DATABASE_URL}
+      - HISTORY_DATABASE_URL=${HISTORY_DATABASE_URL}
+      - AVAILABLE_DATABASES=${AVAILABLE_DATABASES:-}
+
+      # ── Security ──────────────────────────────────────────────────────────
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+
+      # ── Email ─────────────────────────────────────────────────────────────
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@nl2sql.local}
+
+      # ── Vector Store ──────────────────────────────────────────────────────
+      - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-qdrant}
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-schema_chunks}
+
+      # ── Cache ─────────────────────────────────────────────────────────────
+      - CACHE_PROVIDER=${CACHE_PROVIDER:-redis}
+      - REDIS_URL=redis://redis:6379/0
+
+      # ── Schema ────────────────────────────────────────────────────────────
+      - AUTO_INGEST_SCHEMA_ON_STARTUP=${AUTO_INGEST_SCHEMA_ON_STARTUP:-true}
+      - SCHEMA_MONITOR_ENABLED=${SCHEMA_MONITOR_ENABLED:-true}
+
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Qdrant Vector Database ─────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: nl_to_sql_qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -sf http://localhost:6333/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis Cache ────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nl_to_sql_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  api_data:
+  qdrant_data:
+  redis_data:
