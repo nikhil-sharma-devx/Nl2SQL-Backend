@@ -1,6 +1,6 @@
 # NL2SQL — Backend
 
-A production-grade REST API that converts plain-English questions into validated, executable SQL using a Retrieval-Augmented Generation (RAG) pipeline. Supports PostgreSQL and MySQL, streams results over SSE, self-corrects failed SQL, and ships with auth, analytics, fine-tuning, and observability built in.
+A production-grade REST API that converts plain-English questions into validated, executable SQL using a Retrieval-Augmented Generation (RAG) pipeline. Supports PostgreSQL and MySQL, streams results over SSE, self-corrects failed SQL, and ships with auth, analytics, fine-tuning, observability, glossary, query templates, and onboarding built in.
 
 ---
 
@@ -33,11 +33,16 @@ A production-grade REST API that converts plain-English questions into validated
 - **Query intelligence** — query rewriting, expansion, intent classification, and FK-aware table selection before retrieval
 - **Semantic cache** — identical or near-identical questions return cached results instantly without hitting the LLM
 - **Schema auto-ingestion** — reflects live database schema on startup, re-ingests on change (configurable poll interval)
+- **Glossary / Business Dictionary** — per-user term definitions automatically injected into query prompts (token-budget-aware)
+- **Query Templates** — parameterized NL + SQL templates with `{{placeholder}}` variables; render endpoint substitutes values at call time
+- **Favorited Tables** — users pin tables that receive retrieval priority in hybrid search
+- **Onboarding & Tutorial** — server-tracked onboarding checklist and step-by-step tutorial progress, persisted per user
+- **Notification Preferences** — per-user email digest, in-app alert, and marketing opt-in settings
 - **Authentication** — email/password with OTP verification, Google OAuth 2.0, JWT sessions, password reset
 - **BYOK** — users supply their own LLM API keys; server keys are the fallback
 - **Analytics** — token usage, success/failure rates, table popularity, intent distribution, prompt version tracking
 - **Training data pipeline** — collects feedback, exports fine-tuning JSONL, starts and monitors OpenAI/Together fine-tune jobs
-- **Observability** — OpenTelemetry (OTLP), LangSmith tracing, Arize Phoenix, structured JSON logs (structlog)
+- **Observability** — OpenTelemetry (OTLP), LangFuse tracing, structured JSON logs (structlog)
 - **Rate limiting** — per-IP rate limiting via SlowAPI, configurable requests-per-minute
 - **Background workers** — data retention purge and TTL cleanup run as async tasks
 
@@ -48,25 +53,25 @@ A production-grade REST API that converts plain-English questions into validated
 | Layer | Library / Service | Notes |
 |---|---|---|
 | API framework | FastAPI + Uvicorn | Async, application factory pattern |
-| Language | Python 3.12 | |
+| Language | Python 3.13 | |
 | LLM | Groq (Llama 3.3 70B) · OpenAI | Pluggable via `LLM_PROVIDER` env var |
 | Embeddings | HuggingFace Sentence Transformers | `all-MiniLM-L6-v2` by default |
 | Vector store | Qdrant (default) · Chroma · FAISS | Swappable via `VECTOR_STORE_PROVIDER` |
 | Keyword search | BM25 (rank-bm25) | Hybrid retrieval alongside vector search |
 | Database | PostgreSQL via async SQLAlchemy | Supabase recommended for managed hosting |
-| Migrations | Alembic | 2 migrations: initial schema + perf indexes |
+| Migrations | Alembic | 3 migrations: initial schema, perf indexes, filter column indexes |
 | Cache | Redis · in-memory fallback · semantic cache | Semantic cache uses cosine similarity threshold |
 | Auth | JWT + Google OAuth + aiosmtplib OTP | passlib bcrypt, python-jose |
 | DI | dependency-injector | Constructor-injection container |
 | SQL parsing | sqlglot | Dialect-aware validation and formatting |
 | Rate limiting | SlowAPI | Per-IP, configurable |
 | Logging | structlog | JSON output, weekly-rotating file handler |
-| Observability | OpenTelemetry · LangSmith · Arize Phoenix | All optional |
+| Observability | OpenTelemetry · LangFuse | All optional; LangFuse singleton initialized at startup |
 | Build | Hatchling | pyproject.toml, no setup.py |
 | Linting | Ruff | Replaces flake8 + isort + pyupgrade |
 | Type checking | Mypy (strict) | |
 | Testing | pytest + pytest-asyncio | |
-| Container | Docker multi-stage | Non-root `appuser`, healthcheck included |
+| Container | Docker multi-stage (python:3.13-slim) | Non-root `appuser`, healthcheck included |
 
 ---
 
@@ -87,7 +92,7 @@ A production-grade REST API that converts plain-English questions into validated
               │  2. Rewrite + expand query                       │
               │  3. Select candidate tables (FK-aware)           │
               │  4. Hybrid retrieval  ──► Reranker               │
-              │  5. Build schema context                         │
+              │  5. Build schema context + inject glossary       │
               │  6. Prompt LLM → generate SQL                    │
               │  7. Validate (sqlglot) → self-correct if needed  │
               │  8. Execute (optional) → cache → stream          │
@@ -105,7 +110,7 @@ A production-grade REST API that converts plain-English questions into validated
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - PostgreSQL (or a [Supabase](https://supabase.com) project)
 - Qdrant — `docker run -p 6333:6333 qdrant/qdrant`
 - Redis — `docker run -p 6379:6379 redis:7-alpine`
@@ -177,8 +182,12 @@ Copy `.env.example` to `.env` and fill in every `REQUIRED` value. All other vari
 | `SQL_MAX_RETRIES` | No | Self-correction retries on SQL failure (default: 3) |
 | `AUTO_INGEST_SCHEMA_ON_STARTUP` | No | Reflect and ingest schema from live DB on boot (default: `true`) |
 | `SEMANTIC_CACHE_ENABLED` | No | Cache near-identical questions (default: `true`) |
+| `LANGFUSE_SECRET_KEY` | No | LangFuse secret key — enables LLM trace logging |
+| `LANGFUSE_PUBLIC_KEY` | No | LangFuse public key |
+| `LANGFUSE_HOST` | No | LangFuse host (default: `https://cloud.langfuse.com`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OpenTelemetry collector endpoint |
 
-See [`.env.example`](.env.example) for the complete reference including observability, fine-tuning, and rate limiting variables.
+See [`.env.example`](.env.example) for the complete reference including fine-tuning and rate limiting variables.
 
 ---
 
@@ -194,6 +203,12 @@ All routes are prefixed `/api/v1` and documented at `/docs`.
 | **Sessions** | `GET/POST /sessions` `GET/DELETE /sessions/{id}` `POST /sessions/{id}/messages` | Chat session history |
 | **History** | `GET /history` `DELETE /history` `GET /history/export` | Query history log |
 | **Saved Queries** | `GET/POST /saved-queries` `PATCH/DELETE /saved-queries/{id}` `POST /saved-queries/{id}/run` | Bookmarked queries |
+| **Query Templates** | `GET/POST /query-templates` `GET/PATCH/DELETE /query-templates/{id}` `POST /query-templates/{id}/render` | Parameterized NL+SQL templates with `{{placeholder}}` substitution |
+| **Glossary** | `GET/POST /glossary` `GET/PATCH/DELETE /glossary/{id}` | Business dictionary — terms injected into query prompts |
+| **Favorited Tables** | `GET/POST /favorited-tables` `DELETE /favorited-tables/{id}` | User-pinned tables with retrieval priority |
+| **Onboarding** | `GET/PATCH /onboarding` | Onboarding checklist state (7 items, progress %) |
+| **Tutorial** | `GET /tutorial/progress` `POST /tutorial/step/{step_id}/complete` `POST /tutorial/reset` | Step-by-step tutorial progress |
+| **Notification Prefs** | `GET/PATCH /notification-preferences` | Email digest, in-app alerts, marketing opt-ins |
 | **Analytics** | `GET /analytics/summary` `/popular-queries` `/failure-patterns` `/table-usage` `/intent-distribution` | Usage analytics |
 | **Training** | `GET /training/stats` `GET /training/export` `GET /training/download` | Fine-tuning data |
 | **Fine-tuning** | `POST /fine-tuning/prepare` `POST /fine-tuning/start` `GET /fine-tuning/status/{id}` `POST /fine-tuning/deploy` | LLM fine-tuning jobs |
@@ -214,7 +229,16 @@ backend/
 │   │   ├── app.py              # Application factory (lifespan, middleware, routers)
 │   │   ├── dependencies.py     # FastAPI dependency providers
 │   │   ├── middleware/         # Error handler, request logger, rate limiter
-│   │   └── routes/             # One module per route group (19 routers)
+│   │   └── routes/             # One module per route group (25 routers)
+│   │       ├── query.py            # Core NL→SQL + stream + explain + execute
+│   │       ├── auth.py             # Registration, login, OAuth, OTP
+│   │       ├── glossary.py         # Business dictionary CRUD
+│   │       ├── query_templates.py  # Parameterized template CRUD + render
+│   │       ├── favorited_tables.py # Pinned table management
+│   │       ├── onboarding.py       # Onboarding checklist state
+│   │       ├── tutorial.py         # Tutorial step progress
+│   │       ├── notification_prefs.py  # Notification preferences
+│   │       └── ...                 # 17 additional route modules
 │   ├── config/
 │   │   ├── settings.py         # Pydantic-settings, all env vars
 │   │   └── container.py        # dependency-injector ApplicationContainer
@@ -229,24 +253,27 @@ backend/
 │   │   ├── vector_store/       # Qdrant, Chroma, FAISS adapters
 │   │   ├── cache/              # Redis, in-memory, semantic cache
 │   │   ├── bm25_store.py       # BM25 index (rank-bm25)
-│   │   └── observability/      # OpenTelemetry setup
+│   │   └── observability/      # OpenTelemetry setup + LangFuse client
 │   ├── rag/
 │   │   ├── ingestion/          # Schema → chunks → embeddings → vector store
 │   │   └── retrieval/          # Query embed → BM25 + vector search → rerank → context
-│   ├── services/               # Business logic layer (26 service modules)
+│   ├── services/               # Business logic layer (26+ service modules)
 │   │   ├── query_orchestrator.py   # Top-level pipeline coordinator
 │   │   ├── sql_generator.py        # LLM prompting
 │   │   ├── sql_validator.py        # sqlglot validation + self-correction
 │   │   ├── auth_service.py         # JWT, OAuth, OTP
 │   │   ├── analytics_service.py
 │   │   ├── fine_tuning_service.py
-│   │   └── ...                     # 20+ more service modules
+│   │   └── ...
 │   └── workers/
 │       ├── retention_worker.py # Async background data retention enforcement
 │       └── purge_worker.py     # Expired record purge
 ├── alembic/
-│   └── versions/               # 0001_initial_schema, 0002_performance_indexes
-├── Dockerfile                  # Multi-stage build (builder + production)
+│   └── versions/
+│       ├── 0001_initial_schema.py
+│       ├── 0002_performance_indexes.py
+│       └── 0003_filter_column_indexes.py   # Indexes on deleted_at, status columns
+├── Dockerfile                  # Multi-stage build (python:3.13-slim)
 ├── docker-compose.yml          # API + Qdrant + Redis
 ├── pyproject.toml              # Hatchling build, Ruff, Mypy, pytest config
 └── .env.example                # Full environment variable reference
@@ -275,9 +302,10 @@ backend/
                     │  2. Vector search        │──┐
                     │  3. BM25 search          │  ├─► Cross-encoder rerank
                     │  4. FK graph expansion   │──┘
-                    │  5. Context builder      │
+                    │  5. Inject glossary      │
+                    │  6. Context builder      │
                     └────────────┬────────────┘
-                                 │ schema context
+                                 │ schema context + glossary
                     ┌────────────▼────────────┐
                     │  SQL Generator (LLM)    │
                     │  → sqlglot validate     │
@@ -289,13 +317,12 @@ backend/
 
 ## Observability
 
-The app ships with three optional observability integrations — all configured via env vars, none required in local dev:
+The app ships with optional observability integrations — all configured via env vars, none required in local dev:
 
 | Tool | Env vars | What it captures |
 |---|---|---|
 | **OpenTelemetry** | `OTEL_EXPORTER_OTLP_ENDPOINT` | Spans for every request, LLM call, DB query |
-| **LangSmith** | `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` | LLM trace / prompt diff |
-| **Arize Phoenix** | `PHOENIX_ACTIVE=true` + `PHOENIX_ENDPOINT` | LLM observability dashboard |
+| **LangFuse** | `LANGFUSE_SECRET_KEY` + `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_HOST` | LLM traces, generations, prompt diffs — singleton client flushed on shutdown |
 
 Structured JSON logs are written by `structlog` to stdout and an optional weekly-rotating log file (`APP_LOG_FILE`).
 
@@ -320,7 +347,7 @@ docker run --env-file .env -p 8000:8000 nl2sql-backend
 ### Scaling
 
 - **Stateless workers** — all state lives in PostgreSQL + Qdrant + Redis, so multiple API replicas work without coordination.
-- **Uvicorn workers** — set `--workers` in the `CMD` to match your vCPU count.
+- **Uvicorn workers** — set `WEB_CONCURRENCY` env var or `--workers` in the `CMD` to match your vCPU count.
 - **Vector store** — Qdrant supports horizontal scaling and cloud-hosted deployments.
 
 ---
