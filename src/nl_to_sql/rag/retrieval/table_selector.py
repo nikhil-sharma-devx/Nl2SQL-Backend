@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+
 import structlog
 
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider

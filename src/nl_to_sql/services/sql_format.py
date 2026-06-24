@@ -88,15 +88,15 @@ def _apply_keyword_case(sql: str, *, upper: bool) -> str:
     """Case SQL keywords using sqlglot's tokenizer, preserving string literals."""
     try:
         import sqlglot
-        from sqlglot.tokens import TokenType
+        from sqlglot.tokens import TokenType  # type: ignore[attr-defined]
 
-        _KEYWORD_TYPES = frozenset({
+        _keyword_types = frozenset({
             TokenType.SELECT, TokenType.FROM, TokenType.WHERE,
             TokenType.JOIN, TokenType.LEFT, TokenType.RIGHT, TokenType.INNER,
             TokenType.OUTER, TokenType.FULL, TokenType.CROSS, TokenType.ON,
             TokenType.AND, TokenType.OR, TokenType.NOT, TokenType.IN, TokenType.IS,
-            TokenType.NULL, TokenType.AS, TokenType.GROUP, TokenType.BY,
-            TokenType.ORDER, TokenType.HAVING, TokenType.LIMIT, TokenType.OFFSET,
+            TokenType.NULL, TokenType.ALIAS, TokenType.GROUP_BY, TokenType.ORDER_BY,
+            TokenType.HAVING, TokenType.LIMIT, TokenType.OFFSET,
             TokenType.WITH, TokenType.UNION, TokenType.INTERSECT, TokenType.EXCEPT,
             TokenType.DISTINCT, TokenType.ALL, TokenType.CASE, TokenType.WHEN,
             TokenType.THEN, TokenType.ELSE, TokenType.END, TokenType.BETWEEN,
@@ -114,7 +114,7 @@ def _apply_keyword_case(sql: str, *, upper: bool) -> str:
             end = token.end + 1
             parts.append(sql[prev_end:start])
             text = sql[start:end]
-            if token.token_type in _KEYWORD_TYPES:
+            if token.token_type in _keyword_types:
                 text = text.upper() if upper else text.lower()
             parts.append(text)
             prev_end = end

@@ -12,7 +12,7 @@ logger = structlog.get_logger(__name__)
 _SENTINEL = object()
 
 
-class InMemoryCache(ICache):
+class InMemoryCache(ICache):  # type: ignore[misc]
     """Thread-safe, TTL-aware in-memory cache.
 
     Designed for development and testing. No external dependencies.
@@ -31,6 +31,8 @@ class InMemoryCache(ICache):
             entry = self._store.get(key, _SENTINEL)
             if entry is _SENTINEL:
                 return None
+            value: Any
+            expires_at: float | None
             value, expires_at = entry  # type: ignore[misc]
             if expires_at is not None and time.monotonic() > expires_at:
                 del self._store[key]

@@ -1,13 +1,17 @@
 """Auth routes — register, login, Google sign-in, and current user."""
 from __future__ import annotations
 
-import re
+from datetime import UTC
+from typing import Any
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.models.auth import (
     ForgotPasswordRequest,
     GoogleAuthRequest,
@@ -27,6 +31,11 @@ from nl_to_sql.services.auth_service import (
     verify_password,
 )
 from nl_to_sql.services.chat_session_service import ChatSessionService
+
+# In-memory OTP failure counter keyed by email.
+# Safe for single-process deployments; move to Redis for multi-process.
+_otp_failures: dict[str, int] = {}
+_OTP_MAX_ATTEMPTS = 5
 
 logger = structlog.get_logger(__name__)
 
@@ -67,7 +76,7 @@ def _parse_ua(ua: str | None) -> tuple[str | None, str | None]:
 
 async def _record_login(
     user_id: str,
-    session_factory,
+    session_factory: Any,
     request: Request,
     outcome: str = "success",
 ) -> str | None:
@@ -123,19 +132,22 @@ def _build_token_response(user: User, session_id: str | None = None) -> TokenRes
     status_code=status.HTTP_202_ACCEPTED,
     summary="Register a new user and send OTP",
 )
+@limiter.limit("5/minute")
 async def register(
+    request: Request,
     body: UserCreate,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> dict[str, str]:
     """Create a new user account (unverified) and send an OTP."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
+
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
-    
+
     hashed = hash_password(body.password)
     otp = generate_otp()
     # Expire in 10 minutes
-    expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
-    
+    expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+
     new_user = User(
         email=body.email.lower().strip(),
         full_name=body.full_name,
@@ -150,25 +162,26 @@ async def register(
         async with session_service._session_factory() as db_sess:
             db_sess.add(new_user)
             await db_sess.flush()  # to get new_user.id
-            
+
             # Record initial password history
             pw_history = PasswordHistory(
                 user_id=new_user.id,
                 hashed_password=hashed
             )
             db_sess.add(pw_history)
-            
+
             await db_sess.commit()
             await db_sess.refresh(new_user)
     except IntegrityError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists",
-        )
+        ) from None
 
     # Send OTP asynchronously
     import asyncio
-    asyncio.create_task(send_otp_email(new_user.email, otp))
+    _bg = asyncio.create_task(send_otp_email(new_user.email, otp))
+    _bg.add_done_callback(lambda t: None)  # prevent GC
 
     logger.info("New user registered (unverified)", email=new_user.email, provider="email")
     return {"message": "OTP sent to email", "email": new_user.email}
@@ -179,6 +192,7 @@ async def register(
     response_model=TokenResponse,
     summary="Authenticate with email and password",
 )
+@limiter.limit("5/minute")
 async def login(
     request: Request,
     body: UserLogin,
@@ -221,6 +235,7 @@ async def login(
     response_model=TokenResponse,
     summary="Sign in or register via Google OAuth",
 )
+@limiter.limit("10/minute")
 async def google_auth(
     request: Request,
     body: GoogleAuthRequest,
@@ -233,6 +248,12 @@ async def google_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
+        ) from exc
+
+    if not claims.get("email_verified"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google email address is not verified.",
         )
 
     google_sub: str = claims["sub"]
@@ -294,41 +315,59 @@ async def get_me(
     response_model=TokenResponse,
     summary="Verify OTP and activate account",
 )
+@limiter.limit("3/minute")
 async def verify_otp(
     request: Request,
     body: OTPVerifyRequest,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> TokenResponse:
     """Verify an OTP and return a JWT."""
-    from datetime import datetime, timezone
-    
+    from datetime import datetime
+
+    email_key = body.email.lower().strip()
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
-            select(User).where(User.email == body.email.lower().strip())
+            select(User).where(User.email == email_key)
         )
         user = result.scalar_one_or_none()
-        
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-            
+
         if user.is_verified:
+            _otp_failures.pop(email_key, None)
             return _build_token_response(user)
-            
+
+        # Enforce attempt limit before checking the code
+        attempts = _otp_failures.get(email_key, 0)
+        if attempts >= _OTP_MAX_ATTEMPTS:
+            # Invalidate the OTP so attacker must request a new one
+            user.otp_code = None
+            user.otp_expires_at = None
+            await db_sess.commit()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed attempts. Request a new OTP.",
+            )
+
         if not user.otp_code or user.otp_code != body.otp_code:
+            _otp_failures[email_key] = attempts + 1
             raise HTTPException(status_code=400, detail="Invalid OTP code")
-            
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        now = datetime.now(UTC).replace(tzinfo=None)
         if user.otp_expires_at and now > user.otp_expires_at:
             raise HTTPException(status_code=400, detail="OTP code has expired")
-            
-        # Verify success
+
+        # Verify success — clear failure counter and OTP
+        _otp_failures.pop(email_key, None)
         user.is_verified = True
         user.otp_code = None
         user.otp_expires_at = None
-        
+
         await db_sess.commit()
         await db_sess.refresh(user)
-        
+
     session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
     logger.info("User verified via OTP", email=user.email)
     return _build_token_response(user, session_id=session_id)
@@ -339,38 +378,43 @@ async def verify_otp(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Resend verification OTP",
 )
+@limiter.limit("3/minute")
 async def resend_otp(
+    request: Request,
     body: OTPResendRequest,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> dict[str, str]:
     """Generate a new OTP and email it to the user."""
-    from datetime import datetime, timedelta, timezone
-    from nl_to_sql.services.auth_service import generate_otp, send_otp_email
     import asyncio
-    
+    from datetime import datetime, timedelta
+
+    from nl_to_sql.services.auth_service import generate_otp, send_otp_email
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
             select(User).where(User.email == body.email.lower().strip())
         )
         user = result.scalar_one_or_none()
-        
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-            
+
         if user.is_verified:
             raise HTTPException(status_code=400, detail="User is already verified")
-            
+
+        # Reset failure counter so the fresh OTP gets a clean slate
+        _otp_failures.pop(user.email.lower(), None)
         otp = generate_otp()
-        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
-        
+        expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+
         user.otp_code = otp
         user.otp_expires_at = expires_at
-        
+
         await db_sess.commit()
-        
-    # Send OTP asynchronously
-    asyncio.create_task(send_otp_email(user.email, otp))
-    
+
+    _bg = asyncio.create_task(send_otp_email(user.email, otp))
+    _bg.add_done_callback(lambda t: None)  # prevent GC
+
     logger.info("Resent OTP email", email=user.email)
     return {"message": "New OTP sent to email", "email": user.email}
 
@@ -380,35 +424,40 @@ async def resend_otp(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Initiate password reset flow",
 )
+@limiter.limit("3/minute")
 async def forgot_password(
+    request: Request,
     body: ForgotPasswordRequest,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> dict[str, str]:
     """Generate an OTP for password reset."""
-    from datetime import datetime, timedelta, timezone
-    from nl_to_sql.services.auth_service import generate_otp, send_otp_email
     import asyncio
-    
+    from datetime import datetime, timedelta
+
+    from nl_to_sql.services.auth_service import generate_otp, send_otp_email
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
             select(User).where(User.email == body.email.lower().strip())
         )
         user = result.scalar_one_or_none()
-        
-        # We always return success to prevent email enumeration, but we only send email if user exists
+
+        # Always return success to prevent email enumeration; only send if user exists
         if user and user.auth_provider == "email":
+            # Also reset the failure counter so a fresh OTP gets a clean slate
+            _otp_failures.pop(user.email.lower(), None)
             otp = generate_otp()
-            expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
-            
+            expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+
             user.otp_code = otp
             user.otp_expires_at = expires_at
-            
+
             await db_sess.commit()
-            
-            # Send OTP asynchronously
-            asyncio.create_task(send_otp_email(user.email, otp))
+
+            _bg = asyncio.create_task(send_otp_email(user.email, otp))
+            _bg.add_done_callback(lambda t: None)  # prevent GC
             logger.info("Forgot password OTP generated", email=user.email)
-            
+
     return {"message": "If that email exists, an OTP has been sent."}
 
 
@@ -417,30 +466,33 @@ async def forgot_password(
     response_model=TokenResponse,
     summary="Reset password with OTP",
 )
+@limiter.limit("3/minute")
 async def reset_password(
+    request: Request,
     body: ResetPasswordRequest,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> TokenResponse:
     """Validate OTP and set a new password, enforcing password history."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from nl_to_sql.infrastructure.database.models import PasswordHistory
-    
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
             select(User).where(User.email == body.email.lower().strip())
         )
         user = result.scalar_one_or_none()
-        
+
         if not user or user.auth_provider != "email":
             raise HTTPException(status_code=400, detail="Invalid request")
-            
+
         if not user.otp_code or user.otp_code != body.otp_code:
             raise HTTPException(status_code=400, detail="Invalid OTP code")
-            
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        now = datetime.now(UTC).replace(tzinfo=None)
         if user.otp_expires_at and now > user.otp_expires_at:
             raise HTTPException(status_code=400, detail="OTP code has expired")
-            
+
         # Check password history (last 3 passwords)
         result = await db_sess.execute(
             select(PasswordHistory)
@@ -449,37 +501,97 @@ async def reset_password(
             .limit(3)
         )
         history = result.scalars().all()
-        
+
         for record in history:
             if verify_password(body.new_password, record.hashed_password):
                 raise HTTPException(
-                    status_code=400, 
+                    status_code=400,
                     detail="Password must not be one of your last 3 passwords."
                 )
-                
+
         # Hash new password
         hashed = hash_password(body.new_password)
-        
+
         # Update user
         user.hashed_password = hashed
         user.otp_code = None
         user.otp_expires_at = None
-        
+
         # If they weren't verified, verify them now
         user.is_verified = True
-        
+
         # Insert new password history
         new_history = PasswordHistory(
             user_id=user.id,
             hashed_password=hashed
         )
         db_sess.add(new_history)
-        
+
         # Optional: delete history older than last 2 to keep table small (new one makes 3)
         # But we can just leave them or clean them up later
-        
+
         await db_sess.commit()
         await db_sess.refresh(user)
-        
+
     logger.info("User reset password", email=user.email)
     return _build_token_response(user)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_200_OK,
+    summary="Change password while authenticated",
+)
+@limiter.limit("5/minute")
+async def change_password(
+    request: Request,
+    body: ChangePasswordRequest,
+    current_user: UserPublic = Depends(get_current_user),
+    session_service: ChatSessionService = Depends(get_session_service),
+) -> dict[str, str]:
+    """Validate current password, enforce history, then update to the new password."""
+    from nl_to_sql.infrastructure.database.models import PasswordHistory
+
+    async with session_service._session_factory() as db_sess:
+        result = await db_sess.execute(select(User).where(User.id == current_user.id))
+        user = result.scalar_one_or_none()
+
+        if not user or not user.hashed_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password change is not available for this account type",
+            )
+
+        if not verify_password(body.current_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current password is incorrect",
+            )
+
+        # Check last 3 passwords
+        result = await db_sess.execute(
+            select(PasswordHistory)
+            .where(PasswordHistory.user_id == user.id)
+            .order_by(PasswordHistory.created_at.desc())
+            .limit(3)
+        )
+        history = result.scalars().all()
+        for record in history:
+            if verify_password(body.new_password, record.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Password must not be one of your last 3 passwords",
+                )
+
+        hashed = hash_password(body.new_password)
+        user.hashed_password = hashed
+        db_sess.add(PasswordHistory(user_id=user.id, hashed_password=hashed))
+        await db_sess.commit()
+
+    logger.info("User changed password", user_id=current_user.id)
+    return {"message": "Password updated successfully"}

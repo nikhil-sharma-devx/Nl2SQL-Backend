@@ -9,14 +9,14 @@ from datetime import datetime, timedelta
 
 import structlog
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, UserSettings
 
 logger = structlog.get_logger(__name__)
 
 
-async def run_retention_cleanup(session_factory: async_sessionmaker) -> dict:
+async def run_retention_cleanup(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
     """Run data retention cleanup for all users with non-forever settings."""
     purged_users = 0
     purged_messages = 0
@@ -42,7 +42,7 @@ async def run_retention_cleanup(session_factory: async_sessionmaker) -> dict:
 
 
 async def _purge_user_history(
-    user_id: str, retention: str, session_factory: async_sessionmaker
+    user_id: str, retention: str, session_factory: async_sessionmaker[AsyncSession]
 ) -> int:
     cutoff: datetime | None = None
     now = datetime.utcnow()
@@ -57,18 +57,16 @@ async def _purge_user_history(
         return 0
 
     async with session_factory() as db:
-        r = await db.execute(select(ChatSession.id).where(ChatSession.user_id == user_id))
-        session_ids = [row[0] for row in r.all()]
-
-        if not session_ids:
-            return 0
-
         result = await db.execute(
             delete(ChatMessage)
-            .where(ChatMessage.session_id.in_(session_ids))
+            .where(
+                ChatMessage.session_id.in_(
+                    select(ChatSession.id).where(ChatSession.user_id == user_id)
+                )
+            )
             .where(ChatMessage.timestamp < cutoff)
         )
-        count = result.rowcount
+        count: int = result.rowcount  # type: ignore[attr-defined]
         await db.commit()
 
     if count > 0:

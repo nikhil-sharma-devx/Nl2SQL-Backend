@@ -12,6 +12,8 @@ columns (never drops or retypes), so it is safe to run on every startup.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from sqlalchemy import Column, inspect, text
 from sqlalchemy.engine import Connection
@@ -22,7 +24,7 @@ from nl_to_sql.infrastructure.database.models import Base
 logger = structlog.get_logger(__name__)
 
 
-def _literal_default(column: Column) -> str | None:
+def _literal_default(column: Column[Any]) -> str | None:
     """Return a SQL literal for a NOT NULL column's default, or None if not derivable."""
     server_default = column.server_default
     if server_default is not None:

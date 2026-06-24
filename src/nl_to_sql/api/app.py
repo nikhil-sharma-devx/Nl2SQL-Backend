@@ -1,15 +1,21 @@
 """FastAPI application factory."""
 import asyncio
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 import logging
 import logging.handlers
-from pathlib import Path
 import sys
+import warnings
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 import structlog
 import structlog.stdlib
 from fastapi import FastAPI
+
+# Set of strong references to fire-and-forget background tasks.
+# Prevents garbage collection before the task completes (RUF006).
+_background_tasks: set[asyncio.Task[None]] = set()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -29,17 +35,22 @@ from nl_to_sql.api.routes import (
     auth_sessions,
     config,
     data,
+    favorited_tables,
     feedback,
     fine_tuning,
+    glossary,
     health,
     history,
     instructions,
+    notification_prefs,
     profile,
     query,
+    query_templates,
     saved_queries,
     schema,
     sessions,
     training,
+    tutorial,
     usage,
     user_settings,
 )
@@ -78,15 +89,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         return_exceptions=True,
     )
     _log = structlog.get_logger()
-    for name, result in zip(("analytics", "feedback", "training", "api_key", "user_db"), opt_results):
+    for name, result in zip(
+        ("analytics", "feedback", "training", "api_key", "user_db"),
+        opt_results,
+        strict=True,
+    ):
         if isinstance(result, Exception):
             _log.warning(f"Failed to initialize {name} service", error=str(result))
 
     # Auto-ingest schema from live database on startup
+    settings = get_settings()
     try:
-        settings = get_settings()
         if settings.auto_ingest_schema_on_startup:
-            async def _auto_ingest_workflow():
+            async def _auto_ingest_workflow() -> None:
                 try:
                     structlog.get_logger().info("Starting automatic schema ingestion from live database")
                     db_client = container.db_client()
@@ -142,18 +157,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                             )
 
                     if should_ingest:
-                        structlog.get_logger().info("Starting background schema ingestion...")
-                        chunk_count = await ingestion_service.ingest(schema_metadata, reset=True)
-                        structlog.get_logger().info(
-                            "Background schema ingestion complete",
-                            tables_ingested=len(schema_metadata.tables),
-                            chunks_ingested=chunk_count
-                        )
+                        # Acquire a PostgreSQL advisory lock so only one worker performs
+                        # the expensive delete+re-ingest when WEB_CONCURRENCY > 1.
+                        lock_acquired = False
+                        try:
+                            from sqlalchemy import text as _text
+                            async with db_client.session() as _lock_session:
+                                _result = await _lock_session.execute(
+                                    _text("SELECT pg_try_advisory_lock(hashtext('nl2sql_startup_ingest'))")
+                                )
+                                lock_acquired = bool(_result.scalar())
+                        except Exception:
+                            lock_acquired = True  # Non-PostgreSQL or lock unavailable — proceed anyway
+
+                        if not lock_acquired:
+                            structlog.get_logger().info(
+                                "Another worker is already ingesting schema on startup — skipping"
+                            )
+                        else:
+                            try:
+                                structlog.get_logger().info("Starting background schema ingestion...")
+                                chunk_count = await ingestion_service.ingest(schema_metadata, reset=True)
+                                structlog.get_logger().info(
+                                    "Background schema ingestion complete",
+                                    tables_ingested=len(schema_metadata.tables),
+                                    chunks_ingested=chunk_count
+                                )
+                            finally:
+                                try:
+                                    from sqlalchemy import text as _text
+                                    async with db_client.session() as _lock_session:
+                                        await _lock_session.execute(
+                                            _text("SELECT pg_advisory_unlock(hashtext('nl2sql_startup_ingest'))")
+                                        )
+                                except Exception:
+                                    pass
                 except Exception as e:
                     structlog.get_logger().error("Background schema ingestion failed", error=str(e))
-            
+
             # Run the entire workflow in the background to avoid blocking API startup
-            asyncio.create_task(_auto_ingest_workflow())
+            _task = asyncio.create_task(_auto_ingest_workflow())
+            _background_tasks.add(_task)
+            _task.add_done_callback(_background_tasks.discard)
         else:
             structlog.get_logger().info("Auto-ingest schema on startup is disabled")
     except Exception as exc:
@@ -164,13 +209,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Start schema monitor in background to avoid blocking API startup
     if settings.schema_monitor_enabled:
-        async def _start_monitor():
+        async def _start_monitor() -> None:
             try:
                 schema_monitor = container.schema_monitor()
                 await schema_monitor.start()
             except Exception as exc:
                 structlog.get_logger().warning("Failed to start schema monitor", error=str(exc))
-        asyncio.create_task(_start_monitor())
+        _task = asyncio.create_task(_start_monitor())
+        _background_tasks.add(_task)
+        _task.add_done_callback(_background_tasks.discard)
 
     yield
 
@@ -191,6 +238,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         return_exceptions=True,
     )
 
+    # Flush any pending Langfuse events before the process exits
+    from nl_to_sql.infrastructure.observability.langfuse_client import flush_langfuse
+    flush_langfuse()
+
 
 class WeeklyRotatingFileHandler(logging.FileHandler):
     """File handler that rotates weekly and flushes after every record.
@@ -207,7 +258,7 @@ class WeeklyRotatingFileHandler(logging.FileHandler):
         self.current_week_start = None
         super().__init__(self._get_filepath(), encoding=encoding, delay=False)
 
-    def _week_range(self, date_val):
+    def _week_range(self, date_val: Any) -> tuple[Any, Any]:
         from datetime import timedelta
         start = date_val - timedelta(days=date_val.weekday())
         end = start + timedelta(days=6)
@@ -251,6 +302,14 @@ def configure_logging(log_level: str = "INFO", log_file: str | None = None, is_p
       - Everything: structlog JSON events + uvicorn access/error lines.
       - Flushed immediately after every record so the file is always current.
     """
+    # fastembed calls enable_progress_bars() internally; when HF_HUB_DISABLE_PROGRESS_BARS=1
+    # is set in the environment huggingface_hub emits a UserWarning that bypasses logging.
+    warnings.filterwarnings(
+        "ignore",
+        message="Cannot enable progress bars",
+        category=UserWarning,
+        module="huggingface_hub",
+    )
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
 
     # ── Root logger ─────────────────────────────────────────────────────────
@@ -320,12 +379,19 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.app_log_level, settings.app_log_file, settings.is_production)
 
-    # ── Observability: LangSmith, OpenTelemetry & Arize Phoenix ─────────────
-    if settings.langsmith_tracing and settings.langsmith_api_key:
+    # ── Observability: Langfuse, OpenTelemetry & Arize Phoenix ──────────────
+    if settings.langfuse_enabled and settings.langfuse_secret_key and settings.langfuse_public_key:
         import os
-        os.environ["LANGCHAIN_TRACING_V2"] = "true"
-        os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
-        os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project
+        # Set env vars so langfuse.decorators @observe picks them up automatically
+        os.environ["LANGFUSE_SECRET_KEY"] = settings.langfuse_secret_key
+        os.environ["LANGFUSE_PUBLIC_KEY"] = settings.langfuse_public_key
+        os.environ["LANGFUSE_HOST"] = settings.langfuse_base_url
+        from nl_to_sql.infrastructure.observability.langfuse_client import initialize_langfuse
+        initialize_langfuse(
+            secret_key=settings.langfuse_secret_key,
+            public_key=settings.langfuse_public_key,
+            host=settings.langfuse_base_url,
+        )
 
     trace_endpoint = settings.otel_exporter_otlp_endpoint
     if not trace_endpoint and settings.phoenix_active:
@@ -361,6 +427,11 @@ def create_app() -> FastAPI:
         "nl_to_sql.api.routes.data",
         "nl_to_sql.api.routes.account",
         "nl_to_sql.api.routes.auth_sessions",
+        "nl_to_sql.api.routes.query_templates",
+        "nl_to_sql.api.routes.favorited_tables",
+        "nl_to_sql.api.routes.glossary",
+        "nl_to_sql.api.routes.tutorial",
+        "nl_to_sql.api.routes.notification_prefs",
     ])
 
     app = FastAPI(
@@ -375,6 +446,10 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
         lifespan=lifespan,
     )
+
+    @app.get("/health", tags=["Health"], summary="Liveness probe at root")
+    async def root_health() -> dict[str, Any]:
+        return {"status": "ok", "environment": settings.app_env}
 
     if trace_endpoint or settings.otel_console_exporter:
         from nl_to_sql.infrastructure.observability.tracing import instrument_app
@@ -432,6 +507,12 @@ def create_app() -> FastAPI:
     app.include_router(data.router)
     app.include_router(account.router)
     app.include_router(auth_sessions.router)
+    # Phase 2 feature routers
+    app.include_router(query_templates.router)
+    app.include_router(favorited_tables.router)
+    app.include_router(glossary.router)
+    app.include_router(tutorial.router)
+    app.include_router(notification_prefs.router)
 
     structlog.get_logger(__name__).info(
         "Application created",

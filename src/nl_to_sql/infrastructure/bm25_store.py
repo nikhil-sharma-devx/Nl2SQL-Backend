@@ -21,13 +21,13 @@ class BM25Store:
 
     def __init__(self, index_path: str = "./data/bm25_index.pkl") -> None:
         self._index_path = index_path
-        self._cached_data: tuple | None = None
+        self._cached_data: tuple[Any, ...] | None = None
 
     def save(
         self,
         bm25_index: Any,
         corpus: list[list[str]],
-        chunk_metadata: list[dict],
+        chunk_metadata: list[dict[str, Any]],
     ) -> None:
         """Persist the BM25 index, corpus, and metadata to disk.
 
@@ -57,7 +57,7 @@ class BM25Store:
             chunk_count=len(chunk_metadata),
         )
 
-    def load(self) -> tuple | None:
+    def load(self) -> tuple[Any, ...] | None:
         """Load the BM25 index from disk.
 
         Returns:
@@ -73,7 +73,7 @@ class BM25Store:
 
         try:
             with open(self._index_path, "rb") as f:
-                data = pickle.load(f)
+                data = pickle.load(f)  # noqa: S301 — index is self-generated, not user input
 
             self._cached_data = (
                 data["bm25"],

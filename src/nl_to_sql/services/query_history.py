@@ -1,17 +1,16 @@
 """Query history service — persistent database-backed storage for query responses."""
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, TypedDict
 from uuid import UUID
-
-import asyncio
 
 import structlog
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nl_to_sql.core.models.query import QueryResponse
-from nl_to_sql.infrastructure.database.models import Base, QueryHistoryRecord
+from nl_to_sql.infrastructure.database.models import QueryHistoryRecord
 from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
@@ -48,8 +47,8 @@ class QueryHistoryService:
             database_url,
             echo=False,
             pool_pre_ping=False,
-            pool_size=3,
-            max_overflow=3,
+            pool_size=2,
+            max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
             connect_args={"command_timeout": 30},
@@ -211,7 +210,7 @@ class QueryHistoryService:
         async with self._session_factory() as session:
             result = await session.execute(delete(QueryHistoryRecord))
             await session.commit()
-            self._logger.info("History cleared", deleted_count=result.rowcount)
+            self._logger.info("History cleared", deleted_count=result.rowcount)  # type: ignore[attr-defined]
 
     async def count(self) -> int:
         """Return total number of history entries.

@@ -1,5 +1,4 @@
 """Prompt Manager — Manages prompt versions for A/B testing."""
-import hashlib
 import random
 import time
 from dataclasses import dataclass, field
@@ -85,7 +84,7 @@ class PromptManager:
 
         if self._ab_testing_enabled and len(active_templates) > 1:
             # Random selection for A/B testing
-            selected = random.choice(active_templates)
+            selected = random.choice(active_templates)  # noqa: S311 — A/B test, not security
             self._logger.debug(
                 "A/B test: selected template",
                 version=selected.version,

@@ -5,8 +5,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from nl_to_sql.infrastructure.database.models import Base, FeedbackRecord
-from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
+from nl_to_sql.infrastructure.database.models import FeedbackRecord
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
 logger = structlog.get_logger(__name__)
@@ -31,8 +30,8 @@ class FeedbackService:
             database_url,
             echo=False,
             pool_pre_ping=False,
-            pool_size=2,
-            max_overflow=2,
+            pool_size=1,
+            max_overflow=0,
             pool_recycle=300,
         )
         self._session_factory = async_sessionmaker(
@@ -82,7 +81,7 @@ class FeedbackService:
                 feedback_type=feedback_type,
             )
 
-            return record.id
+            return int(record.id)
 
     async def get_feedback_summary(self, days: int = 30) -> dict[str, Any]:
         """Get summary of feedback received.
@@ -94,6 +93,7 @@ class FeedbackService:
             Dictionary with feedback statistics.
         """
         from datetime import datetime, timedelta
+
         from sqlalchemy import func
 
         cutoff = datetime.utcnow() - timedelta(days=days)

@@ -1,10 +1,10 @@
 """F3 - Saved Queries routes (CRUD + run)."""
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from nl_to_sql.api.dependencies import get_current_user, get_session_service
@@ -19,27 +19,27 @@ router = APIRouter(prefix="/api/v1", tags=["Saved Queries"])
 
 class SavedQueryOut(BaseModel):
     id: int
-    title: Optional[str]
+    title: str | None
     nl_prompt: str
     generated_sql: str
-    dialect: Optional[str]
+    dialect: str | None
     starred: bool
-    last_run_at: Optional[datetime]
+    last_run_at: datetime | None
     run_count: int
     created_at: datetime
     updated_at: datetime
 
 
 class SavedQueryCreate(BaseModel):
-    title: Optional[str] = None
+    title: str | None = None
     nl_prompt: str
     generated_sql: str
-    dialect: Optional[str] = None
+    dialect: str | None = None
 
 
 class SavedQueryPatch(BaseModel):
-    title: Optional[str] = None
-    starred: Optional[bool] = None
+    title: str | None = None
+    starred: bool | None = None
 
 
 class SavedQueryListResponse(BaseModel):
@@ -64,8 +64,8 @@ def _to_out(q: SavedQuery) -> SavedQueryOut:
 
 @router.get("/saved-queries", response_model=SavedQueryListResponse, summary="List saved queries")
 async def list_saved_queries(
-    search: Optional[str] = Query(default=None, description="Search in title and nl_prompt"),
-    starred: Optional[bool] = Query(default=None),
+    search: str | None = Query(default=None, description="Search in title and nl_prompt"),
+    starred: bool | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
@@ -174,7 +174,7 @@ async def run_saved_query(
     query_id: int,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-) -> dict:
+) -> dict[str, Any]:
     """Increment run count and record last_run_at. Full re-execution is Phase 2."""
     async with session_service._session_factory() as db:
         result = await db.execute(

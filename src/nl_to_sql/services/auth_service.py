@@ -1,7 +1,8 @@
 """Authentication service — password hashing, JWT generation, Google token verification."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import bcrypt
 import structlog
@@ -46,16 +47,16 @@ def create_access_token(user_id: str, email: str, session_id: str | None = None)
         A signed JWT string.
     """
     settings = get_settings()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
-    payload: dict = {
+    expire = datetime.now(UTC) + timedelta(minutes=settings.jwt_expire_minutes)
+    payload: dict[str, Any] = {
         "sub": user_id,
         "email": email,
         "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "iat": datetime.now(UTC),
     }
     if session_id:
         payload["sid"] = session_id
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    return str(jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm))
 
 
 def decode_access_token(token: str) -> TokenData:
@@ -81,7 +82,7 @@ def decode_access_token(token: str) -> TokenData:
 
 # ── Google Token Verification ─────────────────────────────────────────────────
 
-async def verify_google_token(credential: str) -> dict:
+async def verify_google_token(credential: str) -> dict[str, Any]:
     """Verify a Google ID token and return the decoded claims.
 
     Args:
@@ -101,7 +102,7 @@ async def verify_google_token(credential: str) -> dict:
         raise ValueError("GOOGLE_CLIENT_ID is not configured on the server")
 
     try:
-        idinfo = google_id_token.verify_oauth2_token(
+        idinfo = google_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
             credential,
             google_requests.Request(),
             settings.google_client_id,
@@ -109,6 +110,7 @@ async def verify_google_token(credential: str) -> dict:
         return {
             "sub": idinfo["sub"],
             "email": idinfo["email"],
+            "email_verified": idinfo.get("email_verified", False),
             "name": idinfo.get("name"),
             "picture": idinfo.get("picture"),
         }
@@ -127,38 +129,35 @@ def generate_otp() -> str:
 
 async def send_otp_email(to_email: str, otp: str) -> None:
     """Send an OTP email using configured SMTP settings.
-    
+
     Args:
         to_email: The recipient's email address.
         otp: The 6-digit OTP code.
     """
-    import aiosmtplib
     from email.message import EmailMessage
 
+    import aiosmtplib
+
     settings = get_settings()
-    
+
     if not settings.smtp_username or not settings.smtp_password:
         logger.warning(
-            "SMTP credentials not configured. OTP printed to console only.",
-            otp=otp,
-            to_email=to_email
+            "SMTP credentials not configured — OTP generated but not sent.",
+            to_email=to_email,
         )
-        print(f"\n======================================")
-        print(f"OTP for {to_email}: {otp}")
-        print(f"======================================\n")
         return
 
     msg = EmailMessage()
     msg["Subject"] = "Your Verification Code"
     msg["From"] = settings.smtp_from_email
     msg["To"] = to_email
-    
+
     msg.set_content(f"""
 Hello,
 
 Your verification code is: {otp}
 
-This code will expire in 10 minutes. 
+This code will expire in 10 minutes.
 If you did not request this, please ignore this email.
 
 Thanks,
@@ -178,6 +177,3 @@ NL-to-SQL RAG Team
         logger.info("OTP email sent successfully", to_email=to_email)
     except Exception as exc:
         logger.error("Failed to send OTP email", error=str(exc), to_email=to_email)
-        # We don't raise here to allow development mode without crashing if SMTP fails,
-        # but in production you might want to surface this error.
-        print(f"\nFailed to send email. OTP was: {otp}\n")

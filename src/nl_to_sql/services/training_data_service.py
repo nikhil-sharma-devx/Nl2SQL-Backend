@@ -6,8 +6,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from nl_to_sql.infrastructure.database.models import Base, TrainingDataRecord
-from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
+from nl_to_sql.infrastructure.database.models import TrainingDataRecord
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
 logger = structlog.get_logger(__name__)
@@ -33,8 +32,8 @@ class TrainingDataService:
             database_url,
             echo=False,
             pool_pre_ping=False,
-            pool_size=2,
-            max_overflow=2,
+            pool_size=1,
+            max_overflow=0,
             pool_recycle=300,
         )
         self._session_factory = async_sessionmaker(
@@ -93,7 +92,7 @@ class TrainingDataService:
                     intent_type=intent_type,
                 )
 
-                return record.id
+                return int(record.id)
 
         except Exception as exc:
             self._logger.warning(
@@ -157,7 +156,7 @@ class TrainingDataService:
                     .where(TrainingDataRecord.id.in_(ids))
                     .values(used_for_training=True)
                 )
-                count = result.rowcount
+                count: int = result.rowcount  # type: ignore[attr-defined]
                 await session.commit()
                 self._logger.info("Training data marked as used", count=count)
                 return count
@@ -299,6 +298,22 @@ class TrainingDataService:
                 "avg_success_score": 0.0,
                 "intent_distribution": {},
             }
+
+    async def get_recent_examples(self, limit: int = 2) -> list[dict[str, Any]]:
+        """Fetch recent high-quality Q&A pairs for use as dynamic few-shot prompts."""
+        try:
+            async with self._session_factory() as session:
+                result = await session.execute(
+                    select(TrainingDataRecord)
+                    .where(TrainingDataRecord.success_score >= 0.9)
+                    .order_by(TrainingDataRecord.created_at.desc())
+                    .limit(limit)
+                )
+                records = result.scalars().all()
+                return [{"question": r.question, "sql": r.sql} for r in records]
+        except Exception as exc:
+            self._logger.warning("Failed to get few-shot examples", error=str(exc))
+            return []
 
     async def dispose(self) -> None:
         """Close database connections."""

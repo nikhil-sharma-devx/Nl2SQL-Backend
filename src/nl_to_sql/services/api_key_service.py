@@ -7,7 +7,12 @@ from datetime import datetime
 import structlog
 from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from nl_to_sql.infrastructure.database.models import Base, UserAPIKey
 
@@ -31,31 +36,40 @@ def _make_fernet(secret_key: str) -> Fernet:
 class APIKeyService:
     """Stores and retrieves per-user LLM API keys encrypted with Fernet symmetric encryption."""
 
-    def __init__(self, database_url: str, secret_key: str) -> None:
-        self._database_url = _to_async_url(database_url)
+    def __init__(
+        self,
+        secret_key: str,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+        database_url: str | None = None,
+    ) -> None:
         self._fernet = _make_fernet(secret_key)
-        self._engine = None
-        self._session_factory = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = session_factory
+        self._database_url = _to_async_url(database_url) if database_url else None
+        self._engine: AsyncEngine | None = None
+        self._owns_engine = session_factory is None
 
     async def initialize(self) -> None:
-        self._engine = create_async_engine(
-            self._database_url,
-            pool_pre_ping=False,
-            pool_size=2,
-            max_overflow=3,
-            pool_recycle=300,
-        )
-        self._session_factory = async_sessionmaker(
-            self._engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-        )
-        async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        if self._owns_engine:
+            if not self._database_url:
+                raise RuntimeError("APIKeyService requires either session_factory or database_url")
+            self._engine = create_async_engine(
+                self._database_url,
+                pool_pre_ping=False,
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=300,
+            )
+            self._session_factory = async_sessionmaker(
+                self._engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+            async with self._engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
         logger.info("APIKeyService initialized")
 
     async def dispose(self) -> None:
-        if self._engine:
+        if self._owns_engine and self._engine:
             await self._engine.dispose()
 
     async def _encrypt(self, value: str) -> str:
@@ -70,6 +84,8 @@ class APIKeyService:
 
     async def save_key(self, user_id: str, provider: str, api_key: str) -> None:
         """Store (or update) an encrypted API key for a user+provider pair."""
+        if self._session_factory is None:
+            raise RuntimeError("APIKeyService.initialize() must be called before use")
         encrypted = await self._encrypt(api_key)
         now = datetime.utcnow()
         async with self._session_factory() as sess:
@@ -113,6 +129,8 @@ class APIKeyService:
 
     async def delete_key(self, user_id: str, provider: str) -> None:
         """Remove a stored API key for a user+provider pair."""
+        if self._session_factory is None:
+            raise RuntimeError("APIKeyService.initialize() must be called before use")
         async with self._session_factory() as sess:
             await sess.execute(
                 delete(UserAPIKey).where(

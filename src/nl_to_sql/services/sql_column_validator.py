@@ -14,7 +14,6 @@ SOLID:
   D — Depends on schema context (no database connection needed)
 """
 import re
-from typing import Any
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -96,12 +95,12 @@ class SQLColumnValidator:
                 sql=sql[:100],
             )
             # Don't fail validation on parse errors — let other validators handle it
-            errors.append(f"SQL parse error: {str(exc)}")
+            errors.append(f"SQL parse error: {exc!s}")
 
         return errors
 
     def _extract_column_references(
-        self, parsed: exp.Expression
+        self, parsed: exp.Expr
     ) -> list[tuple[str | None, str]]:
         """Extract all table.column references from parsed SQL.
 
@@ -125,7 +124,7 @@ class SQLColumnValidator:
     def _resolve_alias(
         self,
         alias: str | None,
-        parsed: exp.Expression,
+        parsed: exp.Expr,
     ) -> str | None:
         """Resolve table alias to actual table name.
 

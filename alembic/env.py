@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Make src importable when running alembic from the backend/ root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from nl_to_sql.infrastructure.database.models import Base  # noqa: E402
+from nl_to_sql.infrastructure.database.models import Base
 
 config = context.config
 if config.config_file_name is not None:

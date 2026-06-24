@@ -1,6 +1,8 @@
 """Profile routes — manage per-user LLM API keys (BYOK) and database connections (BYOD)."""
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -22,7 +24,7 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/profile", tags=["Profile"])
 
-SUPPORTED_PROVIDERS: dict[str, dict] = {
+SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
     "groq": {
         "label": "Groq (Llama)",
         "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
@@ -45,7 +47,7 @@ def _mask_key(key: str) -> str:
     return "****"
 
 
-def _get_api_key_service():
+def _get_api_key_service() -> Any:
     """Access the API key service from the DI container, returning None if unavailable."""
     try:
         from nl_to_sql.api.dependencies import _get_container
@@ -281,7 +283,7 @@ def _mask_url(url: str) -> str:
     return re.sub(r"(:)[^:@]+(@)", r"\1***\2", url)
 
 
-def _get_user_db_service():
+def _get_user_db_service() -> Any:
     try:
         from nl_to_sql.api.dependencies import _get_container
         return _get_container().user_db_service()
@@ -320,9 +322,10 @@ async def save_database_connection(
     body: SaveDatabaseRequest,
     current_user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConnectionSaveResponse:
-    from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
-    from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
     from sqlalchemy import text
+
+    from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+    from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
     raw = body.database_url.strip()
     if not raw:
@@ -342,9 +345,10 @@ async def save_database_connection(
             detail="Invalid connection string format. Check host, port, username and password.",
         ) from exc
     except Exception as exc:
+        logger.warning("Database connection test failed", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not connect to database: {exc}",
+            detail="Could not connect to the database. Check your credentials and host.",
         ) from exc
 
     svc = _get_user_db_service()

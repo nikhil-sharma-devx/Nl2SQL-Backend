@@ -43,6 +43,7 @@ dependencies = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
+    "langfuse>=2.0.0",
 
     # Configuration
     "pydantic[email]>=2.7.0",
@@ -93,13 +94,30 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP", "N", "ANN", "S", "RUF"]
-ignore = ["ANN101", "ANN102", "S101"]
+ignore = [
+    "S101",    # assert used (tests)
+    "E501",    # line too long — string literals, prompts, log messages
+    "ANN401",  # Any type — needed for dynamic plugin/cache APIs
+    "ANN001",  # missing arg type — incremental typing improvement
+    "ANN201",  # missing public return type — incremental
+    "ANN202",  # missing private return type — incremental
+    "S110",    # try-except-pass — intentional silent catches
+    "E402",    # module-level import not at top — deferred imports for startup speed
+    "RUF001",  # ambiguous unicode char in string
+    "RUF002",  # ambiguous unicode char in docstring (em dashes)
+    "S105",    # hardcoded password string — false positive on config key names
+    "S106",    # hardcoded password func arg — false positive
+    "N814",    # camelcase imported as constant
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["nl_to_sql"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S"]
+"**/api/routes/**" = ["B008"]
+"**/api/dependencies.py" = ["B008"]
+"**/api/middleware/**" = ["B008"]
 
 # ── Mypy ─────────────────────────────────────────────────────────────────────
 [tool.mypy]

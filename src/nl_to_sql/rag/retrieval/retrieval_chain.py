@@ -1,7 +1,7 @@
-"""Retrieval chain — composes the full online retrieval pipeline.
+﻿"""Retrieval chain â€” composes the full online retrieval pipeline.
 
 This is the ONLY file that services/ needs to import from rag/retrieval/.
-Composes: embed → vector search + BM25 search (parallel) → rerank → build context.
+Composes: embed â†’ vector search + BM25 search (parallel) â†’ rerank â†’ build context.
 """
 import asyncio
 
@@ -10,11 +10,11 @@ import structlog
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaChunk
+from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.context_builder import ContextBuilder
 from nl_to_sql.rag.retrieval.query_embedder import QueryEmbedder
 from nl_to_sql.rag.retrieval.reranker import Reranker
 from nl_to_sql.rag.retrieval.vector_retriever import VectorRetriever
-from nl_to_sql.infrastructure.observability.tracing import trace_function, set_span_attribute
 
 logger = structlog.get_logger(__name__)
 
@@ -32,8 +32,8 @@ class RetrievalChain:
     should import.
 
     SOLID:
-      S — Only orchestrates retrieval; does not generate SQL or call the LLM.
-      D — Depends on abstractions (IEmbedder, IVectorStore).
+      S â€” Only orchestrates retrieval; does not generate SQL or call the LLM.
+      D â€” Depends on abstractions (IEmbedder, IVectorStore).
     """
 
     def __init__(
@@ -109,19 +109,22 @@ class RetrievalChain:
 
         if self._bm25_retriever is not None and self._bm25_enabled:
             # Run in parallel
-            dense_chunks, sparse_chunks_result = await asyncio.gather(
+            _gather_results = await asyncio.gather(
                 dense_task,
                 asyncio.to_thread(self._bm25_retriever.retrieve, question),
                 return_exceptions=True,
             )
+            _dense_result = _gather_results[0]
+            _sparse_result = _gather_results[1]
             # Handle potential exceptions from parallel tasks
-            if isinstance(dense_chunks, Exception):
-                raise dense_chunks
-            if isinstance(sparse_chunks_result, Exception):
-                log.warning("BM25 search failed", error=str(sparse_chunks_result))
+            if isinstance(_dense_result, BaseException):
+                raise _dense_result
+            dense_chunks = _dense_result
+            if isinstance(_sparse_result, BaseException):
+                log.warning("BM25 search failed", error=str(_sparse_result))
                 sparse_chunks = None
             else:
-                sparse_chunks = sparse_chunks_result
+                sparse_chunks = _sparse_result
         else:
             dense_chunks = await dense_task
 
@@ -141,7 +144,7 @@ class RetrievalChain:
             tables=[c.table_name for c in reranked],
         )
         set_span_attribute("retrieval.results_count", len(reranked))
-        return reranked
+        return reranked  # type: ignore[no-any-return]
 
     def build_context(self, chunks: list[SchemaChunk]) -> str:
         """Format retrieved chunks into LLM context string.
@@ -152,7 +155,7 @@ class RetrievalChain:
         Returns:
             Formatted schema context string.
         """
-        return self._context_builder.build(chunks)
+        return self._context_builder.build(chunks)  # type: ignore[no-any-return]
 
     async def get_schema_for_tables(
         self,
@@ -162,8 +165,8 @@ class RetrievalChain:
 
         Used in Phase C of two-phase schema grounding.
         """
-        return await self._vector_retriever.get_schema_for_tables(table_names)
+        return await self._vector_retriever.get_schema_for_tables(table_names)  # type: ignore[no-any-return]
 
     async def get_all_table_names(self) -> list[str]:
         """Return all table names in the vector store."""
-        return await self._vector_retriever.get_all_table_names()
+        return await self._vector_retriever.get_all_table_names()  # type: ignore[no-any-return]

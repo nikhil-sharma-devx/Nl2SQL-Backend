@@ -54,7 +54,7 @@ class SQLExplanationService:
                 max_tokens=512,
             )
 
-            explanation = response.content.strip()
+            explanation = str(response.content).strip()
             log.info("SQL explanation generated", explanation_length=len(explanation))
             return explanation
 

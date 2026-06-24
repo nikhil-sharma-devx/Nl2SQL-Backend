@@ -1,4 +1,6 @@
 """Pydantic models for SQL generation results and validation."""
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -44,5 +46,5 @@ class GeneratedSQL(BaseModel):
         default=1,
         description="Which retry attempt produced this result (1-indexed).",
     )
-    suggested_chart: dict | None = Field(default=None)
+    suggested_chart: dict[str, Any] | None = Field(default=None)
     follow_up_questions: list[str] = Field(default_factory=list)

@@ -2,6 +2,7 @@
 import asyncio
 import os
 import tempfile
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,7 +21,11 @@ router = APIRouter(prefix="/api/v1/data", tags=["Data"])
 
 # Temp directory where export ZIPs are stored until downloaded
 _EXPORT_DIR = os.path.join(tempfile.gettempdir(), "nl2sql_exports")
-os.makedirs(_EXPORT_DIR, exist_ok=True)
+os.makedirs(_EXPORT_DIR, mode=0o700, exist_ok=True)
+try:
+    os.chmod(_EXPORT_DIR, 0o700)
+except OSError:
+    pass
 
 
 class ExportJobResponse(BaseModel):
@@ -44,7 +49,8 @@ async def request_export(
         job_id = job.id
 
     # Launch background export
-    asyncio.create_task(_run_export(job_id, current_user.id, session_service._session_factory))
+    _task = asyncio.create_task(_run_export(job_id, current_user.id, session_service._session_factory))
+    _task.add_done_callback(lambda t: None)  # prevent GC
     logger.info("export job queued", job_id=job_id, user_id=current_user.id)
 
     return ExportJobResponse(job_id=job_id, status="queued")
@@ -102,6 +108,13 @@ async def download_export(
     if not os.path.exists(job.artifact_path):
         raise HTTPException(status_code=410, detail="Export file has expired. Please request a new export.")
 
+    from pathlib import Path
+    export_dir = Path(_EXPORT_DIR).resolve()
+    artifact = Path(job.artifact_path).resolve()
+    if artifact.parent != export_dir:
+        logger.error("Export path traversal detected", artifact_path=job.artifact_path, job_id=job_id)
+        raise HTTPException(status_code=500, detail="Export file unavailable.")
+
     return FileResponse(
         path=job.artifact_path,
         media_type="application/zip",
@@ -109,14 +122,21 @@ async def download_export(
     )
 
 
-async def _run_export(job_id: str, user_id: str, session_factory) -> None:
+async def _run_export(job_id: str, user_id: str, session_factory: Any) -> None:
     """Background task to build user data ZIP."""
     import json
     import zipfile
     from datetime import datetime
+
     from sqlalchemy import select
+
     from nl_to_sql.infrastructure.database.models import (
-        DataExportJob, UserSettings, UserInstructions, SavedQuery, ChatSession, ChatMessage
+        ChatMessage,
+        ChatSession,
+        DataExportJob,
+        SavedQuery,
+        UserInstructions,
+        UserSettings,
     )
 
     async with session_factory() as db:
@@ -127,7 +147,7 @@ async def _run_export(job_id: str, user_id: str, session_factory) -> None:
             await db.commit()
 
     try:
-        export_data: dict = {}
+        export_data: dict[str, Any] = {}
         async with session_factory() as db:
             r = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
             s = r.scalar_one_or_none()
@@ -157,27 +177,32 @@ async def _run_export(job_id: str, user_id: str, session_factory) -> None:
                 for q in saved
             ]
 
-            r = await db.execute(select(ChatSession).where(ChatSession.user_id == user_id))
-            sessions = r.scalars().all()
-            history = []
-            for session in sessions:
-                r2 = await db.execute(
-                    select(ChatMessage).where(ChatMessage.session_id == session.id)
-                )
-                for msg in r2.scalars().all():
-                    history.append({
-                        "session_id": session.id,
-                        "session_title": session.title,
-                        "timestamp": msg.timestamp.isoformat(),
-                        "question": msg.question,
-                        "sql": msg.sql,
-                        "dialect": msg.dialect,
-                    })
-            export_data["query_history"] = history
+            r = await db.execute(
+                select(ChatSession.id, ChatSession.title, ChatMessage.timestamp,
+                       ChatMessage.question, ChatMessage.sql, ChatMessage.dialect)
+                .join(ChatMessage, ChatMessage.session_id == ChatSession.id)
+                .where(ChatSession.user_id == user_id)
+                .order_by(ChatSession.id, ChatMessage.timestamp)
+            )
+            export_data["query_history"] = [
+                {
+                    "session_id": row.id,
+                    "session_title": row.title,
+                    "timestamp": row.timestamp.isoformat(),
+                    "question": row.question,
+                    "sql": row.sql,
+                    "dialect": row.dialect,
+                }
+                for row in r.all()
+            ]
 
         zip_path = os.path.join(_EXPORT_DIR, f"{job_id}.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("data.json", json.dumps(export_data, indent=2, default=str))
+        try:
+            os.chmod(zip_path, 0o600)
+        except OSError:
+            pass
 
         async with session_factory() as db:
             result = await db.execute(select(DataExportJob).where(DataExportJob.id == job_id))

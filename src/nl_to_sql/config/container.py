@@ -1,8 +1,11 @@
 """Dependency Injection container — wires all services via dependency-injector."""
+from typing import Any
+
 from dependency_injector import containers, providers
 
 from nl_to_sql.config.settings import Settings
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
+from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.cache.in_memory_cache import InMemoryCache
 from nl_to_sql.infrastructure.cache.redis_cache import RedisCache
 from nl_to_sql.infrastructure.cache.semantic_cache import SemanticCache
@@ -10,13 +13,14 @@ from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseCli
 from nl_to_sql.infrastructure.embeddings.huggingface_embedder import HuggingFaceEmbedder
 from nl_to_sql.infrastructure.llm.groq_provider import GroqProvider
 from nl_to_sql.infrastructure.vector_store.chroma_store import ChromaVectorStore
-from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
+from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.rag.retrieval.retrieval_chain import RetrievalChain
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
-from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.services.analytics_service import AnalyticsService
+from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.feedback_learner import FeedbackLearner
 from nl_to_sql.services.feedback_service import FeedbackService
 from nl_to_sql.services.fine_tuning_service import FineTuningService
 from nl_to_sql.services.prompt_manager import PromptManager
@@ -27,16 +31,14 @@ from nl_to_sql.services.query_orchestrator import QueryOrchestrator
 from nl_to_sql.services.query_rewriter import QueryRewriter
 from nl_to_sql.services.reranker import CrossEncoderReranker
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
-from nl_to_sql.services.user_db_service import UserDbConnectionService
 from nl_to_sql.services.schema_monitor import SchemaMonitor
 from nl_to_sql.services.schema_retriever import SchemaRetriever
+from nl_to_sql.services.sql_column_validator import SQLColumnValidator
 from nl_to_sql.services.sql_generator import SQLGeneratorService
 from nl_to_sql.services.sql_validator import SQLValidatorService
-from nl_to_sql.services.sql_column_validator import SQLColumnValidator
-from nl_to_sql.services.api_key_service import APIKeyService
-from nl_to_sql.services.feedback_learner import FeedbackLearner
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
+from nl_to_sql.services.user_db_service import UserDbConnectionService
 
 
 def _build_llm_provider(settings: Settings) -> ILLMProvider:
@@ -113,8 +115,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
     config = providers.Singleton(Settings)
 
     # ── Runtime mutable state for LLM provider ────────────────────────────────
-    _current_llm_provider = providers.Object(None)
-    _current_llm_model = providers.Object(None)
+    _current_llm_provider: providers.Object[Any] = providers.Object(None)
+    _current_llm_model: providers.Object[Any] = providers.Object(None)
 
     # ── Infrastructure ────────────────────────────────────────────────────────
     llm_provider = providers.Singleton(
@@ -157,16 +159,13 @@ class ApplicationContainer(containers.DeclarativeContainer):
     db_client = providers.Singleton(
         AsyncDatabaseClient,
         database_url=config.provided.database_url,
+        pool_size=config.provided.db_pool_size,
+        max_overflow=config.provided.db_max_overflow,
+        pool_timeout=config.provided.db_pool_timeout,
+        pool_recycle=config.provided.db_pool_recycle,
     )
 
     # ── Services ──────────────────────────────────────────────────────────────
-
-    # ── API Key Service (BYOK — per-user encrypted keys) ─────────────────────
-    api_key_service = providers.Singleton(
-        APIKeyService,
-        database_url=config.provided.history_database_url,
-        secret_key=config.provided.secret_key,
-    )
 
     # ── User DB Connection Service (BYOD — per-user encrypted database URLs) ─
     user_db_service = providers.Singleton(
@@ -273,6 +272,13 @@ class ApplicationContainer(containers.DeclarativeContainer):
     session_service = providers.Singleton(
         ChatSessionService,
         database_url=config.provided.history_database_url,
+    )
+
+    # ── API Key Service (BYOK — per-user encrypted keys) ─────────────────────
+    api_key_service = providers.Singleton(
+        APIKeyService,
+        session_factory=session_service.provided._session_factory,
+        secret_key=config.provided.secret_key,
     )
 
     # ── Query Classification ─────────────────────────────────────────────────
@@ -405,8 +411,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
         container.llm_provider.override(providers.Object(new_provider))
 
         # Update runtime state tracking
-        container._current_llm_provider.override(providers.Object(provider))  # type: ignore[attr-defined]
-        container._current_llm_model.override(providers.Object(model))  # type: ignore[attr-defined]
+        container._current_llm_provider.override(providers.Object(provider))
+        container._current_llm_model.override(providers.Object(model))
 
         return new_provider
 
@@ -434,7 +440,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
         return client
 
     @staticmethod
-    def get_current_llm_config(container: "ApplicationContainer") -> dict:
+    def get_current_llm_config(container: "ApplicationContainer") -> dict[str, Any]:
         """Get the current LLM configuration.
 
         Returns runtime overrides if set, otherwise falls back to settings.

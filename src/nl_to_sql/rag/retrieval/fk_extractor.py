@@ -1,4 +1,4 @@
-"""FK Relationship Extractor — Expands retrieved tables via foreign keys.
+﻿"""FK Relationship Extractor â€” Expands retrieved tables via foreign keys.
 
 When the retriever returns a set of tables, this service:
 1. Extracts all foreign key relationships from those tables
@@ -7,16 +7,18 @@ When the retriever returns a set of tables, this service:
 4. Returns the expanded set of tables
 
 This prevents hallucination when the LLM needs to JOIN to related tables
-(like products → categories) but the retriever only returned products.
+(like products â†’ categories) but the retriever only returned products.
 
 SOLID:
-  S — Only handles FK relationship expansion
-  D — Depends on vector store and schema metadata
+  S â€” Only handles FK relationship expansion
+  D â€” Depends on vector store and schema metadata
 """
-from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
-from nl_to_sql.core.models.schema import SchemaChunk, SchemaMetadata
+from typing import Any
 
 import structlog
+
+from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
+from nl_to_sql.core.models.schema import SchemaChunk, SchemaMetadata
 
 logger = structlog.get_logger(__name__)
 
@@ -74,7 +76,7 @@ class FKRelationshipExtractor:
     def _extract_fk_from_chunks(self, chunks: list[SchemaChunk]) -> dict[str, set[str]]:
         """Extract FK relationships from chunk content.
 
-        Parses chunk text to find FK patterns like "[FK → categories.category_id]"
+        Parses chunk text to find FK patterns like "[FK â†’ categories.category_id]"
 
         Args:
             chunks: Schema chunks to analyze.
@@ -91,7 +93,7 @@ class FKRelationshipExtractor:
             related_tables: set[str] = set()
 
             # Find all FK references in chunk content
-            fk_pattern = r'\[FK\s*→\s*([a-zA-Z_][a-zA-Z0-9_]*)\.'
+            fk_pattern = r'\[FK\s*â†’\s*([a-zA-Z_][a-zA-Z0-9_]*)\.'
             matches = re.findall(fk_pattern, chunk.content)
 
             for ref_table in matches:
@@ -167,7 +169,7 @@ class FKRelationshipExtractor:
                 tables=[c.table_name for c in expanded],
             )
 
-            return expanded
+            return expanded  # type: ignore[no-any-return]
 
         except Exception as exc:
             logger.warning(
@@ -179,7 +181,7 @@ class FKRelationshipExtractor:
     async def expand_and_retrieve(
         self,
         question: str,
-        retrieval_chain,
+        retrieval_chain: Any,
         max_expansion: int = 3,
     ) -> list[SchemaChunk]:
         """Convenience method: retrieve + expand in one call.

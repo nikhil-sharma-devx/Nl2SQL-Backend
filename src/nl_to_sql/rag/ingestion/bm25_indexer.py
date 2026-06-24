@@ -3,9 +3,16 @@
 The index is persisted via the BM25Store in infrastructure/ so it can be
 loaded by the retrieval pipeline at query time.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import structlog
 
 from nl_to_sql.core.models.schema import SchemaChunk
+
+if TYPE_CHECKING:
+    from nl_to_sql.infrastructure.bm25_store import BM25Store
 
 logger = structlog.get_logger(__name__)
 
@@ -29,8 +36,7 @@ class BM25Indexer:
       S — Only builds the BM25 index; does not perform retrieval.
     """
 
-    def __init__(self, store: "BM25Store") -> None:  # noqa: F821
-        from nl_to_sql.infrastructure.bm25_store import BM25Store
+    def __init__(self, store: BM25Store) -> None:
         self._store: BM25Store = store
 
     def build_index(self, chunks: list[SchemaChunk]) -> None:

@@ -1,13 +1,13 @@
 """Application settings — loaded from environment variables or .env file."""
 import os
-from pathlib import Path
 from functools import lru_cache
-import structlog
+from pathlib import Path
 from typing import Literal
 
+import structlog
+from dotenv import load_dotenv
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from dotenv import load_dotenv
 
 logger = structlog.get_logger(__name__)
 
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # ── Application ──────────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"
-    app_host: str = "0.0.0.0"
+    app_host: str = "0.0.0.0"  # noqa: S104 — required for Docker/container deployment
     app_port: int = 8000
     app_log_level: str = "INFO"
     # Default writes to {project_root}/data/logs/; override with APP_LOG_FILE= (empty) to disable
@@ -182,10 +182,11 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""  # e.g., http://localhost:4317
     otel_console_exporter: bool = False
 
-    # LangSmith Tracing
-    langsmith_tracing: bool = False
-    langsmith_api_key: str = ""
-    langsmith_project: str = "nl-to-sql-rag"
+    # Langfuse Tracing
+    langfuse_enabled: bool = False
+    langfuse_secret_key: str = Field(default="", description="Langfuse secret key (sk-lf-...)")
+    langfuse_public_key: str = Field(default="", description="Langfuse public key (pk-lf-...)")
+    langfuse_base_url: str = "https://cloud.langfuse.com"
 
     # Arize Phoenix Tracing
     phoenix_active: bool = False
@@ -194,6 +195,13 @@ class Settings(BaseSettings):
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 60  # per minute
+
+    # ── Admin ─────────────────────────────────────────────────────────────────
+    admin_emails: str = Field(default="", description="Comma-separated email addresses granted admin access")
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
     @field_validator("groq_api_key")
     @classmethod
@@ -205,9 +213,32 @@ class Settings(BaseSettings):
             logger.warning("groq_api_key is empty while llm_provider is groq")
         return v
 
+    _WEAK_SECRET_DEFAULTS: frozenset[str] = frozenset({
+        "change-me-in-production",
+        "change-me-jwt-secret-32-chars-min",
+    })
+
     @model_validator(mode="after")
     def _align_settings(self) -> "Settings":
         """Auto-set embedding dimensions and dynamic production defaults."""
+        # Reject placeholder secrets in non-development environments
+        if self.app_env != "development":
+            if self.secret_key in self._WEAK_SECRET_DEFAULTS:
+                raise ValueError(
+                    "secret_key must be set to a strong random value in non-development environments. "
+                    "Set the SECRET_KEY environment variable."
+                )
+            if self.jwt_secret_key in self._WEAK_SECRET_DEFAULTS:
+                raise ValueError(
+                    "jwt_secret_key must be set to a strong random value in non-development environments. "
+                    "Set the JWT_SECRET_KEY environment variable."
+                )
+            # Require at least 20 unique characters for entropy
+            if len(set(self.jwt_secret_key)) < 20:
+                raise ValueError(
+                    "jwt_secret_key has insufficient entropy. Use a randomly generated value of at least 32 characters."
+                )
+
         if self.embedding_provider == "huggingface":
             hf_model_dims = {
                 "all-MiniLM-L6-v2": 384,

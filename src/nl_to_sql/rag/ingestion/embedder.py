@@ -62,7 +62,7 @@ class IngestionEmbedder:
             ) from exc
 
         # Attach embeddings to chunks
-        for chunk, embedding in zip(chunks, all_embeddings):
+        for chunk, embedding in zip(chunks, all_embeddings, strict=True):
             chunk.embedding = embedding
 
         log.info("All chunks embedded successfully")

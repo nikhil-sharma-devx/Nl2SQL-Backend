@@ -1,5 +1,7 @@
 """Session routes — manage chat sessions (scoped to authenticated user)."""
 import asyncio
+from typing import Any
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -22,13 +24,13 @@ class AddMessageRequest(BaseModel):
     validation_errors: list[str] = Field(default_factory=list)
     retrieved_tables: list[str] = Field(default_factory=list)
     used_tables: list[str] = Field(default_factory=list)
-    execution_result: list[dict] | None = None
+    execution_result: list[dict[str, Any]] | None = None
     execution_error: str | None = None
     tokens_used: int = 0
     cached: bool = False
     message: str | None = None
     intent_type: str | None = None
-    suggested_chart: dict | None = None
+    suggested_chart: dict[str, Any] | None = None
     follow_up_questions: list[str] = Field(default_factory=list)
 
 
@@ -43,7 +45,7 @@ router = APIRouter(prefix="/api/v1", tags=["Sessions"])
 async def create_session(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-):
+) -> dict[str, Any]:
     """Create a new chat session scoped to the current user."""
     session = await session_service.create_session(user_id=current_user.id)
     return {
@@ -60,12 +62,12 @@ async def create_session(
     description="Returns a list of the authenticated user's chat sessions ordered by most recently updated.",
 )
 async def list_sessions(
+    response: Response,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-    response: Response = None,
-):
+) -> dict[str, Any]:
     """List the current user's chat sessions."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=5"
@@ -99,7 +101,7 @@ async def get_session(
     session_id: str,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-):
+) -> dict[str, Any]:
     """Get a specific chat session with messages."""
     try:
         session = await session_service.get_session(session_id)
@@ -152,8 +154,8 @@ async def get_session(
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to retrieve session: {str(exc)}",
-        )
+            detail=f"Failed to retrieve session: {exc!s}",
+        ) from exc
 
 
 @router.post(
@@ -165,7 +167,7 @@ async def add_session_message(
     body: AddMessageRequest,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-):
+) -> dict[str, Any]:
     """Save a custom/direct SQL query message into the session history."""
     try:
         session = await session_service.get_session(session_id)
@@ -233,8 +235,8 @@ async def add_session_message(
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to add message to session: {str(exc)}",
-        )
+            detail=f"Failed to add message to session: {exc!s}",
+        ) from exc
 
 
 @router.delete(
@@ -246,7 +248,7 @@ async def delete_session(
     session_id: str,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-):
+) -> dict[str, str]:
     """Delete a chat session."""
     # Verify ownership before deletion
     session = await session_service.get_session(session_id)
@@ -264,7 +266,7 @@ async def delete_session(
 async def delete_all_sessions(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-):
+) -> dict[str, str]:
     """Delete all of the current user's chat sessions."""
     await session_service.delete_all_sessions(user_id=current_user.id)
     return {"message": "All sessions deleted successfully"}

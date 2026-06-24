@@ -1,5 +1,8 @@
 """Lightweight query classifier for detecting greetings and off-topic queries."""
+from __future__ import annotations
+
 import re
+from typing import ClassVar
 
 
 class QueryClassifier:
@@ -11,7 +14,7 @@ class QueryClassifier:
     """
 
     # Common greeting patterns (case-insensitive)
-    GREETING_PATTERNS = [
+    GREETING_PATTERNS: ClassVar[list[str]] = [
         r"^\s*hi\s*$",
         r"^\s*hello\s*$",
         r"^\s*hey\s*$",
@@ -38,7 +41,7 @@ class QueryClassifier:
 
     # Strong database-related keywords that clearly indicate a data question
     # These are words that are very unlikely to appear in casual conversation
-    STRONG_DB_KEYWORDS = [
+    STRONG_DB_KEYWORDS: ClassVar[list[str]] = [
         # SQL operations (strong signal)
         "select", "from", "where", "join", "inner", "outer", "left", "right",
         "group", "having", "limit", "offset", "distinct",
@@ -73,7 +76,7 @@ class QueryClassifier:
     ]
 
     # Context keywords that support a data question but aren't strong on their own
-    CONTEXT_KEYWORDS = [
+    CONTEXT_KEYWORDS: ClassVar[list[str]] = [
         # Time-related (weak signal on their own)
         "date", "dates", "day", "days", "week", "weeks", "month", "months",
         "year", "years", "today", "yesterday", "tomorrow",

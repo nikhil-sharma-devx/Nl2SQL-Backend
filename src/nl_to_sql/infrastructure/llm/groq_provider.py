@@ -1,10 +1,11 @@
 """Groq LLM provider — implements ILLMProvider."""
 import re
 from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
-from groq import AsyncGroq
 from groq import APIError as GroqAPIError
+from groq import AsyncGroq
 
 from nl_to_sql.core.exceptions import LLMProviderError, RateLimitError
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
@@ -13,7 +14,7 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class GroqProvider(ILLMProvider):
+class GroqProvider(ILLMProvider):  # type: ignore[misc]
     """Concrete LLM provider backed by Groq (ultra-fast inference).
 
     Groq supports Llama 3 and Mixtral models, ideal for low-latency SQL
@@ -38,7 +39,7 @@ class GroqProvider(ILLMProvider):
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
-        response_format: dict | None = None,
+        response_format: dict[str, Any] | None = None,
         model_override: str | None = None,
     ) -> LLMResponse:
         """Send a chat-completion request to Groq."""
@@ -58,7 +59,7 @@ class GroqProvider(ILLMProvider):
             if response_format:
                 kwargs["response_format"] = response_format
 
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await self._client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
             content = response.choices[0].message.content or ""
             usage = response.usage
             log.debug("Completion received", tokens=usage.total_tokens if usage else 0)

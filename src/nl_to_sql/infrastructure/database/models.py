@@ -2,7 +2,19 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Index, JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -289,6 +301,8 @@ class UserSettings(Base):
     auto_execute = Column(Boolean, nullable=False, default=False)
     default_model = Column(String(100), nullable=True)
     data_retention = Column(String(10), nullable=False, default="forever")
+    font_size = Column(String(10), nullable=False, default="medium")
+    ui_density = Column(String(15), nullable=False, default="comfortable")
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -390,3 +404,84 @@ class LoginEvent(Base):
     user_agent = Column(Text, nullable=True)
     outcome = Column(String(20), nullable=False, default="success")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+# ── Phase 2 Feature Models ─────────────────────────────────────────────────────
+
+
+class QueryTemplate(Base):
+    """P2 - Parameterized query templates (saved patterns with {{placeholder}} vars)."""
+
+    __tablename__ = "query_templates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    template_nl = Column(Text, nullable=False)
+    template_sql = Column(Text, nullable=False)
+    parameters = Column(JSON, nullable=False, default=list)  # [{name, type, description, default}]
+    tags = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FavoritedTable(Base):
+    """P2 - User-pinned tables that get retrieval priority during query generation."""
+
+    __tablename__ = "favorited_tables"
+    __table_args__ = (UniqueConstraint("user_id", "table_name", name="uq_user_favorited_table"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    table_name = Column(String(200), nullable=False)
+    schema_name = Column(String(100), nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GlossaryEntry(Base):
+    """P2 - Business dictionary entries injected into the generation prompt."""
+
+    __tablename__ = "glossary_entries"
+    __table_args__ = (UniqueConstraint("user_id", "term", name="uq_user_glossary_term"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    term = Column(String(200), nullable=False)
+    definition = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TutorialProgress(Base):
+    """P2 - Tracks which tutorial/walkthrough steps a user has completed."""
+
+    __tablename__ = "tutorial_progress"
+
+    user_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
+    completed_steps = Column(JSON, nullable=False, default=list)
+    dismissed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OnboardingState(Base):
+    """P2 - Tracks which onboarding checklist items a user has completed."""
+
+    __tablename__ = "onboarding_state"
+
+    user_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
+    completed_items = Column(JSON, nullable=False, default=list)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class NotificationPreferences(Base):
+    """P2 - Per-user notification opt-in/out settings."""
+
+    __tablename__ = "notification_preferences"
+
+    user_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
+    email_digest = Column(Boolean, nullable=False, default=False)
+    in_app_enabled = Column(Boolean, nullable=False, default=True)
+    marketing_enabled = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

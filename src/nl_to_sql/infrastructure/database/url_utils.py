@@ -7,7 +7,7 @@ URL-encodes special characters in passwords.
 from __future__ import annotations
 
 import re
-from urllib.parse import quote, urlparse, urlunparse, parse_qs, urlencode
+from urllib.parse import quote
 
 # Driver tokens that are already async-capable -> leave the URL as-is.
 _ASYNC_DRIVERS = ("+asyncpg", "+aiomysql", "+asyncmy")

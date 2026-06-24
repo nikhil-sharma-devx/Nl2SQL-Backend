@@ -4,6 +4,8 @@ Reads table names, column names, data types, primary keys, foreign keys,
 and any available column comments from the live database using
 information_schema queries.
 """
+from typing import Any
+
 import structlog
 
 from nl_to_sql.core.exceptions import SchemaIngestionError
@@ -55,7 +57,7 @@ class SchemaLoader:
         return schema_metadata
 
     @staticmethod
-    def build_schema_from_dict(raw: dict) -> SchemaMetadata:
+    def build_schema_from_dict(raw: dict[str, Any]) -> SchemaMetadata:
         """Construct a SchemaMetadata from a plain Python dict.
 
         Useful for loading schema from a JSON config file or DB reflection.

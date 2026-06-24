@@ -3,9 +3,16 @@
 Handles exact column and table name matches that dense retrieval sometimes
 misses. Loads the persisted BM25 index from the BM25Store.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import structlog
 
 from nl_to_sql.core.models.schema import SchemaChunk
+
+if TYPE_CHECKING:
+    from nl_to_sql.infrastructure.bm25_store import BM25Store
 
 logger = structlog.get_logger(__name__)
 
@@ -26,10 +33,9 @@ class BM25Retriever:
 
     def __init__(
         self,
-        store: "BM25Store",  # noqa: F821
+        store: BM25Store,
         top_k: int = 5,
     ) -> None:
-        from nl_to_sql.infrastructure.bm25_store import BM25Store
         self._store: BM25Store = store
         self._top_k = top_k
 
@@ -48,7 +54,7 @@ class BM25Retriever:
             logger.warning("BM25 index not loaded — returning empty results")
             return []
 
-        bm25, corpus, chunk_metadata = index_data
+        bm25, _corpus, chunk_metadata = index_data
 
         # Tokenise the query using the same tokeniser as ingestion
         query_tokens = _tokenise(question)

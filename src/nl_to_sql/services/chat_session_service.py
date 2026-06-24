@@ -1,7 +1,7 @@
 """Chat session service — manages chat sessions and messages."""
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Any
 from uuid import uuid4
 
 import sqlalchemy
@@ -11,14 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import selectinload
 
 from nl_to_sql.core.models.query import QueryResponse
-from nl_to_sql.infrastructure.database.models import Base, ChatMessage, ChatSession
-from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
+from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
 logger = structlog.get_logger(__name__)
 
 
-def make_json_serializable(obj):
+def make_json_serializable(obj: Any) -> Any:
     """Convert an object to be JSON serializable.
 
     Handles Decimal, datetime, date, and other non-serializable types.
@@ -36,7 +35,7 @@ def make_json_serializable(obj):
 
 class SessionInfo:
     """Lightweight session info for listing."""
-    def __init__(self, id: str, title: str, created_at: datetime, updated_at: datetime, message_count: int):
+    def __init__(self, id: str, title: str, created_at: datetime, updated_at: datetime, message_count: int) -> None:
         self.id = id
         self.title = title
         self.created_at = created_at
@@ -61,8 +60,8 @@ class ChatSessionService:
             database_url,
             echo=False,
             pool_pre_ping=False,
-            pool_size=3,
-            max_overflow=3,
+            pool_size=2,
+            max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
         )
@@ -106,7 +105,7 @@ class ChatSessionService:
         self._logger.info("Chat session created", session_id=session_id, title=title, user_id=user_id)
         return chat_session
 
-    async def get_session(self, session_id: str) -> Optional[ChatSession]:
+    async def get_session(self, session_id: str) -> ChatSession | None:
         """Get a chat session by ID with all its messages.
 
         Args:
@@ -312,4 +311,3 @@ class ChatSessionService:
         """Close all database connections."""
         await self._engine.dispose()
         self._logger.info("Chat session database connections closed")
-

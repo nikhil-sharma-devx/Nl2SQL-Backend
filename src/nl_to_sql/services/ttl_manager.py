@@ -134,7 +134,7 @@ class TTLManager:
             return 5
 
         sql_upper = sql.upper()
-        complexity = 1
+        complexity: float = 1
 
         # Count JOINs (each JOIN adds complexity)
         join_count = len(re.findall(r'\bJOIN\b', sql_upper))

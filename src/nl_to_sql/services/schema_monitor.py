@@ -34,7 +34,7 @@ class SchemaMonitor:
         self._check_interval = check_interval
         self._enabled = enabled
         self._running = False
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._last_schema_hash: dict[str, str] = {}
         self._logger = logger.bind(component="SchemaMonitor")
 

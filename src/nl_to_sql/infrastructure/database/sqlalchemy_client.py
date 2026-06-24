@@ -1,13 +1,14 @@
 """Async SQLAlchemy client — manages the target database connection."""
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nl_to_sql.core.exceptions import DatabaseExecutionError
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
-from nl_to_sql.infrastructure.observability.tracing import trace_function, set_span_attribute
+from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 
 logger = structlog.get_logger(__name__)
 
@@ -22,6 +23,8 @@ class AsyncDatabaseClient:
 
     SOLID: S — Manages DB lifecycle only; not responsible for SQL generation.
     """
+
+    MAX_ROWS = 5_000
 
     def __init__(
         self,
@@ -79,7 +82,7 @@ class AsyncDatabaseClient:
                 raise
 
     @trace_function("database.execute_sql")
-    async def execute_sql(self, sql: str) -> list[dict]:
+    async def execute_sql(self, sql: str) -> list[dict[str, Any]]:
         """Execute a raw SQL string and return rows as a list of dicts.
 
         Args:
@@ -97,10 +100,14 @@ class AsyncDatabaseClient:
 
         try:
             async with self.session() as sess:
+                await sess.execute(text("SET LOCAL statement_timeout = '30s'"))
                 result = await sess.execute(text(sql))
                 columns = list(result.keys())
-                rows = [dict(zip(columns, row)) for row in result.fetchall()]
+                all_rows = result.fetchall()
+                truncated = len(all_rows) > self.MAX_ROWS
+                rows = [dict(zip(columns, row, strict=True)) for row in all_rows[: self.MAX_ROWS]]
                 set_span_attribute("db.rows_returned", len(rows))
+                set_span_attribute("db.truncated", truncated)
                 return rows
         except Exception as exc:
             logger.error("SQL execution failed", error=str(exc))
@@ -108,7 +115,7 @@ class AsyncDatabaseClient:
                 f"Failed to execute SQL: {exc}", detail=str(exc)
             ) from exc
 
-    async def execute_sql_stream(self, sql: str, batch_size: int = 100):
+    async def execute_sql_stream(self, sql: str, batch_size: int = 100) -> AsyncGenerator[list[dict[str, Any]], None]:
         """Execute SQL and yield result rows in batches for large result sets.
 
         Streams rows in batches instead of buffering everything in memory,
@@ -130,7 +137,7 @@ class AsyncDatabaseClient:
                 stream_result = await sess.stream(text(sql))
                 columns = list(stream_result.keys())
                 async for partition in stream_result.partitions(batch_size):
-                    yield [dict(zip(columns, row)) for row in partition]
+                    yield [dict(zip(columns, row, strict=True)) for row in partition]
         except Exception as exc:
             logger.error("SQL stream execution failed", error=str(exc))
             raise DatabaseExecutionError(
@@ -148,7 +155,7 @@ class AsyncDatabaseClient:
         except Exception:
             return False
 
-    async def reflect_schema(self, schema_name: str = "public") -> dict:
+    async def reflect_schema(self, schema_name: str = "public") -> dict[str, Any]:
         """Reflect database schema from live PostgreSQL database.
 
         Uses pg_catalog system tables directly (instead of the slow
@@ -233,7 +240,7 @@ class AsyncDatabaseClient:
             rows = result.fetchall()
 
         # ── Build schema structure ─────────────────────────────────────────────
-        tables_dict: dict[str, dict] = {}
+        tables_dict: dict[str, dict[str, Any]] = {}
 
         for row in rows:
             table_name    = row[0]
@@ -255,7 +262,7 @@ class AsyncDatabaseClient:
                     "foreign_keys": {},
                 }
 
-            column_info: dict = {
+            column_info: dict[str, Any] = {
                 "name": column_name,
                 "data_type": data_type.upper() if data_type else "UNKNOWN",
                 "nullable": bool(is_nullable),

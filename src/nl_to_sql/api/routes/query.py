@@ -1,49 +1,101 @@
 """Query route — POST /api/v1/query."""
+import asyncio
+from collections.abc import AsyncGenerator
+from typing import Any
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from nl_to_sql.api.dependencies import get_current_user, get_request_orchestrator, get_llm_provider, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_llm_provider,
+    get_request_orchestrator,
+    get_session_service,
+)
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.query import QueryRequest, QueryResponse
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
-from nl_to_sql.services.sql_explanation_service import SQLExplanationService
 from nl_to_sql.services.question_suggestion_service import (
     QuestionSuggestionService,
     SuggestionRequest,
     SuggestionResponse,
 )
+from nl_to_sql.services.sql_explanation_service import SQLExplanationService
 
 router = APIRouter(prefix="/api/v1", tags=["Query"])
 _settings = get_settings()
 _rate = f"{_settings.rate_limit_requests}/minute"
 
 
-async def _load_user_settings(user_id: str, session_factory):
+async def _load_user_settings(user_id: str, session_factory: Any) -> Any:
     """Fetch the UserSettings row for this user (returns None if not set yet)."""
     from sqlalchemy import select
+
     from nl_to_sql.infrastructure.database.models import UserSettings
     async with session_factory() as db:
         result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
         return result.scalar_one_or_none()
 
 
-async def _load_user_instructions(user_id: str, session_factory) -> str | None:
+async def _load_user_instructions(user_id: str, session_factory: Any) -> str | None:
     """Return the user's custom instructions text if enabled and non-empty."""
     from sqlalchemy import select
+
     from nl_to_sql.infrastructure.database.models import UserInstructions
     async with session_factory() as db:
         result = await db.execute(select(UserInstructions).where(UserInstructions.user_id == user_id))
         instr = result.scalar_one_or_none()
     if instr and instr.enabled and instr.content and instr.content.strip():
-        return instr.content.strip()
+        return str(instr.content.strip())
     return None
 
 
-def _build_style_hints(user_settings) -> dict | None:
+async def _load_glossary_context(user_id: str, session_factory: Any, char_limit: int = 500) -> str | None:
+    """Return a compact glossary block to inject into the prompt, capped at char_limit."""
+    from sqlalchemy import select
+
+    from nl_to_sql.infrastructure.database.models import GlossaryEntry
+    async with session_factory() as db:
+        result = await db.execute(
+            select(GlossaryEntry)
+            .where(GlossaryEntry.user_id == user_id)
+            .order_by(GlossaryEntry.term.asc())
+            .limit(50)
+        )
+        entries = result.scalars().all()
+    if not entries:
+        return None
+    lines = [f"- {e.term}: {e.definition}" for e in entries]
+    block = "Business glossary:\n" + "\n".join(lines)
+    if len(block) > char_limit:
+        block = block[:char_limit].rsplit("\n", 1)[0]  # don't cut mid-line
+    return block
+
+
+async def _load_favorited_tables_hint(user_id: str, session_factory: Any) -> str | None:
+    """Return a retrieval hint listing the user's pinned tables."""
+    from sqlalchemy import select
+
+    from nl_to_sql.infrastructure.database.models import FavoritedTable
+    async with session_factory() as db:
+        result = await db.execute(
+            select(FavoritedTable)
+            .where(FavoritedTable.user_id == user_id)
+            .order_by(FavoritedTable.created_at.desc())
+            .limit(20)
+        )
+        tables = result.scalars().all()
+    if not tables:
+        return None
+    names = ", ".join(t.table_name for t in tables)
+    return f"User's prioritized tables (prefer these when relevant): {names}"
+
+
+def _build_style_hints(user_settings: Any) -> dict[str, Any] | None:
     """Convert a UserSettings ORM row into a style_hints dict for the generator."""
     if user_settings is None:
         return None
@@ -56,7 +108,7 @@ def _build_style_hints(user_settings) -> dict | None:
     }
 
 
-def _apply_user_settings(response: QueryResponse, user_settings) -> QueryResponse:
+def _apply_user_settings(response: QueryResponse, user_settings: Any) -> QueryResponse:
     """Post-process a QueryResponse using the user's saved style + limit preferences.
 
     - Formats SQL with keyword case, indent, alias style
@@ -92,7 +144,7 @@ def _apply_user_settings(response: QueryResponse, user_settings) -> QueryRespons
 class ExplainRequest(BaseModel):
     """Request body for SQL explanation."""
 
-    sql: str = Field(..., description="The SQL query to explain")
+    sql: str = Field(..., max_length=50_000, description="The SQL query to explain")
 
 
 class ExplainResponse(BaseModel):
@@ -130,14 +182,26 @@ async def nl_to_sql_query(
 
     style_hints = _build_style_hints(user_settings)
     model_override = user_settings.default_model if user_settings else None
-    custom_instructions = await _load_user_instructions(current_user.id, session_service._session_factory)
+
+    custom_instructions, glossary_ctx, tables_hint = await asyncio.gather(
+        _load_user_instructions(current_user.id, session_service._session_factory),
+        _load_glossary_context(current_user.id, session_service._session_factory),
+        _load_favorited_tables_hint(current_user.id, session_service._session_factory),
+    )
+
+    # Merge glossary and pinned-table hints into custom_instructions
+    extra_parts = [p for p in (glossary_ctx, tables_hint) if p]
+    if extra_parts:
+        base = custom_instructions or ""
+        custom_instructions = "\n\n".join(filter(None, [base, *extra_parts]))
+
     response = await orchestrator.run(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions)
     response = _apply_user_settings(response, user_settings)
     background_tasks.add_task(_record_metrics, current_user.id, response.tokens_used, session_service._session_factory)
     return response
 
 
-async def _record_metrics(user_id: str, tokens_used: int, session_factory) -> None:
+async def _record_metrics(user_id: str, tokens_used: int, session_factory: Any) -> None:
     """Background task: write a QueryMetrics row for billing/usage tracking."""
     import structlog
     log = structlog.get_logger(__name__)
@@ -154,15 +218,16 @@ async def _record_metrics(user_id: str, tokens_used: int, session_factory) -> No
 async def _stream_sql_generation(
     orchestrator: QueryOrchestrator,
     body: QueryRequest,
-    user_settings=None,
-    style_hints: dict | None = None,
+    user_settings: Any = None,
+    style_hints: dict[str, Any] | None = None,
     model_override: str | None = None,
     custom_instructions: str | None = None,
     user_id: str | None = None,
-    session_factory=None,
-):
+    session_factory: Any = None,
+) -> AsyncGenerator[str, None]:
     """Async generator for streaming SQL generation."""
     import json
+
     from fastapi.encoders import jsonable_encoder
 
     try:
@@ -224,7 +289,17 @@ async def nl_to_sql_query_stream(
 
     style_hints = _build_style_hints(user_settings)
     model_override = user_settings.default_model if user_settings else None
-    custom_instructions = await _load_user_instructions(current_user.id, session_service._session_factory)
+
+    custom_instructions, glossary_ctx, tables_hint = await asyncio.gather(
+        _load_user_instructions(current_user.id, session_service._session_factory),
+        _load_glossary_context(current_user.id, session_service._session_factory),
+        _load_favorited_tables_hint(current_user.id, session_service._session_factory),
+    )
+    extra_parts = [p for p in (glossary_ctx, tables_hint) if p]
+    if extra_parts:
+        base = custom_instructions or ""
+        custom_instructions = "\n\n".join(filter(None, [base, *extra_parts]))
+
     return StreamingResponse(
         _stream_sql_generation(
             orchestrator, body,
@@ -257,7 +332,7 @@ async def nl_to_sql_query_stream(
 async def explain_sql(
     request: Request,
     body: ExplainRequest,
-    llm_provider=Depends(get_llm_provider),
+    llm_provider: Any = Depends(get_llm_provider),
     current_user: UserPublic = Depends(get_current_user),
 ) -> ExplainResponse:
     """Endpoint: SQL → plain-English explanation."""
@@ -279,7 +354,7 @@ async def explain_sql(
 async def get_query_suggestions(
     request: Request,
     body: SuggestionRequest,
-    llm_provider=Depends(get_llm_provider),
+    llm_provider: Any = Depends(get_llm_provider),
     current_user: UserPublic = Depends(get_current_user),
 ) -> SuggestionResponse:
     """Endpoint: Generate suggested follow-up questions."""
@@ -290,7 +365,7 @@ async def get_query_suggestions(
 class ExecuteRequest(BaseModel):
     """Request body for executing custom SQL."""
 
-    sql: str = Field(..., description="The SQL query to execute")
+    sql: str = Field(..., max_length=50_000, description="The SQL query to execute")
     dialect: str | None = Field(None, description="SQL dialect (default: from settings)")
 
 
@@ -298,8 +373,8 @@ class SaveVersionRequest(BaseModel):
     """Request body for saving a new SQL version."""
 
     message_id: int = Field(..., description="The message ID this version belongs to")
-    sql: str = Field(..., description="The edited SQL query")
-    results: list[dict] | None = Field(None, description="Execution results")
+    sql: str = Field(..., max_length=50_000, description="The edited SQL query")
+    results: list[dict[str, Any]] | None = Field(None, description="Execution results")
     success: bool = Field(..., description="Whether execution succeeded")
 
 
@@ -316,9 +391,10 @@ class ExecuteResponse(BaseModel):
 
     sql: str = Field(..., description="The executed SQL query")
     success: bool = Field(..., description="Whether execution succeeded")
-    results: list[dict] | None = Field(None, description="Query results (if successful)")
+    results: list[dict[str, Any]] | None = Field(None, description="Query results (if successful)")
     error: str | None = Field(None, description="Error message (if failed)")
     row_count: int = Field(0, description="Number of rows returned")
+    truncated: bool = Field(False, description="True when results were capped at the server row limit")
 
 
 @router.post(
@@ -348,13 +424,27 @@ async def execute_sql(
             error="Database client not configured",
         )
 
+    # Validate: only allow SELECT statements, block dangerous functions
+    from nl_to_sql.services.sql_validator import SQLValidatorService
+    _validator = SQLValidatorService(dialect=body.dialect or _settings.sql_dialect)
+    validation = _validator.validate(body.sql)
+    if not validation.is_valid:
+        return ExecuteResponse(
+            sql=body.sql,
+            success=False,
+            error=f"SQL rejected: {'; '.join(validation.errors)}",
+        )
+
     try:
-        results = await db_client.execute_sql(body.sql)
+        from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+        results = await db_client.execute_sql(validation.normalised_sql or body.sql)
+        truncated = len(results) >= AsyncDatabaseClient.MAX_ROWS if results else False
         return ExecuteResponse(
             sql=body.sql,
             success=True,
             results=results,
             row_count=len(results) if results else 0,
+            truncated=truncated,
         )
     except Exception as exc:
         return ExecuteResponse(
@@ -384,14 +474,22 @@ async def execute_sql_stream(
 
     db_client = orchestrator._db_client
 
-    async def _generate():
+    async def _generate() -> AsyncGenerator[str, None]:
         if not db_client:
             yield f"data: {json.dumps({'error': 'Database client not configured'})}\n\n"
             yield "data: [DONE]\n\n"
             return
+        # Validate before streaming
+        from nl_to_sql.services.sql_validator import SQLValidatorService
+        _val = SQLValidatorService(dialect=body.dialect or _settings.sql_dialect)
+        _vr = _val.validate(body.sql)
+        if not _vr.is_valid:
+            yield f"data: {json.dumps({'error': 'SQL rejected: ' + '; '.join(_vr.errors)})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         try:
             row_count = 0
-            async for batch in db_client.execute_sql_stream(body.sql):
+            async for batch in db_client.execute_sql_stream(_vr.normalised_sql or body.sql):
                 row_count += len(batch)
                 yield f"data: {json.dumps({'rows': batch, 'batch_row_count': len(batch)})}\n\n"
             yield f"data: {json.dumps({'status': 'complete', 'total_rows': row_count})}\n\n"
@@ -427,9 +525,9 @@ async def save_sql_version(
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> SaveVersionResponse:
     """Endpoint: Save edited SQL as a new version (persisted to database)."""
-    import structlog
     from datetime import datetime
 
+    import structlog
     from sqlalchemy import func, select
 
     from nl_to_sql.infrastructure.database.models import SqlVersion
@@ -437,6 +535,21 @@ async def save_sql_version(
     logger = structlog.get_logger(__name__)
 
     async with session_service._session_factory() as db_sess:
+        from fastapi import HTTPException
+
+        from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
+
+        ownership = await db_sess.execute(
+            select(ChatMessage.id)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatMessage.id == body.message_id,
+                ChatSession.user_id == current_user.id,
+            )
+        )
+        if ownership.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Message not found.")
+
         count_result = await db_sess.execute(
             select(func.count()).select_from(SqlVersion).where(
                 SqlVersion.message_id == body.message_id
@@ -480,19 +593,28 @@ async def get_sql_versions(
     message_id: int,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-) -> dict:
+) -> dict[str, Any]:
     """Endpoint: Get all SQL versions for a message from database."""
+    from fastapi import HTTPException
     from sqlalchemy import select
 
-    from nl_to_sql.infrastructure.database.models import SqlVersion
+    from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, SqlVersion
 
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
             select(SqlVersion)
-            .where(SqlVersion.message_id == message_id)
+            .join(ChatMessage, ChatMessage.id == SqlVersion.message_id)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                SqlVersion.message_id == message_id,
+                ChatSession.user_id == current_user.id,
+            )
             .order_by(SqlVersion.version_number)
         )
         versions = result.scalars().all()
+
+    if not versions:
+        raise HTTPException(status_code=404, detail="No versions found for this message.")
 
     return {
         "message_id": message_id,

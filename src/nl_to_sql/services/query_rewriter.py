@@ -1,8 +1,8 @@
 """Query Rewriter — Uses LLM to clarify ambiguous questions."""
 import structlog
 
-from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.core.exceptions import LLMProviderError
+from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 
 logger = structlog.get_logger(__name__)
 
@@ -80,7 +80,7 @@ class QueryRewriter:
                 max_tokens=200,
             )
 
-            clarified = response.content.strip()
+            clarified = str(response.content).strip()
 
             # Validate that the response is reasonable (not too long, not empty)
             if clarified and len(clarified) < 500:

@@ -7,7 +7,7 @@ SOLID:
   S — Only handles feedback learning and pattern injection
   D — Depends on feedback service and database
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -95,7 +95,16 @@ class FeedbackLearner:
 
             if self._feedback_service:
                 try:
-                    await self._feedback_service.store_pattern(pattern)
+                    await self._feedback_service.submit_feedback(
+                        feedback_type="pattern",
+                        feedback_data={
+                            "pattern_id": pattern.pattern_id,
+                            "error_type": pattern.error_type,
+                            "description": pattern.description,
+                            "example_sql": pattern.example_sql,
+                            "correction": pattern.correction,
+                        },
+                    )
                 except Exception as exc:
                     self._logger.warning("Failed to persist pattern", error=str(exc))
 
@@ -128,7 +137,7 @@ class FeedbackLearner:
         import hashlib
 
         # Create unique pattern ID
-        pattern_hash = hashlib.md5(
+        pattern_hash = hashlib.md5(  # noqa: S324 — used for dedup, not security
             f"{error_type}:{generated_sql[:100]}".encode()
         ).hexdigest()[:12]
 
@@ -198,6 +207,25 @@ class FeedbackLearner:
 
         return ". ".join(parts)
 
+    async def get_relevant_patterns(self, question: str) -> list[FeedbackPattern]:
+        """Get relevant feedback patterns for a question."""
+        return list(self._patterns.values())
+
+    def build_pattern_context(self, patterns: list[FeedbackPattern]) -> str:
+        """Format patterns into a prompt context string."""
+        if not patterns:
+            return ""
+        lines = [
+            "\n⚠️ COMMON MISTAKES TO AVOID (learned from user feedback):",
+            ""
+        ]
+        for pattern in patterns:
+            lines.append(f"• {pattern.description}")
+            if pattern.correction:
+                lines.append(f"  Correction: {pattern.correction}")
+            lines.append("")
+        return "\n".join(lines)
+
     def get_learning_prompt(self, tables: list[str] | None = None) -> str:
         """Generate prompt section with learned patterns to avoid.
 
@@ -219,23 +247,7 @@ class FeedbackLearner:
                 if pattern.table_name in tables
             }
 
-        if not relevant_patterns:
-            return ""
-
-        # Build prompt section
-        lines = [
-            "\n⚠️ COMMON MISTAKES TO AVOID (learned from user feedback):",
-            ""
-        ]
-
-        for pattern in relevant_patterns.values():
-            if pattern.occurrence_count >= 1:  # Only show patterns seen at least once
-                lines.append(f"• {pattern.description}")
-                if pattern.correction:
-                    lines.append(f"  Correction: {pattern.correction}")
-                lines.append("")
-
-        return "\n".join(lines)
+        return self.build_pattern_context(list(relevant_patterns.values()))
 
     async def analyze_and_optimize(self) -> dict[str, Any]:
         """Analyze all feedback patterns and generate optimization suggestions.
@@ -260,7 +272,7 @@ class FeedbackLearner:
             reverse=True,
         )[:5]
 
-        insights = {
+        insights: dict[str, Any] = {
             "total_patterns": len(self._patterns),
             "top_error_types": top_errors,
             "recommendations": [],

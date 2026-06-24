@@ -1,4 +1,6 @@
 """Pydantic models for API request/response contracts."""
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -53,7 +55,7 @@ class QueryResponse(BaseModel):
         default_factory=list,
         description="Tables actually used in the generated SQL query.",
     )
-    execution_result: list[dict] | None = Field(
+    execution_result: list[dict[str, Any]] | None = Field(
         default=None,
         description="Query results if execute=true was requested.",
     )
@@ -67,7 +69,7 @@ class QueryResponse(BaseModel):
         default=None,
         description="Optional message for greetings or off-topic responses.",
     )
-    suggested_chart: dict | None = Field(
+    suggested_chart: dict[str, Any] | None = Field(
         default=None,
         description="Optimal chart configuration (type, x_axis, y_axis) if graphable.",
     )

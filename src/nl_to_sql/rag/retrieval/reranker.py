@@ -2,7 +2,7 @@
 
 Supports Reciprocal Rank Fusion (RRF) and optional cross-encoder reranking.
 """
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -37,7 +37,7 @@ class Reranker:
         self._top_k = top_k
         self._enabled = enabled
         self._use_cross_encoder = use_cross_encoder
-        self._model: "CrossEncoder | None" = None
+        self._model: CrossEncoder | None = None
 
     def _get_model(self) -> "CrossEncoder":
         """Lazy-load the cross-encoder model."""
@@ -155,9 +155,9 @@ class Reranker:
         model = self._get_model()
 
         pairs = [(query, chunk.content) for chunk in chunks]
-        scores = model.predict(pairs, show_progress_bar=False)
+        scores = model.predict(pairs, show_progress_bar=False)  # type: ignore[arg-type]
 
-        chunks_with_scores = list(zip(chunks, scores))
+        chunks_with_scores = list(zip(chunks, scores, strict=True))
         chunks_with_scores.sort(key=lambda x: x[1], reverse=True)
 
         reranked = [chunk for chunk, score in chunks_with_scores[:self._top_k]]
@@ -190,8 +190,8 @@ class Reranker:
         try:
             model = self._get_model()
             pairs = [(query, chunk.content) for chunk in chunks]
-            scores = model.predict(pairs, show_progress_bar=False)
-            return list(zip(chunks, scores.tolist()))
+            scores = model.predict(pairs, show_progress_bar=False)  # type: ignore[arg-type]
+            return list(zip(chunks, scores.tolist(), strict=True))
         except Exception as exc:
             logger.warning("Failed to get reranking scores", error=str(exc))
             return [(chunk, 0.0) for chunk in chunks]

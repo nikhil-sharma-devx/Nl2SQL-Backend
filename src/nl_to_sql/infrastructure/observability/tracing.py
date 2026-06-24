@@ -2,16 +2,17 @@
 import contextlib
 import functools
 import logging
-from typing import Any, Callable
+from collections.abc import Callable, Generator
+from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
 
 # Try importing opentelemetry, provide fallback/mock if imports fail.
 try:
     from opentelemetry import trace
+    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-    from opentelemetry.sdk.resources import Resource
     OPENTELEMETRY_AVAILABLE = True
 except ImportError:
     OPENTELEMETRY_AVAILABLE = False
@@ -74,8 +75,12 @@ def get_tracer() -> Any:
     return None
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
 @contextlib.contextmanager
-def trace_span(name: str, attributes: dict[str, Any] | None = None):
+def trace_span(name: str, attributes: dict[str, Any] | None = None) -> Generator[Any, None, None]:
     """Context manager to run a block of code inside an OpenTelemetry trace span.
 
     Attributes map to standard GenAI/LLM semantic conventions where possible.
@@ -92,16 +97,16 @@ def trace_span(name: str, attributes: dict[str, Any] | None = None):
         yield None
 
 
-def trace_function(name: str | None = None, attributes: dict[str, Any] | None = None) -> Callable:
+def trace_function(name: str | None = None, attributes: dict[str, Any] | None = None) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Decorator to instrument any synchronous or asynchronous function with an Otel span."""
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
         span_name = name or func.__name__
 
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             with trace_span(span_name, attributes) as span:
                 try:
-                    res = await func(*args, **kwargs)
+                    res = await func(*args, **kwargs)  # type: ignore[misc]
                     # Capture LLM evaluation tokens if returned in model properties
                     if span and res and hasattr(res, 'tokens_used') and res.tokens_used:
                         span.set_attribute("gen_ai.usage.total_tokens", res.tokens_used)
@@ -127,7 +132,12 @@ def trace_function(name: str | None = None, attributes: dict[str, Any] | None = 
                     raise
 
         import asyncio
-        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+        result: Callable[_P, _R]
+        if asyncio.iscoroutinefunction(func):
+            result = async_wrapper  # type: ignore[assignment]
+        else:
+            result = sync_wrapper
+        return result
     return decorator
 
 

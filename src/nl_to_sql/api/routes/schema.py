@@ -1,11 +1,18 @@
 """Schema management routes — ingest and inspect the schema in the vector store."""
 import json
+from typing import Any, cast
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from nl_to_sql.api.dependencies import get_current_user, get_schema_ingestion, get_vector_store, get_ingestion_pipeline, get_db_client
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_db_client,
+    get_ingestion_pipeline,
+    get_schema_ingestion,
+    get_vector_store,
+)
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
@@ -15,6 +22,16 @@ from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/schema", tags=["Schema"])
+
+_BLOCKED_SCHEMAS = frozenset({"information_schema", "pg_catalog", "pg_toast", "pg_temp"})
+
+
+def _validate_schema_name(schema_name: str) -> None:
+    if schema_name.lower() in _BLOCKED_SCHEMAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Schema '{schema_name}' is not accessible.",
+        )
 
 
 class IngestResponse(BaseModel):
@@ -97,6 +114,7 @@ async def refresh_schema(
     pipeline: IngestionPipeline = Depends(get_ingestion_pipeline),
 ) -> SchemaRefreshResponse:
     """Reflect schema from the live DB and ingest into the vector store."""
+    _validate_schema_name(schema_name)
     try:
         chunks_ingested = await pipeline.run(schema_name=schema_name, reset=True)
     except Exception as exc:
@@ -122,11 +140,12 @@ async def visualize_schema(
     schema_name: str = "public",
     current_user: UserPublic = Depends(get_current_user),
     db_client: AsyncDatabaseClient = Depends(get_db_client),
-):
+) -> dict[str, Any]:
     """Reflect schema from the live DB and return it for visualization."""
+    _validate_schema_name(schema_name)
     try:
         schema_def = await db_client.reflect_schema(schema_name=schema_name)
-        return schema_def
+        return cast(dict[str, Any], schema_def)
     except Exception as exc:
         logger.error("Schema visualization failed", error=str(exc))
         raise HTTPException(

@@ -8,7 +8,7 @@ class UserCreate(BaseModel):
     """Request body for registering a new user with email/password."""
 
     email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., min_length=8, description="Password (min 8 characters)")
+    password: str = Field(..., min_length=8, max_length=128, description="Password (min 8 characters)")
     full_name: str | None = Field(None, description="Optional display name")
 
 
@@ -16,7 +16,7 @@ class UserLogin(BaseModel):
     """Request body for email/password login."""
 
     email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., description="Password")
+    password: str = Field(..., max_length=128, description="Password")
 
 
 class GoogleAuthRequest(BaseModel):
@@ -53,7 +53,7 @@ class ResetPasswordRequest(BaseModel):
     """Request body for resetting password with OTP."""
     email: EmailStr = Field(..., description="User email address")
     otp_code: str = Field(..., description="6-digit OTP code")
-    new_password: str = Field(..., min_length=8, description="New password (min 8 characters)")
+    new_password: str = Field(..., min_length=8, max_length=128, description="New password (min 8 characters)")
 
 
 class UserPublic(BaseModel):

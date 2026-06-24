@@ -8,9 +8,8 @@ SOLID:
   S — Only generates question suggestions
   D — Depends on LLM provider for generation
 """
-from pydantic import BaseModel, Field
-
 import structlog
+from pydantic import BaseModel, Field
 
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 
@@ -34,8 +33,8 @@ class SuggestionResponse(BaseModel):
     suggestions: list[str] = Field(
         ...,
         description="List of 2-3 suggested follow-up questions",
-        min_items=2,
-        max_items=3,
+        min_length=2,
+        max_length=3,
     )
 
 
@@ -140,29 +139,29 @@ class QuestionSuggestionService:
         # Suggestion 1: Add aggregation
         if "count" not in question.lower() and "sum" not in question.lower():
             suggestions.append(
-                f"Can you show me the total count or sum for these results?"
+                "Can you show me the total count or sum for these results?"
             )
 
         # Suggestion 2: Add filtering
         if "where" not in question.lower() and "filter" not in question.lower():
             suggestions.append(
-                f"How can I filter these results by a specific condition?"
+                "How can I filter these results by a specific condition?"
             )
 
         # Suggestion 3: Time-based analysis
         if "time" not in question.lower() and "date" not in question.lower():
             suggestions.append(
-                f"Can you show me how this changes over time?"
+                "Can you show me how this changes over time?"
             )
 
         # If we still don't have enough, add generic ones
         if len(suggestions) < 2:
             suggestions.append(
-                f"What are the top results in this category?"
+                "What are the top results in this category?"
             )
         if len(suggestions) < 3:
             suggestions.append(
-                f"Can you compare this across different groups?"
+                "Can you compare this across different groups?"
             )
 
         return suggestions[:3]

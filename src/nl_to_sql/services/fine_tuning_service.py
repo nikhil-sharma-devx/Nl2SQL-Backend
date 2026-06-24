@@ -1,7 +1,7 @@
 """Fine-tuning Service — Manages LLM fine-tuning with collected training data."""
 import os
 import tempfile
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -39,7 +39,7 @@ class FineTuningService:
         self._training_data_service = training_data_service
         self._logger = logger.bind(component="FineTuningService", provider=provider)
 
-    def _openai_client(self, *, base_url: str | None = None):
+    def _openai_client(self, *, base_url: str | None = None) -> Any:
         """Return an AsyncOpenAI client, optionally pointed at an alternate base URL."""
         from openai import AsyncOpenAI
         kwargs: dict[str, Any] = {"api_key": self._api_key}
@@ -129,7 +129,7 @@ class FineTuningService:
             job = await client.fine_tuning.jobs.create(**job_params)
 
             self._logger.info("Fine-tuning job created", job_id=job.id, status=job.status)
-            return job.id
+            return cast(str, job.id)
 
         except Exception as exc:
             self._logger.error("Together AI fine-tuning failed", error=str(exc))
@@ -161,7 +161,7 @@ class FineTuningService:
             job = await client.fine_tuning.jobs.create(**job_params)
 
             self._logger.info("Fine-tuning job created", job_id=job.id, status=job.status)
-            return job.id
+            return cast(str, job.id)
 
         except Exception as exc:
             # Catch OpenAI's deprecation error and surface a helpful message

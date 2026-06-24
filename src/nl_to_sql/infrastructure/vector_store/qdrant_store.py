@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.models import PayloadSchemaType
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -63,7 +64,7 @@ def _payload_to_chunk(payload: dict[str, Any]) -> SchemaChunk:
     )
 
 
-class QdrantVectorStore(IVectorStore):
+class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
     """Qdrant-backed vector store with native hybrid search.
 
     Each document is stored with two named vectors:
@@ -131,22 +132,34 @@ class QdrantVectorStore(IVectorStore):
             return
         exists = await self._client.collection_exists(self._collection_name)
         if not exists:
-            await self._client.create_collection(
-                collection_name=self._collection_name,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=self._dimensions,
-                        distance=Distance.COSINE,
-                        hnsw_config=HnswConfigDiff(on_disk=False),
-                    ),
-                },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams(
-                        index=SparseIndexParams(on_disk=False),
-                    ),
-                },
-            )
-            logger.info("Qdrant collection created", collection=self._collection_name)
+            try:
+                await self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config={
+                        "dense": VectorParams(
+                            size=self._dimensions,
+                            distance=Distance.COSINE,
+                            hnsw_config=HnswConfigDiff(on_disk=False),
+                        ),
+                    },
+                    sparse_vectors_config={
+                        "sparse": SparseVectorParams(
+                            index=SparseIndexParams(on_disk=False),
+                        ),
+                    },
+                )
+                logger.info("Qdrant collection created", collection=self._collection_name)
+            except Exception as exc:
+                # With multiple workers (WEB_CONCURRENCY > 1) another worker may have
+                # created the collection between our collection_exists() check and here.
+                # Treat "already exists" / 409 as success; re-raise everything else.
+                if "already exists" in str(exc).lower():
+                    logger.debug(
+                        "Collection created by concurrent worker — continuing",
+                        collection=self._collection_name,
+                    )
+                else:
+                    raise
         else:
             # Load persisted schema hash into memory cache
             try:
@@ -166,7 +179,7 @@ class QdrantVectorStore(IVectorStore):
                 await self._client.create_payload_index(
                     collection_name=self._collection_name,
                     field_name=field,
-                    field_schema="keyword",
+                    field_schema=PayloadSchemaType.KEYWORD,
                 )
             except Exception:
                 pass
@@ -209,7 +222,7 @@ class QdrantVectorStore(IVectorStore):
         points = [
             PointStruct(
                 id=_to_uuid(c.chunk_id),
-                vector={"dense": c.embedding, "sparse": sv},  # type: ignore[arg-type]
+                vector={"dense": c.embedding, "sparse": sv},
                 payload={
                     "chunk_id": c.chunk_id,
                     "table_name": c.table_name,
@@ -219,7 +232,7 @@ class QdrantVectorStore(IVectorStore):
                     **c.metadata,
                 },
             )
-            for c, sv in zip(valid, sparse_vecs)
+            for c, sv in zip(valid, sparse_vecs, strict=True)
         ]
 
         try:
@@ -257,7 +270,7 @@ class QdrantVectorStore(IVectorStore):
         query_text: str,
         query_embedding: list[float],
         top_k: int = 5,
-        alpha: float = 0.5,  # noqa: ARG002 — RRF weights are server-side
+        alpha: float = 0.5,
     ) -> list[SchemaChunk]:
         """Dense + BM42 sparse search fused with Qdrant's RRF."""
         await self._ensure_initialized()
@@ -294,9 +307,11 @@ class QdrantVectorStore(IVectorStore):
             logger.info("Qdrant collection deleted", collection=self._collection_name)
         except Exception as exc:
             logger.warning("Qdrant delete_collection failed", error=_exc_detail(exc))
+        # Reset state so the next upsert/search triggers lazy re-initialization.
+        # Do NOT call _ensure_initialized() here — it would cause a 409 race when
+        # multiple workers call delete_collection() + upsert() concurrently.
         self._initialized = False
         self._schema_hash = None
-        await self._ensure_initialized()
 
     async def count(self) -> int:
         await self._ensure_initialized()
@@ -377,7 +392,8 @@ class QdrantVectorStore(IVectorStore):
         self._schema_hash = schema_hash
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._persist_schema_hash(schema_hash))
+            _task = loop.create_task(self._persist_schema_hash(schema_hash))
+            _task.add_done_callback(lambda t: None)  # prevent GC
         except RuntimeError:
             # No running event loop — hash lives in memory only; next restart re-ingests
             pass

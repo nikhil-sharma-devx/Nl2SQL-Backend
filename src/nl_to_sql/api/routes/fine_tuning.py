@@ -1,5 +1,5 @@
 """Fine-tuning routes — POST/GET /api/v1/fine-tuning/*."""
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -121,13 +121,14 @@ async def check_job_status(
     Returns:
         Job status information.
     """
-    return await fine_tuning_service.check_job_status(job_id)
+    return cast(dict[str, Any], await fine_tuning_service.check_job_status(job_id))
 
 
 @router.get("/jobs")
 async def list_jobs(
     limit: int = Query(default=10, ge=1, le=100),
-    fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
+    container: ApplicationContainer = Depends(get_container),
+    current_user: UserPublic = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     """List recent fine-tuning jobs.
 
@@ -137,7 +138,13 @@ async def list_jobs(
     Returns:
         List of job status information.
     """
-    return await fine_tuning_service.list_jobs(limit=limit)
+    try:
+        fine_tuning_service = await get_fine_tuning_service(container, current_user)
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            return []
+        raise
+    return cast(list[dict[str, Any]], await fine_tuning_service.list_jobs(limit=limit))
 
 
 @router.post("/deploy")

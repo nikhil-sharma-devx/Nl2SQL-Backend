@@ -1,9 +1,14 @@
 """Feedback route — POST /api/v1/feedback."""
-from fastapi import APIRouter, Depends, Request
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
+from nl_to_sql.api.dependencies import get_current_user, get_session_service
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.settings import get_settings
+from nl_to_sql.core.models.auth import UserPublic
+from nl_to_sql.services.chat_session_service import ChatSessionService
 
 router = APIRouter(prefix="/api/v1", tags=["Feedback"])
 _settings = get_settings()
@@ -42,11 +47,12 @@ class FeedbackResponse(BaseModel):
 async def submit_feedback(
     request: Request,
     body: FeedbackRequest,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> FeedbackResponse:
     """Submit feedback on query results."""
-    from nl_to_sql.config.container import ApplicationContainer
-    from nl_to_sql.api.dependencies import get_container
     import structlog
+
+    from nl_to_sql.api.dependencies import get_container
 
     logger = structlog.get_logger(__name__)
 
@@ -86,5 +92,38 @@ async def submit_feedback(
         logger.error("Failed to record feedback", error=str(exc))
         return FeedbackResponse(
             success=False,
-            message=f"Failed to record feedback: {str(exc)}",
+            message=f"Failed to record feedback: {exc!s}",
         )
+
+
+@router.get(
+    "/feedback",
+    summary="List feedback records",
+    description="Retrieve a list of user feedback submissions.",
+)
+async def list_feedback(
+    limit: int = Query(default=10, ge=1, le=100),
+    current_user: UserPublic = Depends(get_current_user),
+    session_service: ChatSessionService = Depends(get_session_service),
+) -> list[dict[str, Any]]:
+    """Retrieve a list of user feedback submissions."""
+    from sqlalchemy import select
+
+    from nl_to_sql.infrastructure.database.models import FeedbackRecord
+
+    async with session_service._session_factory() as session:
+        result = await session.execute(
+            select(FeedbackRecord).order_by(FeedbackRecord.timestamp.desc()).limit(limit)
+        )
+        records = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "query_id": r.query_id,
+                "session_id": r.session_id,
+                "feedback_type": r.feedback_type,
+                "feedback_data": r.feedback_data,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            }
+            for r in records
+        ]

@@ -3,10 +3,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from nl_to_sql.api.dependencies import get_db_client, get_vector_store
-from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
+from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 
-router = APIRouter(tags=["Health"])
+router = APIRouter(prefix="/api/v1", tags=["Health"])
 
 
 class HealthResponse(BaseModel):

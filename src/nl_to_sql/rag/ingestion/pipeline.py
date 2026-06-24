@@ -5,11 +5,11 @@ This is the single function you call to trigger a full re-index.
 """
 import structlog
 
-from nl_to_sql.core.exceptions import SchemaIngestionError
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaMetadata
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+from nl_to_sql.rag.ingestion.bm25_indexer import BM25Indexer
 from nl_to_sql.rag.ingestion.chunker import Chunker
 from nl_to_sql.rag.ingestion.doc_builder import DocBuilder
 from nl_to_sql.rag.ingestion.embedder import IngestionEmbedder
@@ -64,7 +64,7 @@ class IngestionPipeline:
         self._bm25_store = bm25_store
 
         # Lazy init BM25 indexer only when needed
-        self._bm25_indexer = None
+        self._bm25_indexer: BM25Indexer | None = None
 
     async def run(
         self,
@@ -122,10 +122,10 @@ class IngestionPipeline:
         if self._bm25_enabled and self._bm25_store is not None:
             log.info("Step 5: Building BM25 index")
             try:
-                from nl_to_sql.rag.ingestion.bm25_indexer import BM25Indexer
                 if self._bm25_indexer is None:
                     self._bm25_indexer = BM25Indexer(self._bm25_store)
-                self._bm25_indexer.build_index(chunks)
+                bm25_indexer = self._bm25_indexer
+                bm25_indexer.build_index(chunks)
             except Exception as exc:
                 log.warning("BM25 indexing failed — skipping", error=str(exc))
         else:
@@ -133,9 +133,9 @@ class IngestionPipeline:
 
         # Step 6: Write to vector store
         log.info("Step 6: Writing to vector store")
-        count = await self._vector_writer.write(
+        count = int(await self._vector_writer.write(
             embedded_chunks, schema=schema, reset=reset
-        )
+        ))
 
         log.info(
             "Ingestion pipeline complete",

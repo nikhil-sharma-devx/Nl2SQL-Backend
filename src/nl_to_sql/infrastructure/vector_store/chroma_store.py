@@ -1,6 +1,8 @@
 """ChromaDB vector store — implements IVectorStore."""
-import structlog
+from typing import Any
+
 import chromadb
+import structlog
 from chromadb.config import Settings
 
 from nl_to_sql.core.exceptions import VectorStoreError
@@ -10,7 +12,7 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
-class ChromaVectorStore(IVectorStore):
+class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
     """Persistent ChromaDB backed vector store for schema chunks.
 
     Stores and retrieves SchemaChunk objects using cosine similarity.
@@ -50,8 +52,9 @@ class ChromaVectorStore(IVectorStore):
         try:
             # Try to get the special schema_hash chunk
             result = self._collection.get(ids=["_schema_hash"])
-            if result and result.get("metadatas") and len(result["metadatas"]) > 0:
-                return result["metadatas"][0].get("hash")
+            metadatas = result.get("metadatas")
+            if result and metadatas and len(metadatas) > 0:
+                return str(metadatas[0].get("hash")) if metadatas[0].get("hash") else None
             return None
         except Exception:
             return None
@@ -92,8 +95,8 @@ class ChromaVectorStore(IVectorStore):
                     self._collection.upsert(
                         ids=ids,
                         documents=documents,
-                        embeddings=embeddings,  # type: ignore[arg-type]
-                        metadatas=metadatas,    # type: ignore[arg-type]
+                        embeddings=embeddings,
+                        metadatas=metadatas,  # type: ignore[arg-type]
                     )
                     logger.info("Upserted schema chunks", count=len(chunks))
                     return  # Success, exit retry loop
@@ -121,7 +124,7 @@ class ChromaVectorStore(IVectorStore):
         """Return top-k most similar schema chunks."""
         try:
             results = self._collection.query(
-                query_embeddings=[query_embedding],
+                query_embeddings=[query_embedding],  # type: ignore[arg-type]
                 n_results=min(top_k, self._collection.count()),
                 include=["documents", "metadatas", "distances"],
             )
@@ -151,7 +154,7 @@ class ChromaVectorStore(IVectorStore):
         metadatas = results.get("metadatas") or [[]]
         ids = results.get("ids") or [[]]
 
-        for doc, meta, chunk_id in zip(documents[0], metadatas[0], ids[0]):
+        for doc, meta, chunk_id in zip(documents[0], metadatas[0], ids[0], strict=True):
             chunks.append(
                 SchemaChunk(
                     chunk_id=chunk_id,
@@ -275,7 +278,7 @@ class ChromaVectorStore(IVectorStore):
         if not table_names:
             return []
         try:
-            where_filter: dict = (
+            where_filter: dict[str, Any] = (
                 {"table_name": {"$in": table_names}}
                 if len(table_names) > 1
                 else {"table_name": table_names[0]}
@@ -294,7 +297,7 @@ class ChromaVectorStore(IVectorStore):
         metadatas = result.get("metadatas") or []
         ids = result.get("ids") or []
 
-        for doc, meta, chunk_id in zip(documents, metadatas, ids):
+        for doc, meta, chunk_id in zip(documents, metadatas, ids, strict=True):
             # Skip the internal schema-hash sentinel record
             if chunk_id == "_schema_hash":
                 continue
@@ -334,5 +337,5 @@ class ChromaVectorStore(IVectorStore):
             name = meta.get("table_name", "")
             # Skip the internal hash sentinel and empty names
             if name and meta.get("type") != "schema_hash":
-                table_names.add(name)
+                table_names.add(str(name))
         return sorted(table_names)

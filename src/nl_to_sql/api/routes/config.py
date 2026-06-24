@@ -1,11 +1,16 @@
 """Configuration routes — GET/PUT /api/v1/config/llm, GET /api/v1/config/models, GET/PUT /api/v1/config/database."""
+import ipaddress
+import re
+import socket
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from nl_to_sql.api.dependencies import get_container
+from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import get_settings
+from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.config import (
     AvailableModelsResponse,
     DatabaseConfigResponse,
@@ -22,6 +27,45 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v1/config", tags=["Configuration"])
 _settings = get_settings()
 _rate = f"{_settings.rate_limit_requests}/minute"
+
+_PRIVATE_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+]
+
+
+def _reject_ssrf_host(url: str) -> None:
+    """Resolve URL hostname and raise HTTP 400 if it targets a private/internal IP."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        if not host:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid database URL: missing host.")
+        addrs = socket.getaddrinfo(host, None)
+        for addr_info in addrs:
+            ip = ipaddress.ip_address(addr_info[4][0])
+            if any(ip in net for net in _PRIVATE_NETS):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Database URL targets a reserved or internal network address.",
+                )
+    except HTTPException:
+        raise
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Database host could not be resolved.",
+        ) from None
+
+
+def _mask_url(url: str) -> str:
+    return re.sub(r":([^:@]+)@", ":***@", url)
+
 
 # Available models per provider
 AVAILABLE_MODELS = {
@@ -61,6 +105,7 @@ async def update_llm_config(
     request: Request,  # required by SlowAPI for IP extraction
     body: LLMConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
+    _admin: UserPublic = Depends(require_admin),
 ) -> LLMConfigUpdateResponse:
     """Update the LLM provider and model at runtime.
 
@@ -130,12 +175,16 @@ async def get_available_models() -> AvailableModelsResponse:
 )
 async def get_database_config(
     container: ApplicationContainer = Depends(get_container),
+    current_user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConfigResponse:
     """Get the current database connection string and available DBs."""
     settings = container.config()
     return DatabaseConfigResponse(
-        database_url=settings.database_url,
-        available_databases=settings.parsed_available_databases,
+        database_url=_mask_url(settings.database_url),
+        available_databases={
+            name: _mask_url(url)
+            for name, url in settings.parsed_available_databases.items()
+        },
     )
 
 
@@ -150,6 +199,7 @@ async def update_database_config(
     request: Request,
     body: DatabaseConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
+    _admin: UserPublic = Depends(require_admin),
 ) -> DatabaseConfigUpdateResponse:
     """Update the target database connection string at runtime.
 
@@ -171,6 +221,9 @@ async def update_database_config(
     if "sslmode=" in new_url:
         new_url = new_url.replace("sslmode=", "ssl=")
 
+    # Guard against SSRF before opening any network connection
+    _reject_ssrf_host(new_url)
+
     # Verify the new connection works before switching
     try:
         temp_client = AsyncDatabaseClient(database_url=new_url)
@@ -191,7 +244,7 @@ async def update_database_config(
         logger.error("Database connection test failed", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Database connection failed: {exc}",
+            detail="Database connection failed. Check the host, port, credentials, and SSL settings.",
         ) from exc
 
     # Switch target engine and dispose old pools actively
@@ -199,6 +252,6 @@ async def update_database_config(
     logger.info("Database connection updated at runtime")
 
     return DatabaseConfigUpdateResponse(
-        database_url=new_url,
+        database_url=_mask_url(new_url),
         message="Database connection updated successfully.",
     )

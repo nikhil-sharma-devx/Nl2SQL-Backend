@@ -1,6 +1,5 @@
 """F2 + F4 - User Settings routes (GET/PATCH /api/v1/settings)."""
 from datetime import datetime
-from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,6 +19,8 @@ _KEYWORD_CASE = {"upper", "lower"}
 _CTE_PREF = {"cte", "subquery"}
 _ALIAS_STYLE = {"as", "implicit"}
 _RETENTION = {"forever", "30d", "7d", "none"}
+_FONT_SIZE = {"small", "medium", "large"}
+_UI_DENSITY = {"compact", "comfortable", "spacious"}
 
 
 class SettingsResponse(BaseModel):
@@ -32,6 +33,8 @@ class SettingsResponse(BaseModel):
     auto_execute: bool
     default_model: str | None
     data_retention: str
+    font_size: str
+    ui_density: str
 
 
 class SettingsPatchRequest(BaseModel):
@@ -44,6 +47,8 @@ class SettingsPatchRequest(BaseModel):
     auto_execute: bool | None = None
     default_model: str | None = None
     data_retention: str | None = None
+    font_size: str | None = None
+    ui_density: str | None = None
 
 
 def _default_settings() -> SettingsResponse:
@@ -57,10 +62,19 @@ def _default_settings() -> SettingsResponse:
         auto_execute=False,
         default_model=None,
         data_retention="forever",
+        font_size="medium",
+        ui_density="comfortable",
     )
 
 
 def _to_response(s: UserSettings) -> SettingsResponse:
+    font_size = getattr(s, "font_size", "medium")
+    if not isinstance(font_size, str):
+        font_size = "medium"
+    ui_density = getattr(s, "ui_density", "comfortable")
+    if not isinstance(ui_density, str):
+        ui_density = "comfortable"
+
     return SettingsResponse(
         sql_keyword_case=s.sql_keyword_case,
         sql_cte_pref=s.sql_cte_pref,
@@ -71,6 +85,8 @@ def _to_response(s: UserSettings) -> SettingsResponse:
         auto_execute=s.auto_execute,
         default_model=s.default_model,
         data_retention=s.data_retention,
+        font_size=font_size,
+        ui_density=ui_density,
     )
 
 
@@ -104,6 +120,10 @@ async def patch_settings(
         errors.append(f"sql_alias_style must be one of {_ALIAS_STYLE}")
     if body.data_retention is not None and body.data_retention not in _RETENTION:
         errors.append(f"data_retention must be one of {_RETENTION}")
+    if body.font_size is not None and body.font_size not in _FONT_SIZE:
+        errors.append(f"font_size must be one of {_FONT_SIZE}")
+    if body.ui_density is not None and body.ui_density not in _UI_DENSITY:
+        errors.append(f"ui_density must be one of {_UI_DENSITY}")
     if errors:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(errors))
 

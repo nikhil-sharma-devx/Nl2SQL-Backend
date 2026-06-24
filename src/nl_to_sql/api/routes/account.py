@@ -1,5 +1,6 @@
 """F7 - Account management: data retention + account deletion."""
 from datetime import datetime, timedelta
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -117,7 +118,7 @@ async def request_account_deletion(
 async def cancel_account_deletion(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-) -> dict:
+) -> dict[str, Any]:
     async with session_service._session_factory() as db:
         result = await db.execute(
             select(AccountDeletion).where(

@@ -1,6 +1,7 @@
 """HuggingFace Sentence-Transformers embedding provider — implements IEmbedder."""
-import structlog
 from typing import TYPE_CHECKING
+
+import structlog
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -11,7 +12,7 @@ from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 logger = structlog.get_logger(__name__)
 
 
-class HuggingFaceEmbedder(IEmbedder):
+class HuggingFaceEmbedder(IEmbedder):  # type: ignore[misc]
     """Embeds text using HuggingFace's sentence-transformers library.
 
     SOLID:
@@ -29,7 +30,7 @@ class HuggingFaceEmbedder(IEmbedder):
     ) -> None:
         self._model_name = model
         self._dimensions = dimensions
-        self._model: "SentenceTransformer | None" = None
+        self._model: SentenceTransformer | None = None
 
     def _get_model(self) -> "SentenceTransformer":
         """Lazy-load the sentence-transformer model."""

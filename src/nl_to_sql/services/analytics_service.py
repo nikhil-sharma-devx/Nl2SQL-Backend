@@ -6,8 +6,7 @@ import structlog
 from sqlalchemy import Integer, String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from nl_to_sql.infrastructure.database.models import Base, QueryHistoryRecord, ChatMessage
-from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
+from nl_to_sql.infrastructure.database.models import ChatMessage, QueryHistoryRecord
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
 logger = structlog.get_logger(__name__)
@@ -35,8 +34,8 @@ class AnalyticsService:
             database_url,
             echo=False,
             pool_pre_ping=False,
-            pool_size=2,
-            max_overflow=2,
+            pool_size=1,
+            max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
         )
@@ -61,6 +60,7 @@ class AnalyticsService:
         Returns:
             Dictionary with summary statistics.
         """
+        days = max(1, min(days, 365))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -69,8 +69,8 @@ class AnalyticsService:
                 agg_result = await session.execute(
                     select(
                         func.count().filter(ChatMessage.sql != "").label("total"),
-                        func.count().filter(ChatMessage.sql != "", ChatMessage.is_valid == True).label("successful"),
-                        func.count().filter(ChatMessage.sql != "", ChatMessage.cached == True).label("cached"),
+                        func.count().filter(ChatMessage.sql != "", ChatMessage.is_valid.is_(True)).label("successful"),
+                        func.count().filter(ChatMessage.sql != "", ChatMessage.cached.is_(True)).label("cached"),
                         func.avg(ChatMessage.tokens_used).filter(ChatMessage.sql != "").label("avg_tokens"),
                         func.avg(ChatMessage.response_time_ms).filter(
                             ChatMessage.sql != "", ChatMessage.response_time_ms.isnot(None)
@@ -112,6 +112,8 @@ class AnalyticsService:
         Returns:
             List of popular queries with counts.
         """
+        days = max(1, min(days, 365))
+        limit = max(1, min(limit, 1000))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -148,6 +150,7 @@ class AnalyticsService:
         Returns:
             List of failure reasons with counts.
         """
+        days = max(1, min(days, 365))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -164,7 +167,7 @@ class AnalyticsService:
                     .where(
                         ChatMessage.timestamp >= cutoff,
                         ChatMessage.sql != "",
-                        ChatMessage.is_valid == False,
+                        ChatMessage.is_valid.is_(False),
                         ChatMessage.validation_errors.isnot(None),
                     )
                     .group_by(validation_errors_text)
@@ -191,6 +194,8 @@ class AnalyticsService:
         Returns:
             List of tables with usage counts.
         """
+        days = max(1, min(days, 365))
+        limit = max(1, min(limit, 1000))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -225,6 +230,7 @@ class AnalyticsService:
         Returns:
             List of intent types with counts.
         """
+        days = max(1, min(days, 365))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -261,6 +267,7 @@ class AnalyticsService:
         Returns:
             List of prompt versions with success rates.
         """
+        days = max(1, min(days, 365))
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -305,6 +312,7 @@ class AnalyticsService:
             Dictionary with counts of deleted records.
         """
         from sqlalchemy import delete
+
         from nl_to_sql.infrastructure.database.models import FeedbackRecord, TrainingDataRecord
 
         try:
@@ -313,9 +321,9 @@ class AnalyticsService:
                 r1 = await session.execute(delete(QueryHistoryRecord))
                 r2 = await session.execute(delete(FeedbackRecord))
                 r3 = await session.execute(delete(TrainingDataRecord))
-                query_count = r1.rowcount
-                feedback_count = r2.rowcount
-                training_count = r3.rowcount
+                query_count = r1.rowcount  # type: ignore[attr-defined]
+                feedback_count = r2.rowcount  # type: ignore[attr-defined]
+                training_count = r3.rowcount  # type: ignore[attr-defined]
                 await session.commit()
 
                 self._logger.info(

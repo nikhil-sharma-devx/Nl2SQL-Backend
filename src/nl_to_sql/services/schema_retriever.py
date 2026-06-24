@@ -1,4 +1,4 @@
-"""Schema retriever — RAG step: embed query → find relevant schema chunks.
+﻿"""Schema retriever â€” RAG step: embed query â†’ find relevant schema chunks.
 
 NOTE: This module is kept for backward compatibility. New code should prefer
 ``rag.retrieval.retrieval_chain.RetrievalChain`` which adds BM25 sparse
@@ -25,8 +25,8 @@ class SchemaRetriever:
     Supports both pure vector search and hybrid search (vector + BM25).
 
     SOLID:
-      S — Purely responsible for schema retrieval; not generation.
-      D — Depends on IEmbedder and IVectorStore abstractions.
+      S â€” Purely responsible for schema retrieval; not generation.
+      D â€” Depends on IEmbedder and IVectorStore abstractions.
     """
 
     def __init__(
@@ -43,11 +43,12 @@ class SchemaRetriever:
         self._use_hybrid_search = use_hybrid_search
         self._hybrid_alpha = hybrid_alpha
 
-    async def retrieve(self, question: str) -> list[SchemaChunk]:
+    async def retrieve(self, question: str, top_k: int | None = None) -> list[SchemaChunk]:
         """Retrieve top-k schema chunks most relevant to the question.
 
         Args:
             question: The natural language query from the user.
+            top_k: Per-call override for top_k; uses instance default when None.
 
         Returns:
             Ordered list of SchemaChunk (most relevant first).
@@ -56,7 +57,8 @@ class SchemaRetriever:
             EmptySchemaError: If the vector store contains no chunks.
             SchemaRetrievalError: On embedding or retrieval errors.
         """
-        log = logger.bind(question=question[:80], top_k=self._top_k)
+        effective_k = top_k if top_k is not None else self._top_k
+        log = logger.bind(question=question[:80], top_k=effective_k)
 
         count = await self._vector_store.count()
         if count == 0:
@@ -80,14 +82,14 @@ class SchemaRetriever:
                 chunks = await self._vector_store.hybrid_search(
                     query_text=question,
                     query_embedding=query_embedding,
-                    top_k=self._top_k,
+                    top_k=effective_k,
                     alpha=self._hybrid_alpha,
                 )
             else:
                 log.debug("Using pure vector search")
                 chunks = await self._vector_store.similarity_search(
                     query_embedding=query_embedding,
-                    top_k=self._top_k,
+                    top_k=effective_k,
                 )
         except Exception as exc:
             raise SchemaRetrievalError(
@@ -96,7 +98,7 @@ class SchemaRetriever:
 
         log.info("Schema chunks retrieved", count=len(chunks),
                  tables=[c.table_name for c in chunks])
-        return chunks
+        return chunks  # type: ignore[no-any-return]
 
     def build_schema_context(self, chunks: list[SchemaChunk]) -> str:
         """Concatenate chunk contents into a single schema context block.
@@ -126,7 +128,7 @@ class SchemaRetriever:
             table_names: List of exact table names (from TableSelectorService).
 
         Returns:
-            List of SchemaChunk objects — one per matched table.
+            List of SchemaChunk objects â€” one per matched table.
         """
         if not table_names:
             return []
@@ -138,7 +140,7 @@ class SchemaRetriever:
             requested=len(table_names),
             found=len(chunks),
         )
-        return chunks
+        return chunks  # type: ignore[no-any-return]
 
     async def get_all_table_names(self) -> list[str]:
         """Return all table names currently ingested in the vector store.
@@ -149,4 +151,4 @@ class SchemaRetriever:
         Returns:
             Sorted list of unique table name strings.
         """
-        return await self._vector_store.get_all_table_names()
+        return await self._vector_store.get_all_table_names()  # type: ignore[no-any-return]

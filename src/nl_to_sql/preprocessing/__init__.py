@@ -13,7 +13,7 @@ orchestrator. Import them from services/ or use this package's lazy imports.
 """
 
 # Lazy imports to avoid circular dependencies
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     if name == "QueryClassifier":
         from nl_to_sql.services.query_classifier import QueryClassifier
         return QueryClassifier

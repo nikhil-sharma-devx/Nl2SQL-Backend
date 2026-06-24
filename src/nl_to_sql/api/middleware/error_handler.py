@@ -1,4 +1,6 @@
 """Global exception handler middleware — maps domain errors to HTTP responses."""
+from typing import Any
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -12,7 +14,6 @@ from nl_to_sql.core.exceptions import (
     SQLGenerationError,
     SQLValidationError,
 )
-
 
 _ERROR_STATUS_MAP: dict[type, int] = {
     EmptySchemaError: 503,
@@ -54,7 +55,7 @@ async def domain_exception_handler(request: Request, exc: Exception) -> JSONResp
             error_code = _ERROR_CODE_MAP.get(exc_type, "INTERNAL_ERROR")
             break
 
-    payload: dict = {
+    payload: dict[str, Any] = {
         "code": error_code,
         "message": str(exc),
     }

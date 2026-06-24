@@ -19,7 +19,7 @@ class ILLMProvider(ABC):
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
-        response_format: dict | None = None,
+        response_format: dict[str, str] | None = None,
         model_override: str | None = None,
     ) -> LLMResponse:
         """Send a chat-completion request and return a structured response.

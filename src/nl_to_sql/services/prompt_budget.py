@@ -11,6 +11,8 @@ Log every truncation so missing-context bugs are reproducible.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -36,7 +38,7 @@ class PromptBudget:
         user_query: str,
         custom_instructions: str | None,
         schema_chunks: list[str],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Fit prompt components into the budget. Returns the components to use and a truncation log."""
         remaining = self.budget_tokens
         truncations: list[str] = []

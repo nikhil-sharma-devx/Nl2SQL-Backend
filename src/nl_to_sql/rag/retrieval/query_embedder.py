@@ -1,4 +1,4 @@
-"""Query embedder — embeds the user's NL question for retrieval.
+﻿"""Query embedder â€” embeds the user's NL question for retrieval.
 
 Uses the same embedding model as the ingestion pipeline to ensure
 compatible vector spaces. Caches results by query hash to avoid
@@ -18,8 +18,8 @@ class QueryEmbedder:
     """Embeds user questions for vector search during retrieval.
 
     SOLID:
-      S — Only embeds queries; does not search or rank.
-      D — Depends on IEmbedder abstraction.
+      S â€” Only embeds queries; does not search or rank.
+      D â€” Depends on IEmbedder abstraction.
     """
 
     def __init__(self, embedder: IEmbedder) -> None:
@@ -56,4 +56,4 @@ class QueryEmbedder:
 
         self._cache[cache_key] = embedding
         logger.debug("Query embedded and cached", question=question[:60])
-        return embedding
+        return embedding  # type: ignore[no-any-return]

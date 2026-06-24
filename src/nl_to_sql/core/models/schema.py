@@ -1,4 +1,6 @@
 """Pydantic models for database schema representation."""
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -41,7 +43,7 @@ class SchemaChunk(BaseModel):
         default=None,
         description="Dense vector representation (populated after embedding).",
     )
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_text(self) -> str:
         """Return the chunk content used for LLM prompt injection."""

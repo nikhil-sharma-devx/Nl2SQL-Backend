@@ -1,8 +1,10 @@
 """History routes — GET /api/v1/history, DELETE /api/v1/history."""
+import asyncio
 import csv
 import io
 import json
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -14,7 +16,7 @@ from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
 from nl_to_sql.services.chat_session_service import ChatSessionService
-from nl_to_sql.services.query_history import HistoryEntry, QueryHistoryService
+from nl_to_sql.services.query_history import QueryHistoryService
 
 router = APIRouter(prefix="/api/v1", tags=["History"])
 
@@ -95,9 +97,10 @@ async def get_history(
     )
 
 
-async def _gather_history(session_service: ChatSessionService, limit: int, offset: int):
+async def _gather_history(
+    session_service: ChatSessionService, limit: int, offset: int
+) -> tuple[Any, Any]:
     """Fetch messages and total count concurrently."""
-    import asyncio
     return await asyncio.gather(
         session_service.list_all_messages(limit=limit, offset=offset),
         session_service.count_all_messages(),
@@ -111,6 +114,7 @@ async def _gather_history(session_service: ChatSessionService, limit: int, offse
     description="Removes all entries from the legacy query_history table. Chat sessions and messages are preserved.",
 )
 async def clear_history(
+    current_user: UserPublic = Depends(get_current_user),
     history_service: QueryHistoryService = Depends(get_query_history),
 ) -> ClearHistoryResponse:
     """Clear legacy query_history records. Use DELETE /sessions to clear chat data."""

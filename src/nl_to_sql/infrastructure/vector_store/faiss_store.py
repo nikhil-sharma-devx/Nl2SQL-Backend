@@ -1,9 +1,8 @@
 """FAISS vector store — implements IVectorStore (in-memory, no persistence)."""
 from __future__ import annotations
 
-import json
-import structlog
 import numpy as np
+import structlog
 
 from nl_to_sql.core.exceptions import VectorStoreError
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
@@ -12,7 +11,7 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
-class FAISSVectorStore(IVectorStore):
+class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
     """FAISS-backed in-memory vector store.
 
     Useful for environments where ChromaDB is not available or for ultra-fast
@@ -25,7 +24,7 @@ class FAISSVectorStore(IVectorStore):
 
     def __init__(self, dimensions: int = 1536) -> None:
         try:
-            import faiss  # type: ignore[import]
+            import faiss
             self._faiss = faiss
         except ImportError as exc:
             raise ImportError(

@@ -1,6 +1,7 @@
 """FastAPI dependency providers — bridge between DI container and route handlers."""
 from __future__ import annotations
 
+import time
 from functools import lru_cache
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
+from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.query_history import QueryHistoryService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
@@ -71,7 +73,7 @@ def get_ingestion_pipeline() -> IngestionPipeline:
     return _get_container().ingestion_pipeline()
 
 
-def get_api_key_service():
+def get_api_key_service() -> APIKeyService:
     """Dependency: APIKeyService (for per-user API key management)."""
     return _get_container().api_key_service()
 
@@ -135,6 +137,16 @@ async def get_request_orchestrator(
         feedback_learner=container.feedback_learner(),
     )
 
+    # Resolve user_id for per-user cache isolation
+    resolved_user_id: str | None = None
+    if credentials is not None:
+        try:
+            from nl_to_sql.services.auth_service import decode_access_token
+            _td = decode_access_token(credentials.credentials)
+            resolved_user_id = _td.user_id
+        except Exception:
+            pass
+
     return QueryOrchestrator(
         retriever=container.schema_retriever(),
         generator=sql_generator,
@@ -149,10 +161,43 @@ async def get_request_orchestrator(
         table_selector=container.table_selector(),
         fk_extractor=container.fk_extractor(),
         column_validator=container.column_validator(),
+        user_id=resolved_user_id,
     )
 
 
 # ── Auth Dependency ────────────────────────────────────────────────────────────
+
+_AUTH_CACHE_TTL = 45  # seconds
+_auth_cache: dict[str, tuple[float, UserPublic]] = {}
+
+
+def _auth_cache_get(cache_key: str) -> UserPublic | None:
+    entry = _auth_cache.get(cache_key)
+    if entry and time.monotonic() - entry[0] < _AUTH_CACHE_TTL:
+        return entry[1]
+    _auth_cache.pop(cache_key, None)
+    return None
+
+
+def _auth_cache_set(cache_key: str, user: UserPublic) -> None:
+    if len(_auth_cache) > 4096:
+        # Evict oldest quarter to bound memory use
+        oldest = sorted(_auth_cache, key=lambda k: _auth_cache[k][0])[: len(_auth_cache) // 4]
+        for k in oldest:
+            _auth_cache.pop(k, None)
+    _auth_cache[cache_key] = (time.monotonic(), user)
+
+
+def auth_cache_invalidate_session(user_id: str, session_id: str | None) -> None:
+    """Remove a specific session from the auth cache (call on logout/revoke)."""
+    _auth_cache.pop(f"{user_id}:{session_id}", None)
+
+
+def auth_cache_invalidate_user(user_id: str) -> None:
+    """Remove all cache entries for a user (call on revoke-all or deactivation)."""
+    keys = [k for k in _auth_cache if k.startswith(f"{user_id}:")]
+    for k in keys:
+        _auth_cache.pop(k, None)
 
 
 async def get_current_user(
@@ -187,8 +232,12 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    # Verify user still exists and is active, and that their login session has not been revoked
-    from nl_to_sql.infrastructure.database.models import User, UserLoginSession
+    cache_key = f"{token_data.user_id}:{token_data.session_id}"
+    cached = _auth_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    from nl_to_sql.infrastructure.database.models import UserLoginSession
 
     session_svc: ChatSessionService = _get_container().session_service()
     async with session_svc._session_factory() as db_sess:
@@ -218,4 +267,24 @@ async def get_current_user(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-    return UserPublic.model_validate(user)
+    user_public = UserPublic.model_validate(user)
+    _auth_cache_set(cache_key, user_public)
+    return user_public
+
+
+async def require_admin(
+    current_user: UserPublic = Security(get_current_user),
+) -> UserPublic:
+    """FastAPI dependency: requires the current user to be an admin.
+
+    Admins are defined via the ADMIN_EMAILS setting (comma-separated list).
+    Returns the user on success; raises HTTP 403 otherwise.
+    """
+    from nl_to_sql.config.settings import get_settings
+    settings = get_settings()
+    if current_user.email.lower() not in settings.admin_email_list:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required.",
+        )
+    return current_user

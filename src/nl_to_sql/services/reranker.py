@@ -4,7 +4,7 @@ NOTE: This module is kept for backward compatibility. New code should prefer
 ``rag.retrieval.reranker.Reranker`` which adds RRF (Reciprocal Rank Fusion)
 for merging dense + sparse results in addition to cross-encoder reranking.
 """
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -40,7 +40,7 @@ class CrossEncoderReranker:
         self._model_name = model_name
         self._top_k = top_k
         self._enabled = enabled
-        self._model: "CrossEncoder | None" = None
+        self._model: CrossEncoder | None = None
         self._logger = logger.bind(component="CrossEncoderReranker")
 
     def _get_model(self) -> "CrossEncoder":
@@ -83,11 +83,11 @@ class CrossEncoderReranker:
             pairs = [(query, chunk.content) for chunk in chunks]
 
             # Score all pairs
-            scores = model.predict(pairs, show_progress_bar=False)
+            scores = model.predict(pairs, show_progress_bar=False)  # type: ignore[arg-type]
 
             # Attach scores to chunks
             chunks_with_scores: list[tuple[SchemaChunk, float]] = list(
-                zip(chunks, scores)
+                zip(chunks, scores, strict=True)
             )
 
             # Sort by score descending
@@ -132,8 +132,8 @@ class CrossEncoderReranker:
         try:
             model = self._get_model()
             pairs = [(query, chunk.content) for chunk in chunks]
-            scores = model.predict(pairs, show_progress_bar=False)
-            return list(zip(chunks, scores.tolist()))
+            scores = model.predict(pairs, show_progress_bar=False)  # type: ignore[arg-type]
+            return list(zip(chunks, scores.tolist(), strict=True))
         except Exception as exc:
             self._logger.warning("Failed to get re-ranking scores", error=str(exc))
             return [(chunk, 0.0) for chunk in chunks]

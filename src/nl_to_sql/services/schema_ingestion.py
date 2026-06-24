@@ -7,6 +7,8 @@ six-step ingestion flow (load → build → chunk → embed → BM25 → vector 
 The ``build_schema_from_dict`` static method delegates to
 ``rag.ingestion.schema_loader.SchemaLoader.build_schema_from_dict``.
 """
+from typing import Any
+
 import structlog
 
 from nl_to_sql.core.exceptions import SchemaIngestionError
@@ -67,7 +69,7 @@ class SchemaIngestionService:
                 f"Failed to embed schema chunks: {exc}"
             ) from exc
 
-        for chunk, embedding in zip(chunks, embeddings):
+        for chunk, embedding in zip(chunks, embeddings, strict=True):
             chunk.embedding = embedding
 
         try:
@@ -136,10 +138,10 @@ class SchemaIngestionService:
         """Compute a deterministic hash for a schema to detect changes."""
         import hashlib
         import json
-        
+
         # Sort tables and columns to ensure deterministic hashing
         sorted_tables = sorted(schema.tables, key=lambda t: t.name)
-        
+
         schema_dict = {
             "database_name": schema.database_name,
             "dialect": schema.dialect,
@@ -150,12 +152,12 @@ class SchemaIngestionService:
                     "description": t.description,
                     "columns": [
                         {
-                            "name": c.name, 
+                            "name": c.name,
                             "data_type": c.data_type,
                             "primary_key": c.primary_key,
                             "foreign_key": c.foreign_key,
                             "nullable": c.nullable
-                        } 
+                        }
                         for c in sorted(t.columns, key=lambda c: c.name)
                     ]
                 }
@@ -167,7 +169,7 @@ class SchemaIngestionService:
         ).hexdigest()
 
     @staticmethod
-    def build_schema_from_dict(raw: dict) -> SchemaMetadata:
+    def build_schema_from_dict(raw: dict[str, Any]) -> SchemaMetadata:
         """Construct a SchemaMetadata from a plain Python dict.
 
         Useful for loading schema from a JSON config file or DB reflection.

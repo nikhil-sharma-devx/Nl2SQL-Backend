@@ -1,10 +1,11 @@
 """OpenAI LLM provider — implements ILLMProvider."""
 import re
 from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
-from openai import AsyncOpenAI
 from openai import APIError as OpenAIAPIError
+from openai import AsyncOpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
 from nl_to_sql.core.exceptions import LLMProviderError, RateLimitError
@@ -14,7 +15,7 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class OpenAIProvider(ILLMProvider):
+class OpenAIProvider(ILLMProvider):  # type: ignore[misc]
     """Concrete LLM provider backed by OpenAI (GPT models).
 
     SOLID:
@@ -46,16 +47,17 @@ class OpenAIProvider(ILLMProvider):
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
-        response_format: dict | None = None,
+        response_format: dict[str, Any] | None = None,
         model_override: str | None = None,
     ) -> LLMResponse:
         """Send a chat-completion request to OpenAI."""
         self._check_key()
+        assert self._client is not None
         model = model_override or self._model
         log = logger.bind(model=model, provider="openai")
         try:
             log.debug("Sending completion request")
-            kwargs: dict = {
+            kwargs: dict[str, Any] = {
                 "model": model,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -95,7 +97,7 @@ class OpenAIProvider(ILLMProvider):
 
     async def health_check(self) -> bool:
         """Ping OpenAI by listing models."""
-        if not self._api_key:
+        if not self._api_key or self._client is None:
             return False
         try:
             await self._client.models.list()
@@ -112,6 +114,7 @@ class OpenAIProvider(ILLMProvider):
     ) -> AsyncIterator[str]:
         """Stream a chat-completion response from OpenAI token by token."""
         self._check_key()
+        assert self._client is not None
         log = logger.bind(model=self._model, provider="openai", streaming=True)
         try:
             log.debug("Starting streaming completion request")
