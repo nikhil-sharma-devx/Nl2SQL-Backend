@@ -68,12 +68,14 @@ class Settings(BaseSettings):
     smtp_from_email: str = "noreply@nl2sql.local"
 
     # ── LLM ─────────────────────────────────────────────────────────────────
-    llm_provider: Literal["groq", "openai"] = "groq"
+    llm_provider: Literal["groq", "openai", "anthropic", "gemini"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
     llm_max_tokens: int = 1024
     llm_temperature: float = 0.0
     groq_api_key: str = Field(default="", description="Required when llm_provider=groq")
     openai_api_key: str = Field(default="", description="Required when llm_provider=openai")
+    anthropic_api_key: str = Field(default="", description="Required when llm_provider=anthropic")
+    gemini_api_key: str = Field(default="", description="Required when llm_provider=gemini")
     together_api_key: str = Field(default="", description="Required when fine_tuning_provider=together")
 
     # ── Embeddings ───────────────────────────────────────────────────────────
@@ -207,10 +209,25 @@ class Settings(BaseSettings):
     @classmethod
     def validate_groq_key(cls, v: str, info: object) -> str:
         """Validate groq key if provider is groq."""
-        # Using getattr to safely access values when fields are missing
         provider = getattr(info, "data", {}).get("llm_provider")
         if provider == "groq" and not v:
             logger.warning("groq_api_key is empty while llm_provider is groq")
+        return v
+
+    @field_validator("anthropic_api_key")
+    @classmethod
+    def validate_anthropic_key(cls, v: str, info: object) -> str:
+        provider = getattr(info, "data", {}).get("llm_provider")
+        if provider == "anthropic" and not v:
+            logger.warning("anthropic_api_key is empty while llm_provider is anthropic")
+        return v
+
+    @field_validator("gemini_api_key")
+    @classmethod
+    def validate_gemini_key(cls, v: str, info: object) -> str:
+        provider = getattr(info, "data", {}).get("llm_provider")
+        if provider == "gemini" and not v:
+            logger.warning("gemini_api_key is empty while llm_provider is gemini")
         return v
 
     _WEAK_SECRET_DEFAULTS: frozenset[str] = frozenset({
@@ -263,6 +280,10 @@ class Settings(BaseSettings):
         """Return the active LLM provider's API key."""
         if self.llm_provider == "openai":
             return self.openai_api_key
+        if self.llm_provider == "anthropic":
+            return self.anthropic_api_key
+        if self.llm_provider == "gemini":
+            return self.gemini_api_key
         return self.groq_api_key
 
 

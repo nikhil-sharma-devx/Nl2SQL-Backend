@@ -39,14 +39,10 @@ class LLMConfigUpdateResponse(BaseModel):
 class AvailableModelsResponse(BaseModel):
     """Map of provider names to their supported models."""
 
-    groq: list[str] = Field(
-        default_factory=list,
-        description="Available Groq models.",
-    )
-    openai: list[str] = Field(
-        default_factory=list,
-        description="Available OpenAI models.",
-    )
+    groq: list[str] = Field(default_factory=list, description="Available Groq models.")
+    openai: list[str] = Field(default_factory=list, description="Available OpenAI models.")
+    anthropic: list[str] = Field(default_factory=list, description="Available Anthropic Claude models.")
+    gemini: list[str] = Field(default_factory=list, description="Available Google Gemini models.")
 
 
 class DatabaseConfigResponse(BaseModel):
