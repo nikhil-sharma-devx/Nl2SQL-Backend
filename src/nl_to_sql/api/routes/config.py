@@ -6,7 +6,7 @@ import socket
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
+from nl_to_sql.api.dependencies import get_container, get_current_user
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import get_settings
@@ -71,9 +71,11 @@ def _mask_url(url: str) -> str:
 AVAILABLE_MODELS = {
     "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+    "anthropic": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022"],
+    "gemini": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"],
 }
 
-_AVAILABLE_PROVIDERS = ["groq", "openai"]
+_AVAILABLE_PROVIDERS = ["groq", "openai", "anthropic", "gemini"]
 
 
 @router.get(
@@ -105,7 +107,7 @@ async def update_llm_config(
     request: Request,  # required by SlowAPI for IP extraction
     body: LLMConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
-    _admin: UserPublic = Depends(require_admin),
+    _user: UserPublic = Depends(get_current_user),
 ) -> LLMConfigUpdateResponse:
     """Update the LLM provider and model at runtime.
 
@@ -130,20 +132,32 @@ async def update_llm_config(
             f"Available: {available_models}",
         )
 
-    # Validate API key exists for the provider
+    # Validate: accept either a server env key OR a personal key the user stored via the UI.
     settings = container.config()
-    if provider == "groq" and not settings.groq_api_key:
+    server_keys: dict[str, str] = {
+        "groq": settings.groq_api_key,
+        "openai": settings.openai_api_key,
+        "anthropic": settings.anthropic_api_key,
+        "gemini": settings.gemini_api_key,
+    }
+    has_server_key = bool(server_keys.get(provider))
+
+    has_user_key = False
+    try:
+        from nl_to_sql.api.dependencies import _get_container as _dep_get_container
+        api_key_svc = _dep_get_container().api_key_service()
+        has_user_key = await api_key_svc.has_key(_user.id, provider)
+    except Exception:
+        pass
+
+    if not has_server_key and not has_user_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Groq API key is not configured. Set GROQ_API_KEY or add your key in Profile → API Keys.",
-        )
-    if provider == "openai" and not settings.openai_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OpenAI API key is not configured. Set OPENAI_API_KEY or add your key in Profile → API Keys.",
+            detail=f"No API key found for '{provider}'. Add your key in Profile → API Keys or set the env var.",
         )
 
-    # Switch the provider
+    # Switch the provider (uses server env key at the container level;
+    # per-request orchestrator substitutes the user's personal key when present).
     ApplicationContainer.switch_llm_provider(container, provider, model)
 
     return LLMConfigUpdateResponse(
@@ -164,6 +178,8 @@ async def get_available_models() -> AvailableModelsResponse:
     return AvailableModelsResponse(
         groq=AVAILABLE_MODELS["groq"],
         openai=AVAILABLE_MODELS["openai"],
+        anthropic=AVAILABLE_MODELS["anthropic"],
+        gemini=AVAILABLE_MODELS["gemini"],
     )
 
 
@@ -199,7 +215,7 @@ async def update_database_config(
     request: Request,
     body: DatabaseConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
-    _admin: UserPublic = Depends(require_admin),
+    _user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConfigUpdateResponse:
     """Update the target database connection string at runtime.
 

@@ -93,26 +93,38 @@ async def get_request_orchestrator(
     Falls back silently — never raises an exception from this dependency.
     """
     from nl_to_sql.config.settings import get_settings
-    from nl_to_sql.infrastructure.llm.groq_provider import GroqProvider
     from nl_to_sql.services.sql_generator import SQLGeneratorService
 
     container = _get_container()
     settings = get_settings()
 
-    llm_provider = container.llm_provider()  # server default
+    llm_provider = container.llm_provider()  # server default (reflects any runtime switch)
 
     if credentials is not None:
         try:
+            import types
+
+            from nl_to_sql.config.container import ApplicationContainer, _create_llm_provider
             from nl_to_sql.services.auth_service import decode_access_token
+
             token_data = decode_access_token(credentials.credentials)
             api_key_svc = container.api_key_service()
-            user_key = await api_key_svc.get_key(token_data.user_id, settings.llm_provider)
+
+            # Use the *currently active* provider/model (may differ from startup env values
+            # if the user switched at runtime via PUT /api/v1/config/llm).
+            active = ApplicationContainer.get_current_llm_config(container)
+            active_provider = active["provider"]
+            active_model = active["model"]
+
+            user_key = await api_key_svc.get_key(token_data.user_id, active_provider)
             if user_key:
-                if settings.llm_provider == "openai":
-                    from nl_to_sql.infrastructure.llm.openai_provider import OpenAIProvider
-                    llm_provider = OpenAIProvider(api_key=user_key, model=settings.llm_model)
-                else:
-                    llm_provider = GroqProvider(api_key=user_key, model=settings.llm_model)
+                patched = types.SimpleNamespace(
+                    groq_api_key=user_key if active_provider == "groq" else settings.groq_api_key,
+                    openai_api_key=user_key if active_provider == "openai" else settings.openai_api_key,
+                    anthropic_api_key=user_key if active_provider == "anthropic" else settings.anthropic_api_key,
+                    gemini_api_key=user_key if active_provider == "gemini" else settings.gemini_api_key,
+                )
+                llm_provider = _create_llm_provider(active_provider, active_model, patched)  # type: ignore[arg-type]
         except Exception:
             pass  # Silently fall through to server key
 
