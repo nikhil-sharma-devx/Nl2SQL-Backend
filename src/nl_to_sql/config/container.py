@@ -50,7 +50,7 @@ def _create_llm_provider(provider: str, model: str, settings: Settings) -> ILLMP
     """Factory: create a specific LLM provider instance.
 
     Args:
-        provider: The provider name ("groq" or "openai").
+        provider: The provider name ("groq", "openai", "anthropic", or "gemini").
         model: The model name to use.
         settings: Application settings for API keys.
 
@@ -60,6 +60,12 @@ def _create_llm_provider(provider: str, model: str, settings: Settings) -> ILLMP
     if provider == "openai":
         from nl_to_sql.infrastructure.llm.openai_provider import OpenAIProvider
         return OpenAIProvider(api_key=settings.openai_api_key, model=model)
+    if provider == "anthropic":
+        from nl_to_sql.infrastructure.llm.anthropic_provider import AnthropicProvider
+        return AnthropicProvider(api_key=settings.anthropic_api_key, model=model)
+    if provider == "gemini":
+        from nl_to_sql.infrastructure.llm.gemini_provider import GeminiProvider
+        return GeminiProvider(api_key=settings.gemini_api_key, model=model)
     return GroqProvider(api_key=settings.groq_api_key, model=model)
 
 

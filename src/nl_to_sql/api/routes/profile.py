@@ -33,6 +33,14 @@ SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
         "label": "OpenAI (GPT)",
         "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     },
+    "anthropic": {
+        "label": "Anthropic (Claude)",
+        "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022"],
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "models": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"],
+    },
     "together": {
         "label": "Together AI (Fine-tuning)",
         "models": ["Llama 3.1 8B", "Llama 3.1 70B", "Llama 3.2 3B", "Mistral 7B"],
@@ -76,6 +84,8 @@ async def get_api_key_status(
     server_keys = {
         "groq": bool(settings.groq_api_key),
         "openai": bool(settings.openai_api_key),
+        "anthropic": bool(settings.anthropic_api_key),
+        "gemini": bool(settings.gemini_api_key),
         "together": bool(settings.together_api_key),
     }
 
@@ -223,6 +233,8 @@ async def get_available_providers(
     server_keys = {
         "groq": bool(settings.groq_api_key),
         "openai": bool(settings.openai_api_key),
+        "anthropic": bool(settings.anthropic_api_key),
+        "gemini": bool(settings.gemini_api_key),
         "together": bool(settings.together_api_key),
     }
 
