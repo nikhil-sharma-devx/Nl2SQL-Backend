@@ -79,10 +79,11 @@ class Settings(BaseSettings):
     together_api_key: str = Field(default="", description="Required when fine_tuning_provider=together")
 
     # ── Embeddings ───────────────────────────────────────────────────────────
-    embedding_provider: Literal["huggingface"] = "huggingface"
+    embedding_provider: Literal["huggingface", "gemini"] = "huggingface"
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_dimensions: int = 384
     huggingface_model: str = "all-MiniLM-L6-v2"
+    gemini_embedding_model: str = "models/text-embedding-004"
 
     # ── Vector Store ─────────────────────────────────────────────────────────
     vector_store_provider: Literal["chroma", "faiss", "qdrant"] = "qdrant"
@@ -262,8 +263,13 @@ class Settings(BaseSettings):
                 "all-mpnet-base-v2": 768,
             }
             if self.huggingface_model in hf_model_dims:
-                expected = hf_model_dims[self.huggingface_model]
-                self.embedding_dimensions = expected
+                self.embedding_dimensions = hf_model_dims[self.huggingface_model]
+        elif self.embedding_provider == "gemini":
+            gemini_model_dims = {
+                "models/text-embedding-004": 768,
+            }
+            if self.gemini_embedding_model in gemini_model_dims:
+                self.embedding_dimensions = gemini_model_dims[self.gemini_embedding_model]
 
         # Switch CACHE_PROVIDER to redis in production by default if not explicitly provided
         if self.app_env == "production" and "cache_provider" not in self.model_fields_set:

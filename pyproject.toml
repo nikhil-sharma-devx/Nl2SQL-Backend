@@ -19,12 +19,12 @@ dependencies = [
     # LLM Providers
     "groq>=0.9.0",
     "openai>=1.0.0",
+    "google-genai>=0.8.0",
 
     # Embeddings & Vector Store
     "chromadb>=0.5.0",
     "faiss-cpu>=1.8.0",
-    "sentence-transformers>=2.2.0",
-    "qdrant-client[fastembed]>=1.8.0",
+    "qdrant-client>=1.8.0",
 
     # BM25 Keyword Search (hybrid retrieval)
     "rank-bm25>=0.2.2",
