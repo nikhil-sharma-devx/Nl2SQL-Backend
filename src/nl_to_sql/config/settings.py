@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 384
     huggingface_model: str = "all-MiniLM-L6-v2"
     gemini_embedding_model: str = "models/text-embedding-004"
+    # Separate key for embeddings — falls back to gemini_api_key if not set
+    gemini_embedding_api_key: str = Field(default="", description="Gemini API key for embeddings; falls back to gemini_api_key")
+
+    @property
+    def resolved_gemini_embedding_api_key(self) -> str:
+        return self.gemini_embedding_api_key or self.gemini_api_key
 
     # ── Vector Store ─────────────────────────────────────────────────────────
     vector_store_provider: Literal["chroma", "faiss", "qdrant"] = "qdrant"
