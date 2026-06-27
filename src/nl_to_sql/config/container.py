@@ -104,7 +104,7 @@ def _build_embedder(settings: Settings) -> object:
     if settings.embedding_provider == "gemini":
         from nl_to_sql.infrastructure.embeddings.gemini_embedder import GeminiEmbedder
         return GeminiEmbedder(
-            api_key=settings.gemini_api_key,
+            api_key=settings.resolved_gemini_embedding_api_key,
             model=settings.gemini_embedding_model,
             dimensions=settings.embedding_dimensions,
         )
