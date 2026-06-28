@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
 
     # ── Re-ranking ───────────────────────────────────────────────────────────
-    reranker_enabled: bool = True
+    reranker_enabled: bool = False  # requires sentence-transformers; disabled — use Qdrant hybrid search instead
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     reranker_top_k: int = 10
 

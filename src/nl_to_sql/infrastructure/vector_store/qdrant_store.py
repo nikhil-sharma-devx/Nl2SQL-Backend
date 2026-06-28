@@ -68,7 +68,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
     """Qdrant-backed vector store with native hybrid search.
 
     Each document is stored with two named vectors:
-      - "dense":  cosine HuggingFace embedding (passed in via SchemaChunk.embedding)
+      - "dense":  cosine embedding (passed in via SchemaChunk.embedding — provider-agnostic)
       - "sparse": BM42 sparse encoding of SchemaChunk.content (computed via fastembed)
 
     Hybrid retrieval fires both searches in a single Qdrant Query API call and

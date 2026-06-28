@@ -337,7 +337,7 @@ def configure_logging(log_level: str = "INFO", log_file: str | None = None, is_p
         root.addHandler(file_handler)
 
     # ── Silence noisy third-party loggers ────────────────────────────────────
-    for noisy in ("httpx", "httpcore", "sentence_transformers", "transformers", "huggingface_hub"):
+    for noisy in ("httpx", "httpcore", "fastembed", "onnxruntime"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # ── Uvicorn loggers ──────────────────────────────────────────────────────
