@@ -24,7 +24,7 @@ dependencies = [
     # Embeddings & Vector Store
     "chromadb>=0.5.0",
     "faiss-cpu>=1.8.0",
-    "qdrant-client>=1.8.0",
+    "qdrant-client[fastembed]>=1.8.0",
 
     # BM25 Keyword Search (hybrid retrieval)
     "rank-bm25>=0.2.2",
