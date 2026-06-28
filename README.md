@@ -54,8 +54,8 @@ A production-grade REST API that converts plain-English questions into validated
 |---|---|---|
 | API framework | FastAPI + Uvicorn | Async, application factory pattern |
 | Language | Python 3.13 | |
-| LLM | Groq (Llama 3.3 70B) · OpenAI | Pluggable via `LLM_PROVIDER` env var |
-| Embeddings | HuggingFace Sentence Transformers | `all-MiniLM-L6-v2` by default |
+| LLM | Groq · OpenAI · Anthropic · Gemini | Pluggable via `LLM_PROVIDER` env var |
+| Embeddings | Gemini `text-embedding-004` (API) · HuggingFace (local) | Pluggable via `EMBEDDING_PROVIDER`; no PyTorch required for Gemini |
 | Vector store | Qdrant (default) · Chroma · FAISS | Swappable via `VECTOR_STORE_PROVIDER` |
 | Keyword search | BM25 (rank-bm25) | Hybrid retrieval alongside vector search |
 | Database | PostgreSQL via async SQLAlchemy | Supabase recommended for managed hosting |
@@ -249,7 +249,7 @@ backend/
 │   ├── infrastructure/
 │   │   ├── database/           # Async SQLAlchemy client, ORM models, schema sync
 │   │   ├── llm/                # OpenAI + Groq provider adapters
-│   │   ├── embeddings/         # HuggingFace Sentence Transformer
+│   │   ├── embeddings/         # Gemini API embedder (default) · HuggingFace (local fallback)
 │   │   ├── vector_store/       # Qdrant, Chroma, FAISS adapters
 │   │   ├── cache/              # Redis, in-memory, semantic cache
 │   │   ├── bm25_store.py       # BM25 index (rank-bm25)
@@ -290,7 +290,7 @@ backend/
                     │  Schema loader           │
                     │    → Chunker             │
                     │    → Doc builder         │
-                    │    → HuggingFace embed   │
+                    │    → Gemini embed        │
                     │    → BM25 indexer        │
                     │    → Vector writer       │
                     └─────────────────────────┘
