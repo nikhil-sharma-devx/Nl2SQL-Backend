@@ -26,6 +26,9 @@ dependencies = [
     "faiss-cpu>=1.8.0",
     "qdrant-client[fastembed]>=1.8.0",
 
+    # Reranking (ONNX cross-encoder, no PyTorch)
+    "flashrank>=0.2.0",
+
     # BM25 Keyword Search (hybrid retrieval)
     "rank-bm25>=0.2.2",
 
