@@ -52,11 +52,12 @@ class AsyncDatabaseClient:
         self._engine = create_async_engine(
             database_url,
             echo=echo,
-            pool_pre_ping=False,
+            pool_pre_ping=True,
             pool_size=pool_size,
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
+            connect_args={"prepared_statement_cache_size": 0},
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,
@@ -340,11 +341,12 @@ class AsyncDatabaseClient:
         self._engine = create_async_engine(
             new_url,
             echo=echo,
-            pool_pre_ping=False,
+            pool_pre_ping=True,
             pool_size=pool_size,
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
+            connect_args={"prepared_statement_cache_size": 0},
         )
 
         # Reconfigure sessionmaker to bind to the new engine
