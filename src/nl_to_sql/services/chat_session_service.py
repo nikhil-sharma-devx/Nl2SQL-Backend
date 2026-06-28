@@ -59,11 +59,12 @@ class ChatSessionService:
         self._engine = create_async_engine(
             database_url,
             echo=False,
-            pool_pre_ping=False,
+            pool_pre_ping=True,
             pool_size=2,
             max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
+            connect_args={"prepared_statement_cache_size": 0},
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,
