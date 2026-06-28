@@ -3,8 +3,13 @@
 NOTE: This module is kept for backward compatibility. New code should prefer
 ``rag.retrieval.reranker.Reranker`` which adds RRF (Reciprocal Rank Fusion)
 for merging dense + sparse results in addition to cross-encoder reranking.
+
+TO SWITCH BACK TO sentence-transformers (needs PyTorch + ~500MB RAM):
+  1. pip install sentence-transformers
+  2. Comment the FlashRank block in _get_model() and uncomment the sentence-transformers block
+  3. Same for rerank() and get_scores() — swap RerankRequest with model.predict()
 """
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -40,12 +45,19 @@ class CrossEncoderReranker:
     def _get_model(self) -> "Ranker":
         if self._model is None:
             try:
+                # ── FlashRank (active — ONNX, no PyTorch) ────────────────────
                 from flashrank import Ranker
                 self._logger.debug("Loading FlashRank model", model=self._model_name)
                 self._model = Ranker(model_name=self._model_name)
-                self._logger.info("FlashRank model loaded")
+
+                # ── sentence-transformers (commented — needs PyTorch ~500MB) ──
+                # from sentence_transformers import CrossEncoder
+                # self._model = CrossEncoder(self._model_name)
+                # Note: change model_name to "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+                self._logger.info("Reranker model loaded")
             except Exception as exc:
-                self._logger.error("Failed to load FlashRank model", error=str(exc))
+                self._logger.error("Failed to load reranker model", error=str(exc))
                 raise
         return self._model
 
@@ -53,11 +65,20 @@ class CrossEncoderReranker:
         if not self._enabled or not chunks:
             return chunks
         try:
+            # ── FlashRank (active) ────────────────────────────────────────────
             from flashrank import RerankRequest
             model = self._get_model()
             passages = [{"id": i, "text": chunk.content} for i, chunk in enumerate(chunks)]
             results = model.rerank(RerankRequest(query=query, passages=passages))
             reranked = [chunks[r["id"]] for r in results[: self._top_k]]
+
+            # ── sentence-transformers (commented) ─────────────────────────────
+            # model = self._get_model()
+            # pairs = [(query, chunk.content) for chunk in chunks]
+            # scores = model.predict(pairs, show_progress_bar=False)
+            # chunks_with_scores = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+            # reranked = [chunk for chunk, _ in chunks_with_scores[: self._top_k]]
+
             self._logger.info(
                 "Chunks re-ranked",
                 original_count=len(chunks),
@@ -73,12 +94,20 @@ class CrossEncoderReranker:
         if not self._enabled or not chunks:
             return [(chunk, 0.0) for chunk in chunks]
         try:
+            # ── FlashRank (active) ────────────────────────────────────────────
             from flashrank import RerankRequest
             model = self._get_model()
             passages = [{"id": i, "text": chunk.content} for i, chunk in enumerate(chunks)]
             results = model.rerank(RerankRequest(query=query, passages=passages))
             score_map: dict[int, float] = {r["id"]: r["score"] for r in results}
             return [(chunk, score_map.get(i, 0.0)) for i, chunk in enumerate(chunks)]
+
+            # ── sentence-transformers (commented) ─────────────────────────────
+            # model = self._get_model()
+            # pairs = [(query, chunk.content) for chunk in chunks]
+            # scores = model.predict(pairs, show_progress_bar=False)
+            # return list(zip(chunks, scores.tolist()))
+
         except Exception as exc:
             self._logger.warning("Failed to get re-ranking scores", error=str(exc))
             return [(chunk, 0.0) for chunk in chunks]

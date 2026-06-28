@@ -2,6 +2,13 @@
 
 Supports Reciprocal Rank Fusion (RRF) and optional FlashRank cross-encoder
 reranking (ONNX-based, no PyTorch required).
+
+TO SWITCH BACK TO sentence-transformers (needs PyTorch + ~500MB RAM):
+  1. pip install sentence-transformers
+  2. In _get_model(): comment FlashRank block, uncomment sentence-transformers block
+  3. In _cross_encoder_rerank(): comment FlashRank block, uncomment sentence-transformers block
+  4. In get_scores(): same swap
+  5. Change default model_name to "cross-encoder/ms-marco-MiniLM-L-6-v2"
 """
 from typing import TYPE_CHECKING
 
@@ -29,6 +36,7 @@ class Reranker:
     def __init__(
         self,
         model_name: str = "ms-marco-MiniLM-L-12-v2",
+        # sentence-transformers alternative: "cross-encoder/ms-marco-MiniLM-L-6-v2"
         top_k: int = 10,
         enabled: bool = True,
         use_cross_encoder: bool = True,
@@ -42,12 +50,18 @@ class Reranker:
     def _get_model(self) -> "Ranker":
         if self._model is None:
             try:
+                # ── FlashRank (active — ONNX, no PyTorch) ────────────────────
                 from flashrank import Ranker
                 logger.debug("Loading FlashRank model", model=self._model_name)
                 self._model = Ranker(model_name=self._model_name)
-                logger.info("FlashRank model loaded")
+
+                # ── sentence-transformers (commented — needs PyTorch ~500MB) ──
+                # from sentence_transformers import CrossEncoder
+                # self._model = CrossEncoder(self._model_name)
+
+                logger.info("Reranker model loaded")
             except Exception as exc:
-                logger.error("Failed to load FlashRank model", error=str(exc))
+                logger.error("Failed to load reranker model", error=str(exc))
                 raise
         return self._model
 
@@ -103,11 +117,20 @@ class Reranker:
         return merged
 
     def _cross_encoder_rerank(self, query: str, chunks: list[SchemaChunk]) -> list[SchemaChunk]:
+        # ── FlashRank (active) ────────────────────────────────────────────────
         from flashrank import RerankRequest
         model = self._get_model()
         passages = [{"id": i, "text": chunk.content} for i, chunk in enumerate(chunks)]
         results = model.rerank(RerankRequest(query=query, passages=passages))
         reranked = [chunks[r["id"]] for r in results[: self._top_k]]
+
+        # ── sentence-transformers (commented) ─────────────────────────────────
+        # model = self._get_model()
+        # pairs = [(query, chunk.content) for chunk in chunks]
+        # scores = model.predict(pairs, show_progress_bar=False)
+        # chunks_with_scores = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+        # reranked = [chunk for chunk, _ in chunks_with_scores[: self._top_k]]
+
         logger.info(
             "Cross-encoder reranking complete",
             input_count=len(chunks),
@@ -124,12 +147,20 @@ class Reranker:
         if not self._enabled or not chunks:
             return [(chunk, 0.0) for chunk in chunks]
         try:
+            # ── FlashRank (active) ────────────────────────────────────────────
             from flashrank import RerankRequest
             model = self._get_model()
             passages = [{"id": i, "text": chunk.content} for i, chunk in enumerate(chunks)]
             results = model.rerank(RerankRequest(query=query, passages=passages))
             score_map: dict[int, float] = {r["id"]: r["score"] for r in results}
             return [(chunk, score_map.get(i, 0.0)) for i, chunk in enumerate(chunks)]
+
+            # ── sentence-transformers (commented) ─────────────────────────────
+            # model = self._get_model()
+            # pairs = [(query, chunk.content) for chunk in chunks]
+            # scores = model.predict(pairs, show_progress_bar=False)
+            # return list(zip(chunks, scores.tolist()))
+
         except Exception as exc:
             logger.warning("Failed to get reranking scores", error=str(exc))
             return [(chunk, 0.0) for chunk in chunks]
