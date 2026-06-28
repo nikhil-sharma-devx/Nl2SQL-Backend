@@ -32,6 +32,7 @@ RUN pip install --no-cache-dir \
     "google-genai>=0.8.0" \
     "chromadb>=0.5.0" \
     "faiss-cpu>=1.8.0" \
+    "flashrank>=0.2.0" \
     "rank-bm25>=0.2.2" \
     "sqlglot>=23.0.0" \
     "sqlalchemy[asyncio]>=2.0.30" \

@@ -168,8 +168,8 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
 
     # ── Re-ranking ───────────────────────────────────────────────────────────
-    reranker_enabled: bool = False  # requires sentence-transformers; disabled — use Qdrant hybrid search instead
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_enabled: bool = True
+    reranker_model: str = "ms-marco-MiniLM-L-12-v2"  # FlashRank model name (ONNX, no PyTorch)
     reranker_top_k: int = 10
 
     # ── BM25 Sparse Retrieval ────────────────────────────────────────────────
