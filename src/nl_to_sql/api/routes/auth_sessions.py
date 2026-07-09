@@ -56,7 +56,23 @@ class LoginActivityOut(BaseModel):
     created_at: datetime
 
 
-@router.get("/auth-sessions", summary="List active login sessions")
+class AuthSessionsListResponse(BaseModel):
+    items: list[LoginSessionOut]
+
+
+class LoginActivityListResponse(BaseModel):
+    items: list[LoginActivityOut]
+
+
+class RevokeAllResponse(BaseModel):
+    revoked: int
+
+
+@router.get(
+    "/auth-sessions",
+    summary="List active login sessions",
+    response_model=AuthSessionsListResponse,
+)
 async def list_auth_sessions(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
@@ -130,7 +146,11 @@ async def revoke_auth_session(
     auth_cache_invalidate_session(current_user.id, session_id)
 
 
-@router.delete("/auth-sessions", summary="Revoke all other login sessions")
+@router.delete(
+    "/auth-sessions",
+    summary="Revoke all other login sessions",
+    response_model=RevokeAllResponse,
+)
 async def revoke_all_auth_sessions(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
@@ -160,7 +180,11 @@ async def revoke_all_auth_sessions(
     return {"revoked": revoked}
 
 
-@router.get("/login-activity", summary="Get login event history")
+@router.get(
+    "/login-activity",
+    summary="Get login event history",
+    response_model=LoginActivityListResponse,
+)
 async def get_login_activity(
     limit: int = Query(default=20, ge=1, le=100),
     current_user: UserPublic = Depends(get_current_user),

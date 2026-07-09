@@ -34,7 +34,11 @@ class AsyncDatabaseClient:
         max_overflow: int = 10,
         pool_timeout: int = 30,
         pool_recycle: int = 300,
+        readonly: bool = True,
+        statement_timeout_ms: int = 30_000,
     ) -> None:
+        self._readonly = readonly
+        self._statement_timeout_ms = max(1_000, int(statement_timeout_ms))
         # Ensure an async driver (e.g. plain postgresql:// -> postgresql+asyncpg://)
         database_url = to_async_database_url(database_url)
 
@@ -71,6 +75,24 @@ class AsyncDatabaseClient:
             max_overflow=max_overflow,
         )
 
+    async def _apply_session_guards(self, sess: AsyncSession) -> None:
+        """Harden a session before running generated SQL (PostgreSQL only).
+
+        - Statement timeout keeps a runaway query from pinning a pool
+          connection indefinitely.
+        - READ ONLY makes the transaction reject any write even if a
+          non-SELECT slipped past the validator (belt-and-suspenders).
+        """
+        from sqlalchemy import text
+
+        if self._engine.dialect.name != "postgresql":
+            return
+        await sess.execute(
+            text(f"SET LOCAL statement_timeout = {self._statement_timeout_ms}")
+        )
+        if self._readonly:
+            await sess.execute(text("SET TRANSACTION READ ONLY"))
+
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession, None]:
         """Yield an async SQLAlchemy session with automatic rollback on error."""
@@ -101,7 +123,7 @@ class AsyncDatabaseClient:
 
         try:
             async with self.session() as sess:
-                await sess.execute(text("SET LOCAL statement_timeout = '30s'"))
+                await self._apply_session_guards(sess)
                 result = await sess.execute(text(sql))
                 columns = list(result.keys())
                 all_rows = result.fetchall()
@@ -135,6 +157,7 @@ class AsyncDatabaseClient:
 
         try:
             async with self._session_factory() as sess:
+                await self._apply_session_guards(sess)
                 stream_result = await sess.stream(text(sql))
                 columns = list(stream_result.keys())
                 async for partition in stream_result.partitions(batch_size):

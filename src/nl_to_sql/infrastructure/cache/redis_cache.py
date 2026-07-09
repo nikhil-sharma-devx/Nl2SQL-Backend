@@ -50,7 +50,10 @@ class RedisCache(ICache):  # type: ignore[misc]
     async def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         effective_ttl = ttl if ttl is not None else self._default_ttl
         try:
-            await self._redis.set(self._k(key), json.dumps(value), ex=effective_ttl)
+            # default=str so datetime/Decimal values in cached query responses
+            # (from the target DB) serialize instead of raising and silently
+            # disabling the L1 exact cache in Redis mode.
+            await self._redis.set(self._k(key), json.dumps(value, default=str), ex=effective_ttl)
         except Exception as exc:
             logger.warning("Redis set failed", key=key, error=str(exc))
             # Do not raise — cache failures are non-fatal

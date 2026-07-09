@@ -107,12 +107,14 @@ class FKRelationshipExtractor:
         self,
         initial_chunks: list[SchemaChunk],
         max_expansion: int = 3,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Expand initial table set by following FK relationships.
 
         Args:
             initial_chunks: Initially retrieved schema chunks.
             max_expansion: Maximum number of tables to add via FK expansion.
+            user_id: When provided, restrict FK-chunk fetches to this user.
 
         Returns:
             Expanded list of schema chunks including related tables.
@@ -157,7 +159,7 @@ class FKRelationshipExtractor:
         # Fetch schema chunks for related tables
         try:
             additional_chunks = await self._vector_store.get_chunks_by_table_names(
-                tables_to_fetch
+                tables_to_fetch, user_id=user_id
             )
 
             # Combine and return (initial chunks first, then related)

@@ -87,6 +87,13 @@ class AnalyticsService:
             success_rate = (successful_queries / total_queries * 100) if total_queries > 0 else 0
             cache_hit_rate = (cached_queries / total_queries * 100) if total_queries > 0 else 0
 
+            # Per-layer (L1 exact / L2 semantic) cache hit rates from the
+            # in-process CacheMetrics singleton. The DB-derived cache_hit_rate
+            # above is a blended lifetime figure; this splits it by layer for
+            # the analytics dashboard (item 4). Process-local, resets on restart.
+            from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics
+            cache_layers = get_cache_metrics().snapshot()
+
             return {
                 "total_queries": total_queries,
                 "successful_queries": successful_queries,
@@ -94,6 +101,10 @@ class AnalyticsService:
                 "success_rate": round(success_rate, 2),
                 "cached_queries": cached_queries,
                 "cache_hit_rate": round(cache_hit_rate, 2),
+                # Per-layer breakdown (fractions 0-1). exact = L1, semantic = L2.
+                "cache_exact_hit_rate": round(cache_layers["exact_hit_rate"] * 100, 2),
+                "cache_semantic_hit_rate": round(cache_layers["semantic_hit_rate"] * 100, 2),
+                "cache_layer_lookups": cache_layers["total_lookups"],
                 "avg_tokens_used": round(avg_tokens, 2),
                 "avg_response_time_ms": round(avg_latency, 2),
                 "period_days": days,

@@ -2,6 +2,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel
 
 from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
 from nl_to_sql.config.container import ApplicationContainer
@@ -11,6 +12,64 @@ from nl_to_sql.services.analytics_service import AnalyticsService
 router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
 
 
+# ── Response schemas (item 12 — typed API contract) ───────────────────────────
+class AnalyticsSummary(BaseModel):
+    total_queries: int
+    successful_queries: int
+    failed_queries: int
+    success_rate: float
+    cached_queries: int
+    cache_hit_rate: float
+    cache_exact_hit_rate: float
+    cache_semantic_hit_rate: float
+    cache_layer_lookups: int
+    avg_tokens_used: float
+    avg_response_time_ms: float
+    period_days: int
+
+
+class PopularQuery(BaseModel):
+    question: str
+    count: int
+
+
+class FailurePattern(BaseModel):
+    errors: str | None = None
+    count: int
+
+
+class TableUsage(BaseModel):
+    table_name: str
+    usage_count: int
+
+
+class IntentDistribution(BaseModel):
+    intent_type: str | None = None
+    count: int
+
+
+class PromptVersionPerformance(BaseModel):
+    prompt_version: str | None = None
+    total_uses: int
+    successful_queries: int
+    success_rate: float
+
+
+class CacheStats(BaseModel):
+    exact_hits: int
+    semantic_hits: int
+    misses: int
+    total_lookups: int
+    exact_hit_rate: float
+    semantic_hit_rate: float
+    overall_hit_rate: float
+
+
+class LatencyBreakdown(BaseModel):
+    samples: int
+    avg_stage_ms: dict[str, float]
+
+
 async def get_analytics_service(
     container: ApplicationContainer = Depends(get_container),
 ) -> AnalyticsService:
@@ -18,7 +77,7 @@ async def get_analytics_service(
     return container.analytics_service()
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=AnalyticsSummary)
 async def get_analytics_summary(
     response: Response,
     days: int = Query(default=30, ge=1, le=365),
@@ -31,7 +90,7 @@ async def get_analytics_summary(
     return await analytics_service.get_summary(days=days)  # type: ignore[no-any-return]
 
 
-@router.get("/popular-queries")
+@router.get("/popular-queries", response_model=list[PopularQuery])
 async def get_popular_queries(
     response: Response,
     limit: int = Query(default=10, ge=1, le=1000),
@@ -45,7 +104,7 @@ async def get_popular_queries(
     return await analytics_service.get_popular_queries(limit=limit, days=days)  # type: ignore[no-any-return]
 
 
-@router.get("/failure-patterns")
+@router.get("/failure-patterns", response_model=list[FailurePattern])
 async def get_failure_patterns(
     response: Response,
     days: int = Query(default=30, ge=1, le=365),
@@ -58,7 +117,7 @@ async def get_failure_patterns(
     return await analytics_service.get_failure_patterns(days=days)  # type: ignore[no-any-return]
 
 
-@router.get("/table-usage")
+@router.get("/table-usage", response_model=list[TableUsage])
 async def get_table_usage(
     response: Response,
     limit: int = Query(default=20, ge=1, le=1000),
@@ -72,7 +131,7 @@ async def get_table_usage(
     return await analytics_service.get_table_usage(limit=limit, days=days)  # type: ignore[no-any-return]
 
 
-@router.get("/intent-distribution")
+@router.get("/intent-distribution", response_model=list[IntentDistribution])
 async def get_intent_distribution(
     response: Response,
     days: int = Query(default=30, ge=1, le=365),
@@ -85,7 +144,7 @@ async def get_intent_distribution(
     return await analytics_service.get_intent_distribution(days=days)  # type: ignore[no-any-return]
 
 
-@router.get("/prompt-versions")
+@router.get("/prompt-versions", response_model=list[PromptVersionPerformance])
 async def get_prompt_version_performance(
     response: Response,
     days: int = Query(default=30, ge=1, le=365),
@@ -96,6 +155,30 @@ async def get_prompt_version_performance(
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
     return await analytics_service.get_prompt_version_performance(days=days)  # type: ignore[no-any-return]
+
+
+@router.get("/cache-stats", response_model=CacheStats)
+async def get_cache_stats(
+    response: Response,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Per-layer cache hit rates (L1 exact vs L2 semantic) since process start."""
+    from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics
+    if response:
+        response.headers["Cache-Control"] = "private, max-age=30"
+    return get_cache_metrics().snapshot()
+
+
+@router.get("/latency-breakdown", response_model=LatencyBreakdown)
+async def get_latency_breakdown(
+    response: Response,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Rolling average per-stage pipeline latency (ms) since process start."""
+    from nl_to_sql.infrastructure.cache.cache_metrics import get_stage_metrics
+    if response:
+        response.headers["Cache-Control"] = "private, max-age=30"
+    return get_stage_metrics().snapshot()
 
 
 @router.delete("/reset")

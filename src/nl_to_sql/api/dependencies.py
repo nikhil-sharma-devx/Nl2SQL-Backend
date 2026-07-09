@@ -18,7 +18,9 @@ from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.query_history import QueryHistoryService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
+from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
+from nl_to_sql.services.user_db_service import UserDbConnectionService
 
 
 @lru_cache(maxsize=1)
@@ -41,6 +43,11 @@ def get_orchestrator() -> QueryOrchestrator:
 def get_schema_ingestion() -> SchemaIngestionService:
     """Dependency: SchemaIngestionService."""
     return _get_container().schema_ingestion()
+
+
+def get_schema_catalog() -> SchemaCatalogService:
+    """Dependency: SchemaCatalogService (per-user schema catalog)."""
+    return _get_container().schema_catalog_service()
 
 
 def get_vector_store() -> IVectorStore:
@@ -76,6 +83,11 @@ def get_ingestion_pipeline() -> IngestionPipeline:
 def get_api_key_service() -> APIKeyService:
     """Dependency: APIKeyService (for per-user API key management)."""
     return _get_container().api_key_service()
+
+
+def get_user_db_service() -> UserDbConnectionService:
+    """Dependency: UserDbConnectionService (per-user BYOD connections)."""
+    return _get_container().user_db_service()
 
 
 # Must be defined before get_request_orchestrator — used as a default arg (evaluated at definition time)
@@ -159,8 +171,14 @@ async def get_request_orchestrator(
         except Exception:
             pass
 
+    # Per-user schema retrieval isolation (flag-gated). When enabled, scope every
+    # vector-store read to the authenticated user's chunks.
+    schema_retriever = container.schema_retriever()
+    if settings.schema_per_user_isolation and resolved_user_id is not None:
+        schema_retriever._user_id = resolved_user_id
+
     return QueryOrchestrator(
-        retriever=container.schema_retriever(),
+        retriever=schema_retriever,
         generator=sql_generator,
         validator=container.sql_validator(),
         cache=container.active_cache(),

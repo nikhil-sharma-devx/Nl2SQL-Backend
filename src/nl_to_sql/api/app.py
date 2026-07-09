@@ -24,7 +24,9 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from nl_to_sql.api.middleware.error_handler import (
     domain_exception_handler,
+    http_exception_handler,
     unhandled_exception_handler,
+    validation_exception_handler,
 )
 from nl_to_sql.api.middleware.logging_middleware import RequestLoggingMiddleware
 from nl_to_sql.api.middleware.rate_limiter import limiter
@@ -207,6 +209,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             error=str(exc)
         )
 
+    # Warm the embedding + reranker models so the first query doesn't pay the
+    # one-time model-load cost. Runs in the background; failures are non-fatal.
+    if settings.warm_models_on_startup:
+        async def _warm_models() -> None:
+            try:
+                _wlog = structlog.get_logger()
+                embedder = container.embedder()
+                await embedder.embed("warmup")
+                _wlog.info("Embedding model warmed up")
+                try:
+                    reranker = container.reranker()
+                    from nl_to_sql.core.models.schema import SchemaChunk
+                    dummy = SchemaChunk(
+                        chunk_id="_warmup",
+                        table_name="_warmup",
+                        schema_name="_warmup",
+                        content="warmup",
+                    )
+                    await reranker.rerank(query="warmup", chunks=[dummy])
+                    _wlog.info("Reranker model warmed up")
+                except Exception as rr_exc:
+                    _wlog.warning("Reranker warm-up failed", error=str(rr_exc))
+            except Exception as exc:
+                structlog.get_logger().warning("Model warm-up failed", error=str(exc))
+        _task = asyncio.create_task(_warm_models())
+        _background_tasks.add(_task)
+        _task.add_done_callback(_background_tasks.discard)
+
     # Start schema monitor in background to avoid blocking API startup
     if settings.schema_monitor_enabled:
         async def _start_monitor() -> None:
@@ -219,7 +249,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _background_tasks.add(_task)
         _task.add_done_callback(_background_tasks.discard)
 
+    # Start the background maintenance scheduler (account purge + retention).
+    # Previously these workers had no scheduler and never ran (TD-2).
+    maintenance_task: asyncio.Task[None] | None = None
+    if settings.background_jobs_enabled:
+        from nl_to_sql.workers.scheduler import maintenance_scheduler_loop
+        maintenance_task = asyncio.create_task(
+            maintenance_scheduler_loop(
+                session_service._session_factory,
+                settings.background_jobs_interval_seconds,
+            )
+        )
+
     yield
+
+    # Stop the maintenance scheduler
+    if maintenance_task is not None:
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # Shutdown: stop schema monitor then dispose all DB services in parallel
     if settings.schema_monitor_enabled:
@@ -458,6 +508,18 @@ def create_app() -> FastAPI:
     # Store container in app state for access in lifespan
     app.container = container  # type: ignore[attr-defined]
 
+    # Inject the runtime provider-switch callback so FineTuningService can
+    # activate a freshly deployed model without importing the container
+    # (breaks the api.dependencies ↔ container ↔ fine_tuning_service cycle).
+    try:
+        container.fine_tuning_service().set_switch_provider(
+            lambda provider, model: ApplicationContainer.switch_llm_provider(container, provider, model)
+        )
+    except Exception as exc:  # non-fatal — fine-tuning deploy will error clearly if unset
+        structlog.get_logger(__name__).warning(
+            "Failed to wire fine-tuning switch_provider callback", error=str(exc)
+        )
+
     # ── Rate limiting ──────────────────────────────────────────────────────────
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
@@ -471,9 +533,18 @@ def create_app() -> FastAPI:
     # is only relevant for direct API access (dev, tooling, etc.).
     # allow_credentials=False is intentional: the app uses Bearer tokens in
     # Authorization headers, not cookies, so the browser credential flag is not needed.
+    #
+    # Production locks the origins to the configured allowlist (CORS_ALLOWED_ORIGINS);
+    # development keeps the permissive wildcard for local tooling.
+    cors_origins = ["*"] if not settings.is_production else settings.cors_origin_list
+    if settings.is_production and not cors_origins:
+        structlog.get_logger(__name__).warning(
+            "CORS allowlist is empty in production — only same-origin requests will be allowed. "
+            "Set CORS_ALLOWED_ORIGINS to your frontend origin(s)."
+        )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -483,7 +554,14 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestLoggingMiddleware)
 
     # ── Exception handlers ─────────────────────────────────────────────────────
+    # Every error response carries the canonical envelope + request_id (item 13):
+    # domain errors, HTTPExceptions, 422 validation errors, and unhandled errors.
+    from fastapi.exceptions import RequestValidationError
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
     app.add_exception_handler(NLToSQLBaseError, domain_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # ── Routers ────────────────────────────────────────────────────────────────

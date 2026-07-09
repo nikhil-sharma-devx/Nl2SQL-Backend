@@ -39,12 +39,20 @@ class SchemaIngestionService:
         self._embedder = embedder
         self._vector_store = vector_store
 
-    async def ingest(self, schema: SchemaMetadata, reset: bool = False) -> int:
+    async def ingest(
+        self, schema: SchemaMetadata, reset: bool = False, user_id: str | None = None
+    ) -> int:
         """Ingest a SchemaMetadata object into the vector store.
 
         Args:
             schema: Parsed schema with all tables and columns.
             reset: If True, clears existing chunks before ingesting.
+            user_id: When provided (per-user isolation), each chunk is tagged
+                with this owner and its id is namespaced so it never collides
+                with another user's chunks. ``reset`` then clears only this
+                user's chunks (via ``delete_by_user`` if the store supports it)
+                instead of the whole collection. ``None`` preserves the shared
+                single-collection behaviour.
 
         Returns:
             Number of chunks ingested.
@@ -52,14 +60,21 @@ class SchemaIngestionService:
         Raises:
             SchemaIngestionError: On embedding or vector store errors.
         """
-        log = logger.bind(database=schema.database_name, dialect=schema.dialect)
+        log = logger.bind(database=schema.database_name, dialect=schema.dialect, user_id=user_id)
         log.info("Starting schema ingestion", table_count=len(schema.tables))
 
         if reset:
-            log.info("Resetting vector store collection")
-            await self._vector_store.delete_collection()
+            if user_id is not None and hasattr(self._vector_store, "delete_by_user"):
+                log.info("Resetting user's schema chunks")
+                await self._vector_store.delete_by_user(user_id)
+            elif user_id is None:
+                log.info("Resetting vector store collection")
+                await self._vector_store.delete_collection()
 
         chunks = [self._table_to_chunk(table) for table in schema.tables]
+        if user_id is not None:
+            for chunk in chunks:
+                chunk.chunk_id = f"{user_id}:{chunk.chunk_id}"
 
         try:
             texts = [c.content for c in chunks]
@@ -73,10 +88,11 @@ class SchemaIngestionService:
             chunk.embedding = embedding
 
         try:
-            await self._vector_store.upsert(chunks)
+            await self._vector_store.upsert(chunks, user_id=user_id)
 
-            # Store the hash in the vector store
-            if hasattr(self._vector_store, 'update_schema_hash'):
+            # Store the hash in the vector store (global hash — only meaningful
+            # for the shared-collection path; skipped for per-user ingestion).
+            if user_id is None and hasattr(self._vector_store, 'update_schema_hash'):
                 schema_hash = self.compute_schema_hash(schema)
                 self._vector_store.update_schema_hash(schema_hash)
                 log.info("Schema hash stored for change detection", hash=schema_hash[:16])

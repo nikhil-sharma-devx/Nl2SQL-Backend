@@ -595,10 +595,17 @@ async def get_sql_versions(
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> dict[str, Any]:
     """Endpoint: Get all SQL versions for a message from database."""
-    from fastapi import HTTPException
     from sqlalchemy import select
 
     from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, SqlVersion
+
+    # ChatMessage.id is a 32-bit PostgreSQL INTEGER. The client sometimes asks
+    # for versions of an optimistic/not-yet-persisted message whose id is a
+    # client-generated timestamp (e.g. Date.now() → 1_783_533_067_258), which
+    # overflows int4 and makes asyncpg raise. Such an id can't exist, so short-
+    # circuit to an empty collection instead of 500-ing. (2_147_483_647 = int4 max)
+    if not (1 <= message_id <= 2_147_483_647):
+        return {"message_id": message_id, "versions": [], "total_versions": 0}
 
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(
@@ -613,9 +620,9 @@ async def get_sql_versions(
         )
         versions = result.scalars().all()
 
-    if not versions:
-        raise HTTPException(status_code=404, detail="No versions found for this message.")
-
+    # A message with no saved edit-versions is a valid empty state, not an
+    # error: return an empty collection (200) so the client renders the plain
+    # SQL instead of surfacing a spurious 404 toast on every un-edited message.
     return {
         "message_id": message_id,
         "versions": [

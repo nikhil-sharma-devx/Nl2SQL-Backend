@@ -37,7 +37,7 @@ class GeminiEmbedder(IEmbedder):  # type: ignore[misc]
         self._api_key = api_key
         self._model = model
         self._dimensions = _GEMINI_MODEL_DIMS.get(model, dimensions)
-        self._client: "genai.Client | None" = None
+        self._client: genai.Client | None = None
 
     def _get_client(self) -> "genai.Client":
         if self._client is None:

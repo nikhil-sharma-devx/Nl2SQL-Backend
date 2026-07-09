@@ -36,8 +36,12 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
         self._chunks: list[SchemaChunk] = []  # parallel list to index rows
         logger.info("FAISS vector store initialised", dimensions=dimensions)
 
-    async def upsert(self, chunks: list[SchemaChunk]) -> None:
-        """Add chunks to the FAISS index (full rebuild on each call)."""
+    async def upsert(self, chunks: list[SchemaChunk], user_id: str | None = None) -> None:
+        """Add chunks to the FAISS index (full rebuild on each call).
+
+        Note: per-user isolation (``user_id``) is only implemented for
+        QdrantVectorStore; here the parameter is accepted but ignored.
+        """
         if not chunks:
             return
         valid = [c for c in chunks if c.embedding is not None]
@@ -59,6 +63,7 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
         self,
         query_embedding: list[float],
         top_k: int = 5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Run an inner-product (cosine) search."""
         if self._index.ntotal == 0:
@@ -74,7 +79,7 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
         self._index.reset()
         self._chunks = []
 
-    async def count(self) -> int:
+    async def count(self, user_id: str | None = None) -> int:
         return self._index.ntotal
 
     async def health_check(self) -> bool:
@@ -86,6 +91,7 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
         query_embedding: list[float],
         top_k: int = 5,
         alpha: float = 0.5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Hybrid search — falls back to vector search for FAISS.
 
@@ -110,6 +116,7 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
     async def get_chunks_by_table_names(
         self,
         table_names: list[str],
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Fetch schema chunks whose table_name is in the given list.
 
@@ -127,7 +134,7 @@ class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
         name_set = set(table_names)
         return [c for c in self._chunks if c.table_name in name_set]
 
-    async def get_all_table_names(self) -> list[str]:
+    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
         """Return every unique table name currently stored in the FAISS index.
 
         Returns:

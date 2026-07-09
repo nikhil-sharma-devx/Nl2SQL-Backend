@@ -4,6 +4,7 @@ This is the ONLY file that services/ needs to import from rag/retrieval/.
 Composes: embed â†’ vector search + BM25 search (parallel) â†’ rerank â†’ build context.
 """
 import asyncio
+import time
 
 import structlog
 
@@ -95,10 +96,13 @@ class RetrievalChain:
 
         # Step 1: Embed the question
         log.debug("Step 1: Embedding question")
+        _t_embed = time.perf_counter()
         query_embedding = await self._query_embedder.embed(question)
+        embed_ms = int((time.perf_counter() - _t_embed) * 1000)
 
         # Step 2: Run dense + sparse search in parallel
         log.debug("Step 2: Running parallel retrieval")
+        _t_search = time.perf_counter()
         dense_task = self._vector_retriever.retrieve(
             query_embedding=query_embedding,
             query_text=question,
@@ -127,14 +131,17 @@ class RetrievalChain:
                 sparse_chunks = _sparse_result
         else:
             dense_chunks = await dense_task
+        search_ms = int((time.perf_counter() - _t_search) * 1000)
 
         # Step 3: Rerank
         log.debug("Step 3: Reranking results")
+        _t_rerank = time.perf_counter()
         reranked = await self._reranker.rerank(
             query=question,
             dense_chunks=dense_chunks,
             sparse_chunks=sparse_chunks,
         )
+        rerank_ms = int((time.perf_counter() - _t_rerank) * 1000)
 
         log.info(
             "Retrieval chain complete",
@@ -142,8 +149,14 @@ class RetrievalChain:
             sparse_count=len(sparse_chunks) if sparse_chunks else 0,
             reranked_count=len(reranked),
             tables=[c.table_name for c in reranked],
+            embed_ms=embed_ms,
+            search_ms=search_ms,
+            rerank_ms=rerank_ms,
         )
         set_span_attribute("retrieval.results_count", len(reranked))
+        set_span_attribute("retrieval.embed_ms", embed_ms)
+        set_span_attribute("retrieval.search_ms", search_ms)
+        set_span_attribute("retrieval.rerank_ms", rerank_ms)
         return reranked  # type: ignore[no-any-return]
 
     def build_context(self, chunks: list[SchemaChunk]) -> str:

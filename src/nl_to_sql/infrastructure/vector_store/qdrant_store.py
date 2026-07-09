@@ -50,6 +50,17 @@ def _to_uuid(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id))
 
 
+def _no_hash_filter(user_id: str | None = None) -> Filter:
+    """Base filter that excludes the hash sentinel, optionally scoped to a user."""
+    must = []
+    if user_id is not None:
+        must.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+    return Filter(
+        must=must or None,
+        must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))],
+    )
+
+
 def _payload_to_chunk(payload: dict[str, Any]) -> SchemaChunk:
     return SchemaChunk(
         chunk_id=payload.get("chunk_id", ""),
@@ -174,7 +185,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                 pass
 
         # Ensure payload indexes exist (idempotent — safe to call on existing collections)
-        for field in ("table_name", "type"):
+        for field in ("table_name", "type", "user_id"):
             try:
                 await self._client.create_payload_index(
                     collection_name=self._collection_name,
@@ -203,7 +214,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
 
     # ── IVectorStore ──────────────────────────────────────────────────────────
 
-    async def upsert(self, chunks: list[SchemaChunk]) -> None:
+    async def upsert(self, chunks: list[SchemaChunk], user_id: str | None = None) -> None:
         await self._ensure_initialized()
         valid = [c for c in chunks if c.embedding is not None]
         if not valid:
@@ -229,6 +240,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                     "schema_name": c.schema_name,
                     "content": c.content,
                     "type": "chunk",
+                    **({"user_id": user_id} if user_id is not None else {}),
                     **c.metadata,
                 },
             )
@@ -250,11 +262,10 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self,
         query_embedding: list[float],
         top_k: int = 5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         await self._ensure_initialized()
-        no_hash = Filter(
-            must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))]
-        )
+        no_hash = _no_hash_filter(user_id)
         response = await self._client.query_points(
             collection_name=self._collection_name,
             query=query_embedding,
@@ -271,12 +282,11 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         query_embedding: list[float],
         top_k: int = 5,
         alpha: float = 0.5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Dense + BM42 sparse search fused with Qdrant's RRF."""
         await self._ensure_initialized()
-        no_hash = Filter(
-            must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))]
-        )
+        no_hash = _no_hash_filter(user_id)
         sparse_q = await asyncio.to_thread(self._embed_sparse_query, query_text)
         response = await self._client.query_points(
             collection_name=self._collection_name,
@@ -313,16 +323,28 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self._initialized = False
         self._schema_hash = None
 
-    async def count(self) -> int:
+    async def count(self, user_id: str | None = None) -> int:
         await self._ensure_initialized()
         result = await self._client.count(
             collection_name=self._collection_name,
-            count_filter=Filter(
-                must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))]
-            ),
+            count_filter=_no_hash_filter(user_id),
             exact=True,
         )
         return result.count
+
+    async def delete_by_user(self, user_id: str) -> None:
+        """Delete all of a user's chunks (per-user reset). Best-effort."""
+        await self._ensure_initialized()
+        try:
+            await self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=Filter(
+                    must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+                ),
+            )
+            logger.info("Qdrant deleted user chunks", user_id=user_id)
+        except Exception as exc:
+            logger.warning("Qdrant delete_by_user failed", error=_exc_detail(exc))
 
     async def health_check(self) -> bool:
         try:
@@ -332,7 +354,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             return False
 
     async def get_chunks_by_table_names(
-        self, table_names: list[str]
+        self, table_names: list[str], user_id: str | None = None
     ) -> list[SchemaChunk]:
         await self._ensure_initialized()
         if not table_names:
@@ -342,7 +364,10 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             if len(table_names) > 1
             else MatchValue(value=table_names[0])
         )
-        f = Filter(must=[FieldCondition(key="table_name", match=match)])
+        must = [FieldCondition(key="table_name", match=match)]
+        if user_id is not None:
+            must.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+        f = Filter(must=must)
         chunks: list[SchemaChunk] = []
         offset = None
         while True:
@@ -359,11 +384,9 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             offset = next_offset
         return chunks
 
-    async def get_all_table_names(self) -> list[str]:
+    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
         await self._ensure_initialized()
-        no_hash = Filter(
-            must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))]
-        )
+        no_hash = _no_hash_filter(user_id)
         names: set[str] = set()
         offset = None
         while True:

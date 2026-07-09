@@ -34,6 +34,68 @@ class AddMessageRequest(BaseModel):
     follow_up_questions: list[str] = Field(default_factory=list)
 
 
+class SessionSummary(BaseModel):
+    """A chat session's metadata (no messages)."""
+
+    id: str
+    title: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class SessionListItem(SessionSummary):
+    message_count: int
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class SessionMessagePayload(BaseModel):
+    """The QueryResponse-shaped payload stored on each message.
+
+    Types are intentionally tolerant of NULL/legacy rows: these values come
+    straight from the DB (some columns are nullable) and this model must never
+    reject a valid stored message. Field *names* are the FE/codegen contract.
+    """
+
+    question: str
+    sql: str | None = None
+    dialect: str | None = None
+    is_valid: bool | None = None
+    validation_errors: list[Any] = Field(default_factory=list)
+    retrieved_tables: list[Any] = Field(default_factory=list)
+    used_tables: list[Any] = Field(default_factory=list)
+    execution_result: Any = None
+    execution_error: str | None = None
+    tokens_used: int | None = 0
+    cached: bool | None = False
+    message: str | None = None
+    intent_type: str | None = None
+    suggested_chart: dict[str, Any] | None = None
+    follow_up_questions: list[Any] = Field(default_factory=list)
+
+
+class SessionMessageOut(BaseModel):
+    # ChatMessage.id is an autoincrement integer (not the UUID string used for
+    # sessions), so this must be int — a str annotation rejects every message.
+    id: int
+    question: str
+    timestamp: str
+    response: SessionMessagePayload
+
+
+class SessionDetailResponse(SessionSummary):
+    messages: list[SessionMessageOut]
+
+
+class DeleteMessageResponse(BaseModel):
+    message: str
+
+
 router = APIRouter(prefix="/api/v1", tags=["Sessions"])
 
 
@@ -41,6 +103,7 @@ router = APIRouter(prefix="/api/v1", tags=["Sessions"])
     "/sessions",
     summary="Create a new chat session",
     description="Creates a new chat session for the authenticated user and returns its ID.",
+    response_model=SessionSummary,
 )
 async def create_session(
     current_user: UserPublic = Depends(get_current_user),
@@ -60,6 +123,7 @@ async def create_session(
     "/sessions",
     summary="List all chat sessions",
     description="Returns a list of the authenticated user's chat sessions ordered by most recently updated.",
+    response_model=SessionListResponse,
 )
 async def list_sessions(
     response: Response,
@@ -96,6 +160,7 @@ async def list_sessions(
     "/sessions/{session_id}",
     summary="Get a chat session with all messages",
     description="Returns a chat session and all its messages (must belong to the current user).",
+    response_model=SessionDetailResponse,
 )
 async def get_session(
     session_id: str,
@@ -161,6 +226,7 @@ async def get_session(
 @router.post(
     "/sessions/{session_id}/messages",
     summary="Add a message/direct query to a session",
+    response_model=SessionMessageOut,
 )
 async def add_session_message(
     session_id: str,
@@ -243,6 +309,7 @@ async def add_session_message(
     "/sessions/{session_id}",
     summary="Delete a chat session",
     description="Deletes a chat session and all its messages (must belong to the current user).",
+    response_model=DeleteMessageResponse,
 )
 async def delete_session(
     session_id: str,
@@ -262,6 +329,7 @@ async def delete_session(
     "/sessions",
     summary="Delete all chat sessions",
     description="Deletes all of the authenticated user's chat sessions and their messages.",
+    response_model=DeleteMessageResponse,
 )
 async def delete_all_sessions(
     current_user: UserPublic = Depends(get_current_user),

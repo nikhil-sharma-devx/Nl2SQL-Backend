@@ -4,6 +4,7 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from nl_to_sql.api.dependencies import get_container, get_current_user
 from nl_to_sql.config.container import ApplicationContainer
@@ -11,6 +12,10 @@ from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.training_data_service import TrainingDataService
 
 router = APIRouter(prefix="/api/v1/training", tags=["Training Data"])
+
+
+class MarkUsedResponse(BaseModel):
+    marked_count: int
 
 
 async def get_training_data_service(
@@ -68,7 +73,7 @@ async def download_training_data(
     )
 
 
-@router.post("/mark-used")
+@router.post("/mark-used", response_model=MarkUsedResponse)
 async def mark_training_data_used(
     ids: list[int] = Query(..., max_length=500),
     current_user: UserPublic = Depends(get_current_user),
