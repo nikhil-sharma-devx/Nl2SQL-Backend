@@ -193,7 +193,10 @@ class SemanticCache(ICache):  # type: ignore[misc]
                 embedding=embedding,
                 metadata={
                     "original_question": question,
-                    "response": json.dumps(response),
+                    # default=str so datetime/Decimal values in execution_result
+                    # (from the target DB) serialize instead of raising and
+                    # silently disabling the L2 semantic cache.
+                    "response": json.dumps(response, default=str),
                     "cached_at": time.time(),
                     "ttl": effective_ttl,
                     "type": "semantic_cache",

@@ -2,6 +2,7 @@
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from nl_to_sql.api.dependencies import get_container, get_current_user
 from nl_to_sql.config.container import ApplicationContainer
@@ -9,6 +10,20 @@ from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.fine_tuning_service import FineTuningService
 
 router = APIRouter(prefix="/api/v1/fine-tuning", tags=["Fine-Tuning"])
+
+
+class PrepareFileResponse(BaseModel):
+    file_path: str
+
+
+class StartJobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class DeployResponse(BaseModel):
+    deployed: bool
+    active_model: str
 
 
 async def get_fine_tuning_service(
@@ -58,7 +73,7 @@ async def get_fine_tuning_service(
     return base_service
 
 
-@router.post("/prepare")
+@router.post("/prepare", response_model=PrepareFileResponse)
 async def prepare_training_file(
     format: str = Query(default="jsonl", pattern="^(json|jsonl)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
@@ -80,7 +95,7 @@ async def prepare_training_file(
     return {"file_path": file_path}
 
 
-@router.post("/start")
+@router.post("/start", response_model=StartJobResponse)
 async def start_fine_tuning(
     model: str,
     training_file_path: str,
@@ -147,7 +162,7 @@ async def list_jobs(
     return cast(list[dict[str, Any]], await fine_tuning_service.list_jobs(limit=limit))
 
 
-@router.post("/deploy")
+@router.post("/deploy", response_model=DeployResponse)
 async def deploy_fine_tuned_model(
     model_id: str,
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),

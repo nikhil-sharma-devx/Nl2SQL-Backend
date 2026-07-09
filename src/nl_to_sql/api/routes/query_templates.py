@@ -6,7 +6,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 
 from nl_to_sql.api.dependencies import get_current_user, get_session_service
 from nl_to_sql.core.models.auth import UserPublic
@@ -100,6 +100,12 @@ async def list_templates(
         if search:
             pattern = f"%{search}%"
             q = q.where(QueryTemplate.name.ilike(pattern))
+        if tag:
+            # Push the tag filter into SQL so `total` and limit/offset stay
+            # correct. `tags` is a generic JSON array column; casting to text and
+            # matching the quoted tag is portable across PostgreSQL and MySQL and
+            # avoids substring collisions with other tag values.
+            q = q.where(cast(QueryTemplate.tags, String).ilike(f'%"{tag}"%'))
 
         count_result = await db.execute(select(func.count()).select_from(q.subquery()))
         total = count_result.scalar_one()
@@ -107,11 +113,6 @@ async def list_templates(
         q = q.order_by(QueryTemplate.updated_at.desc()).limit(limit).offset(offset)
         result = await db.execute(q)
         items = result.scalars().all()
-
-    # Filter by tag in Python (JSON array); acceptable at low counts
-    if tag:
-        items = [t for t in items if tag in (t.tags or [])]
-        total = len(items)
 
     return QueryTemplateListResponse(items=[_to_out(t) for t in items], total=total)
 

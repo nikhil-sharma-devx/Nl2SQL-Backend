@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""
     qdrant_collection_name: str = "schema_chunks"
 
+    # Per-user isolation for the (shared) vector-store collection. When enabled,
+    # schema chunks are tagged with `user_id` on write and every read is filtered
+    # by the requesting user's id, so BYOD users never retrieve each other's
+    # tables. Default off preserves the single shared-collection behaviour;
+    # enabling it requires re-ingesting per user (wipe + re-sync).
+    schema_per_user_isolation: bool = False
+
     # ── SQL ──────────────────────────────────────────────────────────────────
     sql_dialect: Literal["postgresql", "mysql"] = "postgresql"
     sql_validation_enabled: bool = True
@@ -144,6 +151,12 @@ class Settings(BaseSettings):
     db_pool_timeout: int = 30
     db_pool_recycle: int = 1800
 
+    # ── Target DB hardening ──────────────────────────────────────────────────
+    # Generated SQL runs against the *target* database in a read-only
+    # transaction with a statement timeout (PostgreSQL only).
+    target_db_readonly: bool = True
+    target_statement_timeout_ms: int = 30_000
+
     # ── Query Intelligence ───────────────────────────────────────────────────
     query_rewriting_enabled: bool = True
     query_expansion_enabled: bool = True
@@ -157,8 +170,20 @@ class Settings(BaseSettings):
     schema_monitor_enabled: bool = True
     schema_monitor_interval_seconds: int = 300
 
+    # ── Background maintenance jobs (account purge + data retention) ──────────
+    # Runs the idempotent purge/retention workers on an interval loop inside the
+    # app process (advisory-locked so only one worker fires per tick). Disable
+    # if you schedule these via an external cron instead.
+    background_jobs_enabled: bool = True
+    background_jobs_interval_seconds: int = 86_400  # daily
+
     # ── Auto Ingest on Startup ───────────────────────────────────────────────
     auto_ingest_schema_on_startup: bool = True
+
+    # ── Model Warm-up ────────────────────────────────────────────────────────
+    # Load the embedding + reranker models at boot so the first user query
+    # doesn't pay the one-time ~1-3 s SentenceTransformer/CrossEncoder cost.
+    warm_models_on_startup: bool = True
 
     # ── Lazy Loading ─────────────────────────────────────────────────────────
     lazy_loading_enabled: bool = True
@@ -204,6 +229,16 @@ class Settings(BaseSettings):
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 60  # per minute
+
+    # ── CORS ──────────────────────────────────────────────────────────────────
+    # Comma-separated allowlist of frontend origins. In production the wildcard
+    # is dropped and only these origins are permitted (behind nginx everything
+    # is same-origin, so an empty list is safe). In development we allow all.
+    cors_allowed_origins: str = ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     # ── Admin ─────────────────────────────────────────────────────────────────
     admin_emails: str = Field(default="", description="Comma-separated email addresses granted admin access")

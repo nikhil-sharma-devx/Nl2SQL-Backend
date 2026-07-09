@@ -20,21 +20,29 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         start = time.perf_counter()
 
+        # Expose the ID to exception handlers and bind it to the structlog
+        # context so every log line emitted while serving this request carries
+        # the same request_id (merge_contextvars is in the processor chain).
+        request.state.request_id = request_id
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+
         log = logger.bind(
-            request_id=request_id,
             method=request.method,
             path=request.url.path,
         )
         log.info("Request started")
 
-        response: Response = await call_next(request)  # type: ignore[operator]
+        try:
+            response: Response = await call_next(request)  # type: ignore[operator]
 
-        duration_ms = (time.perf_counter() - start) * 1000
-        log.info(
-            "Request completed",
-            status_code=response.status_code,
-            duration_ms=round(duration_ms, 2),
-        )
+            duration_ms = (time.perf_counter() - start) * 1000
+            log.info(
+                "Request completed",
+                status_code=response.status_code,
+                duration_ms=round(duration_ms, 2),
+            )
 
-        response.headers["X-Request-ID"] = request_id
-        return response
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            structlog.contextvars.clear_contextvars()

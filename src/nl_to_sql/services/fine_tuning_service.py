@@ -1,6 +1,7 @@
 """Fine-tuning Service — Manages LLM fine-tuning with collected training data."""
 import os
 import tempfile
+from collections.abc import Callable
 from typing import Any, cast
 
 import structlog
@@ -8,6 +9,11 @@ import structlog
 from nl_to_sql.services.training_data_service import TrainingDataService
 
 logger = structlog.get_logger(__name__)
+
+# Callback that activates a newly-deployed provider/model at runtime.
+# Injected by the composition root so this service never imports the container
+# (breaks the api.dependencies ↔ container ↔ fine_tuning_service import cycle).
+SwitchProviderCallback = Callable[[str, str], Any]
 
 TOGETHER_BASE_URL = "https://api.together.xyz/v1"
 
@@ -30,6 +36,7 @@ class FineTuningService:
         openai_api_key: str = "",
         together_api_key: str = "",
         training_data_service: TrainingDataService | None = None,
+        switch_provider: SwitchProviderCallback | None = None,
     ) -> None:
         self._provider = provider
         self._openai_api_key = openai_api_key
@@ -37,7 +44,12 @@ class FineTuningService:
         # Resolve the effective key for the configured provider
         self._api_key = together_api_key if provider == "together" else openai_api_key
         self._training_data_service = training_data_service
+        self._switch_provider = switch_provider
         self._logger = logger.bind(component="FineTuningService", provider=provider)
+
+    def set_switch_provider(self, switch_provider: SwitchProviderCallback) -> None:
+        """Inject the runtime provider-switch callback (called by the container)."""
+        self._switch_provider = switch_provider
 
     def _openai_client(self, *, base_url: str | None = None) -> Any:
         """Return an AsyncOpenAI client, optionally pointed at an alternate base URL."""
@@ -253,11 +265,12 @@ class FineTuningService:
                     f"Fine-tuning deployment is not supported for provider '{self._provider}'."
                 )
 
-            from nl_to_sql.api.dependencies import _get_container
-            from nl_to_sql.config.container import ApplicationContainer
-
-            container: ApplicationContainer = _get_container()
-            ApplicationContainer.switch_llm_provider(container, self._provider, model_id)
+            if self._switch_provider is None:
+                raise RuntimeError(
+                    "switch_provider callback not configured — cannot activate the "
+                    "deployed model. The composition root must inject it."
+                )
+            self._switch_provider(self._provider, model_id)
 
             self._logger.info("Fine-tuned model deployed and activated", model_id=model_id, provider=self._provider)
             return True

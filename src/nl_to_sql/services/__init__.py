@@ -22,10 +22,8 @@ Core RAG components have been moved to:
 # Backward compatibility — re-export from new locations
 from nl_to_sql.services.reranker import CrossEncoderReranker
 from nl_to_sql.services.schema_retriever import SchemaRetriever
-from nl_to_sql.services.table_selector import TableSelectorService as TableSelectorServiceLegacy
 
 __all__ = [
     "CrossEncoderReranker",
     "SchemaRetriever",
-    "TableSelectorServiceLegacy",
 ]

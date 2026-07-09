@@ -9,6 +9,12 @@ such as ``column chat_sessions.user_id does not exist``.
 the live database, issuing ``ALTER TABLE ... ADD COLUMN`` for every column that
 exists on the ORM model but is missing in the database. It only ever **adds**
 columns (never drops or retypes), so it is safe to run on every startup.
+
+MIGRATION POLICY (see Documentation/07_SCHEMA_MIGRATIONS.md): **Alembic is
+authoritative in production** — every new model/column must ship an Alembic
+migration. ``ensure_schema`` is a dev/backstop convenience only; because it is
+strictly additive and idempotent it can never conflict with Alembic (after
+``alembic upgrade head`` it is a no-op).
 """
 from __future__ import annotations
 

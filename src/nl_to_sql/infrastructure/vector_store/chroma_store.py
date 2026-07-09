@@ -76,8 +76,12 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         except Exception as exc:
             logger.warning("Failed to store schema hash", error=str(exc))
 
-    async def upsert(self, chunks: list[SchemaChunk]) -> None:
-        """Upsert schema chunks into ChromaDB."""
+    async def upsert(self, chunks: list[SchemaChunk], user_id: str | None = None) -> None:
+        """Upsert schema chunks into ChromaDB.
+
+        Note: per-user isolation (``user_id``) is only implemented for
+        QdrantVectorStore; here the parameter is accepted but ignored.
+        """
         if not chunks:
             return
         ids = [c.chunk_id for c in chunks]
@@ -120,6 +124,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         self,
         query_embedding: list[float],
         top_k: int = 5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Return top-k most similar schema chunks."""
         try:
@@ -197,7 +202,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         except Exception as exc:
             raise VectorStoreError(f"Failed to clear collection: {exc}") from exc
 
-    async def count(self) -> int:
+    async def count(self, user_id: str | None = None) -> int:
         """Return the number of stored chunks."""
         try:
             return self._collection.count()
@@ -240,6 +245,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         query_embedding: list[float],
         top_k: int = 5,
         alpha: float = 0.5,
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Hybrid search — falls back to vector search for ChromaDB.
 
@@ -264,6 +270,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
     async def get_chunks_by_table_names(
         self,
         table_names: list[str],
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Fetch schema chunks for the specified table names via metadata filter.
 
@@ -316,7 +323,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
             )
         return chunks
 
-    async def get_all_table_names(self) -> list[str]:
+    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
         """Return every unique table name currently stored in ChromaDB.
 
         Performs a full metadata scan — acceptable because the schema chunk

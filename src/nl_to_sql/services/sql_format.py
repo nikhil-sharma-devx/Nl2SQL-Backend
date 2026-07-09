@@ -13,6 +13,10 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# The app's dialect setting uses "postgresql", but sqlglot's dialect is named
+# "postgres" — normalize so formatting doesn't fail and fall back to raw SQL.
+_DIALECT_ALIASES = {"postgresql": "postgres"}
+
 
 def format_sql(
     sql: str,
@@ -30,9 +34,11 @@ def format_sql(
     try:
         import sqlglot
 
-        parsed = sqlglot.parse_one(sql, dialect=dialect or "")
+        sqlglot_dialect = _DIALECT_ALIASES.get((dialect or "").lower(), dialect or "")
+
+        parsed = sqlglot.parse_one(sql, dialect=sqlglot_dialect)
         formatted = parsed.sql(
-            dialect=dialect or "",
+            dialect=sqlglot_dialect,
             pretty=True,
             indent=indent,
         )

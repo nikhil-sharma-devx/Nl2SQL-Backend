@@ -1,18 +1,24 @@
-"""Dependency Injection container — wires all services via dependency-injector."""
+"""Dependency Injection container — wires all services via dependency-injector.
+
+Object construction logic lives in `config/factories/`; this module is the
+thin wiring layer that composes those factories into providers.
+"""
 from typing import Any
 
 from dependency_injector import containers, providers
 
+from nl_to_sql.config.factories import (
+    build_cache,
+    build_embedder,
+    build_llm_provider,
+    build_vector_store,
+    create_llm_provider,
+)
 from nl_to_sql.config.settings import Settings
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.infrastructure.bm25_store import BM25Store
-from nl_to_sql.infrastructure.cache.in_memory_cache import InMemoryCache
-from nl_to_sql.infrastructure.cache.redis_cache import RedisCache
 from nl_to_sql.infrastructure.cache.semantic_cache import SemanticCache
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
-from nl_to_sql.infrastructure.embeddings.huggingface_embedder import HuggingFaceEmbedder
-from nl_to_sql.infrastructure.llm.groq_provider import GroqProvider
-from nl_to_sql.infrastructure.vector_store.chroma_store import ChromaVectorStore
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
 from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.rag.retrieval.retrieval_chain import RetrievalChain
@@ -30,6 +36,7 @@ from nl_to_sql.services.query_history import QueryHistoryService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
 from nl_to_sql.services.query_rewriter import QueryRewriter
 from nl_to_sql.services.reranker import CrossEncoderReranker
+from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 from nl_to_sql.services.schema_monitor import SchemaMonitor
 from nl_to_sql.services.schema_retriever import SchemaRetriever
@@ -39,79 +46,6 @@ from nl_to_sql.services.sql_validator import SQLValidatorService
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
 from nl_to_sql.services.user_db_service import UserDbConnectionService
-
-
-def _build_llm_provider(settings: Settings) -> ILLMProvider:
-    """Factory: choose LLM provider from settings."""
-    return _create_llm_provider(settings.llm_provider, settings.llm_model, settings)
-
-
-def _create_llm_provider(provider: str, model: str, settings: Settings) -> ILLMProvider:
-    """Factory: create a specific LLM provider instance.
-
-    Args:
-        provider: The provider name ("groq", "openai", "anthropic", or "gemini").
-        model: The model name to use.
-        settings: Application settings for API keys.
-
-    Returns:
-        Configured ILLMProvider instance.
-    """
-    if provider == "openai":
-        from nl_to_sql.infrastructure.llm.openai_provider import OpenAIProvider
-        return OpenAIProvider(api_key=settings.openai_api_key, model=model)
-    if provider == "anthropic":
-        from nl_to_sql.infrastructure.llm.anthropic_provider import AnthropicProvider
-        return AnthropicProvider(api_key=settings.anthropic_api_key, model=model)
-    if provider == "gemini":
-        from nl_to_sql.infrastructure.llm.gemini_provider import GeminiProvider
-        return GeminiProvider(api_key=settings.gemini_api_key, model=model)
-    return GroqProvider(api_key=settings.groq_api_key, model=model)
-
-
-def _build_vector_store(settings: Settings) -> object:
-    """Factory: choose vector store from settings."""
-    if settings.vector_store_provider == "qdrant":
-        from nl_to_sql.infrastructure.vector_store.qdrant_store import QdrantVectorStore
-        return QdrantVectorStore(
-            url=settings.qdrant_url.strip(),
-            api_key=settings.qdrant_api_key.strip() or None,
-            collection_name=settings.qdrant_collection_name.strip(),
-            dimensions=settings.embedding_dimensions,
-        )
-    if settings.vector_store_provider == "faiss":
-        from nl_to_sql.infrastructure.vector_store.faiss_store import FAISSVectorStore
-        return FAISSVectorStore(dimensions=settings.embedding_dimensions)
-    # Default: ChromaDB
-    return ChromaVectorStore(
-        persist_dir=settings.chroma_persist_dir,
-        collection_name=settings.chroma_collection_name,
-    )
-
-
-def _build_cache(settings: Settings) -> object:
-    """Factory: choose cache backend from settings."""
-    if settings.cache_provider == "redis":
-        return RedisCache(
-            redis_url=settings.redis_url,
-            default_ttl=settings.cache_ttl_seconds,
-        )
-    return InMemoryCache(default_ttl=settings.cache_ttl_seconds)
-
-
-def _build_embedder(settings: Settings) -> object:
-    """Factory: choose embedder from settings."""
-    if settings.embedding_provider == "gemini":
-        from nl_to_sql.infrastructure.embeddings.gemini_embedder import GeminiEmbedder
-        return GeminiEmbedder(
-            api_key=settings.resolved_gemini_embedding_api_key,
-            model=settings.gemini_embedding_model,
-            dimensions=settings.embedding_dimensions,
-        )
-    return HuggingFaceEmbedder(
-        model=settings.huggingface_model,
-        dimensions=settings.embedding_dimensions,
-    )
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
@@ -133,22 +67,22 @@ class ApplicationContainer(containers.DeclarativeContainer):
 
     # ── Infrastructure ────────────────────────────────────────────────────────
     llm_provider = providers.Singleton(
-        _build_llm_provider,
+        build_llm_provider,
         settings=config,
     )
 
     embedder = providers.Singleton(
-        _build_embedder,
+        build_embedder,
         settings=config,
     )
 
     vector_store = providers.Singleton(
-        _build_vector_store,
+        build_vector_store,
         settings=config,
     )
 
     cache = providers.Singleton(
-        _build_cache,
+        build_cache,
         settings=config,
     )
 
@@ -176,6 +110,8 @@ class ApplicationContainer(containers.DeclarativeContainer):
         max_overflow=config.provided.db_max_overflow,
         pool_timeout=config.provided.db_pool_timeout,
         pool_recycle=config.provided.db_pool_recycle,
+        readonly=config.provided.target_db_readonly,
+        statement_timeout_ms=config.provided.target_statement_timeout_ms,
     )
 
     # ── Services ──────────────────────────────────────────────────────────────
@@ -360,6 +296,14 @@ class ApplicationContainer(containers.DeclarativeContainer):
         dialect=config.provided.sql_dialect,
     )
 
+    # ── Schema Catalog Service (per-user schema management source of truth) ──
+    schema_catalog_service = providers.Singleton(
+        SchemaCatalogService,
+        session_factory=session_service.provided._session_factory,
+        ingestion=schema_ingestion,
+        per_user_isolation=config.provided.schema_per_user_isolation,
+    )
+
     # ── Schema Monitor ───────────────────────────────────────────────────────
     schema_monitor = providers.Singleton(
         SchemaMonitor,
@@ -418,7 +362,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
             The new ILLMProvider instance.
         """
         settings: Settings = container.config()
-        new_provider = _create_llm_provider(provider, model, settings)
+        new_provider = create_llm_provider(provider, model, settings)
 
         # Override the singleton with the new instance
         container.llm_provider.override(providers.Object(new_provider))

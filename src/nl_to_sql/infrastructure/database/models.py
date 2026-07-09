@@ -485,3 +485,57 @@ class NotificationPreferences(Base):
     in_app_enabled = Column(Boolean, nullable=False, default=True)
     marketing_enabled = Column(Boolean, nullable=False, default=False)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── Schema Management (Schema Catalog) Models ───────────────────────────────────
+
+
+class UserSchema(Base):
+    """Per-user schema catalog header — source of truth for the Schema page.
+
+    One row per user. Tracks where the catalog came from (`reflected` /
+    `uploaded` / `merged`), the last-synced hash for change detection, and the
+    raw uploaded JSON for audit/restore.
+    """
+
+    __tablename__ = "user_schemas"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    database_name = Column(String(200), nullable=True)
+    dialect = Column(String(50), nullable=False, default="postgresql")
+    # 'reflected' | 'uploaded' | 'merged'
+    source = Column(String(20), nullable=False, default="reflected")
+    schema_hash = Column(String(64), nullable=True)  # SchemaIngestionService.compute_schema_hash
+    raw_upload_json = Column(JSON, nullable=True)  # exact payload the user uploaded (audit/restore)
+    last_synced_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserSchemaTable(Base):
+    """One row per table in a user's catalog. Columns stored as JSON for simplicity.
+
+    ``user_description`` is sticky — it survives re-reflection. The effective
+    description used at embed time is ``user_description or reflected_description``.
+    """
+
+    __tablename__ = "user_schema_tables"
+    __table_args__ = (
+        UniqueConstraint("user_id", "schema_name", "table_name", name="uq_user_schema_table"),
+        Index("ix_user_schema_tables_user", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    schema_name = Column(String(100), nullable=False, default="public")
+    table_name = Column(String(200), nullable=False)
+    # 'reflected' | 'uploaded'
+    source = Column(String(20), nullable=False, default="reflected")
+    # list[ColumnInfo] as JSON: [{name, data_type, nullable, primary_key, foreign_key, description}]
+    columns = Column(JSON, nullable=False, default=list)
+    reflected_description = Column(Text, nullable=True)  # from DB comment, if any
+    user_description = Column(Text, nullable=True)  # user override, survives re-reflection
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)  # updated each sync
+    is_new = Column(Boolean, nullable=False, default=True)  # cleared once the user has viewed it

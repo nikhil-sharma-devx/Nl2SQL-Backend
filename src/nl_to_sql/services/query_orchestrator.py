@@ -31,7 +31,8 @@ except ImportError:
             pass
 from nl_to_sql.core.interfaces.i_cache import ICache
 from nl_to_sql.core.interfaces.i_sql_validator import ISQLValidator
-from nl_to_sql.core.models.query import QueryRequest, QueryResponse
+from nl_to_sql.core.models.query import PipelineStageEvent, QueryRequest, QueryResponse
+from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics, get_stage_metrics
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
 from nl_to_sql.services.query_classifier import QueryClassifier
@@ -136,15 +137,9 @@ class QueryOrchestrator:
             dialect=dialect,
         )
 
-        # ── Step 1: Cache lookup ──────────────────────────────────────────────
-        # Only use cache when execute=False. When execute=True, we need to run the query.
-        cached = None
-        if hasattr(self._cache, "get_semantic"):
-            cached = await self._cache.get_semantic(request.question, user_id=self._user_id)
-
-        if not cached:
-            cache_key = self._make_cache_key(request.question, dialect, self.PROMPT_VERSION)
-            cached = await self._cache.get(cache_key)
+        # ── Step 1: Two-layer cache lookup ────────────────────────────────────
+        # L1 exact key first (no embedding cost), then L2 semantic similarity.
+        cached, _cache_layer = await self._cache_lookup(request.question, dialect)
 
         if cached and not request.execute:
             log.info("Cache hit — returning cached SQL")
@@ -276,17 +271,35 @@ class QueryOrchestrator:
                 return response
 
         # ── Step 3: Schema retrieval — two-phase grounding ─────────────────────
-        # Phase A: vector similarity search → candidate tables (coarse)
+        stage_timings: dict[str, int] = {}
+        _stage_start = time.perf_counter()
+
+        # Phase A: vector similarity search → candidate tables (coarse).
+        # The known-table list needed by Phase B doesn't depend on Phase A,
+        # so both run concurrently.
         log.info("Phase A: Retrieving candidate schema chunks via vector search")
         intent_top_k = self._get_intent_top_k(request.question)
-        candidate_chunks = await self._retriever.retrieve(request.question, top_k=intent_top_k)
+        if self._table_selector is not None:
+            candidate_chunks, all_known_tables = await asyncio.gather(
+                self._retriever.retrieve(request.question, top_k=intent_top_k),
+                self._retriever.get_all_table_names(),
+            )
+        else:
+            candidate_chunks = await self._retriever.retrieve(request.question, top_k=intent_top_k)
+            all_known_tables = []
         candidate_tables = list({c.table_name for c in candidate_chunks})
-        log.info("Candidate tables from vector search", tables=candidate_tables, top_k=intent_top_k)
+        stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
+        log.info(
+            "Candidate tables from vector search",
+            tables=candidate_tables,
+            top_k=intent_top_k,
+            retrieval_ms=stage_timings["retrieval"],
+        )
 
+        _stage_start = time.perf_counter()
         if self._table_selector is not None:
             # Phase B: LLM picks tables from the known ingested list (no hallucination)
             log.info("Phase B: Running LLM table selector")
-            all_known_tables = await self._retriever.get_all_table_names()
             selected_tables = await self._table_selector.select_tables(
                 question=request.question,
                 available_tables=all_known_tables,
@@ -308,6 +321,7 @@ class QueryOrchestrator:
                     final_chunks = await self._fk_extractor.expand_tables(
                         final_chunks,
                         max_expansion=3,
+                        user_id=self._user_id,
                     )
                 except Exception as fk_exc:
                     log.warning("FK expansion failed, using grounded chunks", error=str(fk_exc))
@@ -323,6 +337,7 @@ class QueryOrchestrator:
             # No table selector configured — use candidate chunks directly
             final_chunks = candidate_chunks
             retrieved_tables = candidate_tables
+        stage_timings["table_selection"] = int((time.perf_counter() - _stage_start) * 1000)
 
         schema_context = self._retriever.build_schema_context(final_chunks)
 
@@ -378,6 +393,7 @@ class QueryOrchestrator:
         for attempt in range(1, self._max_retries + 1):
             try:
                 log.info("Generating SQL", attempt=attempt)
+                _stage_start = time.perf_counter()
                 generated_sql = await self._generator.generate(
                     question=effective_question,
                     schema_context=schema_context,
@@ -390,7 +406,11 @@ class QueryOrchestrator:
                     few_shot_examples=few_shot_examples,
                 )
                 generated_sql.attempt = attempt
+                stage_timings["generation"] = stage_timings.get("generation", 0) + int(
+                    (time.perf_counter() - _stage_start) * 1000
+                )
 
+                _stage_start = time.perf_counter()
                 validation = self._validator.validate(generated_sql.cleaned_sql)
                 generated_sql.validation = validation
 
@@ -435,18 +455,29 @@ class QueryOrchestrator:
                         except Exception:
                             pass  # DB unavailable — skip EXPLAIN, don't fail the query
 
+                stage_timings["validation"] = stage_timings.get("validation", 0) + int(
+                    (time.perf_counter() - _stage_start) * 1000
+                )
+
                 if validation.is_valid and not column_errors:
                     if request.execute and self._db_client:
+                        _stage_start = time.perf_counter()
                         try:
                             log.info("Executing generated SQL (Agentic validation)", sql=generated_sql.cleaned_sql[:100])
                             execution_result = await self._db_client.execute_sql(generated_sql.cleaned_sql)
                             log.info("SQL execution successful", rows=len(execution_result) if execution_result else 0)
+                            stage_timings["execution"] = stage_timings.get("execution", 0) + int(
+                                (time.perf_counter() - _stage_start) * 1000
+                            )
                             break
                         except DatabaseExecutionError as exc:
                             execution_error = str(exc)
                             log.warning("Agentic SQL execution failed — retrying", error=execution_error)
                             all_errors.append(f"Database execution error: {execution_error}")
                             validation.is_valid = False
+                            stage_timings["execution"] = stage_timings.get("execution", 0) + int(
+                                (time.perf_counter() - _stage_start) * 1000
+                            )
                     else:
                         log.info("SQL passed all validation (No execution requested)", attempt=attempt)
                         break
@@ -528,10 +559,15 @@ class QueryOrchestrator:
             prompt_version="v1.0",
             retrieval_method="vector",
             response_time_ms=response_time_ms,
+            stage_timings=stage_timings,
             suggested_chart=generated_sql.suggested_chart,
             follow_up_questions=generated_sql.follow_up_questions,
             message=empty_result_warning,
         )
+        log.info("Pipeline stage timings", **{f"{k}_ms": v for k, v in stage_timings.items()})
+        for _stage, _ms in stage_timings.items():
+            set_span_attribute(f"pipeline.stage.{_stage}_ms", _ms)
+        get_stage_metrics().record(stage_timings)
 
         # Save to chat session if session_id provided (save regardless of validation status)
         log.info(
@@ -585,6 +621,29 @@ class QueryOrchestrator:
 
     # Bump this string whenever the prompt template changes to auto-invalidate old cache entries.
     PROMPT_VERSION = "v1.0"
+
+    async def _cache_lookup(
+        self, question: str, dialect: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Two-layer cache lookup: L1 exact key → L2 semantic similarity.
+
+        Exact hits skip the embedding step entirely, which is why the exact
+        layer is always consulted first. Records per-layer hit metrics.
+
+        Returns:
+            (cached_payload_or_None, layer) where layer ∈ {exact, semantic, miss}.
+        """
+        layer = "miss"
+        cache_key = self._make_cache_key(question, dialect, self.PROMPT_VERSION)
+        cached = await self._cache.get(cache_key)
+        if cached:
+            layer = "exact"
+        elif hasattr(self._cache, "get_semantic"):
+            cached = await self._cache.get_semantic(question, user_id=self._user_id)
+            if cached:
+                layer = "semantic"
+        get_cache_metrics().record(layer)  # type: ignore[arg-type]
+        return cached, layer
 
     @staticmethod
     def _make_cache_key(question: str, dialect: str, prompt_version: str = "v1.0") -> str:
@@ -683,16 +742,10 @@ class QueryOrchestrator:
 
         try:
             # Yield initial status
-            yield {"status": "started", "stage": "initializing"}
+            yield PipelineStageEvent(status="started", stage="initializing").to_sse()
 
-            # Check cache first
-            cached = None
-            if hasattr(self._cache, "get_semantic"):
-                cached = await self._cache.get_semantic(request.question, user_id=self._user_id)
-
-            if not cached:
-                cache_key = self._make_cache_key(request.question, dialect, self.PROMPT_VERSION)
-                cached = await self._cache.get(cache_key)
+            # Two-layer cache: L1 exact key → L2 semantic similarity
+            cached, _cache_layer = await self._cache_lookup(request.question, dialect)
 
             if cached:
                 # Mark the payload itself as cached (the stored copy has cached=False),
@@ -709,7 +762,7 @@ class QueryOrchestrator:
                         )
                     except Exception as sess_exc:
                         log.warning("Failed to save cached response to chat session in stream", error=str(sess_exc))
-                yield {"status": "complete", "cached": True, "data": response_data}
+                yield PipelineStageEvent(status="complete", cached=True, data=response_data).to_sse()
                 return
 
             # ── Query classification (greeting / off-topic detection) ───────
@@ -748,22 +801,34 @@ class QueryOrchestrator:
                         except Exception as sess_exc:
                             log.warning("Failed to save greeting to chat session", error=str(sess_exc))
 
-                    yield {
-                        "status": "complete",
-                        "cached": False,
-                        "data": response.model_dump(),
-                        "response_time_ms": response_time_ms,
-                    }
+                    yield PipelineStageEvent(
+                        status="complete",
+                        cached=False,
+                        data=response.model_dump(),
+                        response_time_ms=response_time_ms,
+                    ).to_sse()
                     return
 
-            # Schema retrieval — two-phase grounding
-            yield {"status": "progress", "stage": "retrieving_schema"}
+            # Schema retrieval — two-phase grounding.
+            # The known-table list (Phase B input) is fetched concurrently
+            # with the Phase A vector search — neither depends on the other.
+            stage_timings: dict[str, int] = {}
+            _stage_start = time.perf_counter()
+            yield PipelineStageEvent(status="progress", stage="retrieving_schema").to_sse()
             _stream_intent_top_k = self._get_intent_top_k(request.question)
-            candidate_chunks = await self._retriever.retrieve(request.question, top_k=_stream_intent_top_k)
-            candidate_tables = list({c.table_name for c in candidate_chunks})
-
             if self._table_selector is not None:
-                all_known_tables = await self._retriever.get_all_table_names()
+                candidate_chunks, all_known_tables = await asyncio.gather(
+                    self._retriever.retrieve(request.question, top_k=_stream_intent_top_k),
+                    self._retriever.get_all_table_names(),
+                )
+            else:
+                candidate_chunks = await self._retriever.retrieve(request.question, top_k=_stream_intent_top_k)
+                all_known_tables = []
+            candidate_tables = list({c.table_name for c in candidate_chunks})
+            stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
+
+            _stage_start = time.perf_counter()
+            if self._table_selector is not None:
                 selected_tables = await self._table_selector.select_tables(
                     question=request.question,
                     available_tables=all_known_tables,
@@ -777,6 +842,7 @@ class QueryOrchestrator:
                         final_chunks = await self._fk_extractor.expand_tables(
                             final_chunks,
                             max_expansion=3,
+                            user_id=self._user_id,
                         )
                     except Exception as fk_exc:
                         log.warning("FK expansion failed", error=str(fk_exc))
@@ -785,14 +851,15 @@ class QueryOrchestrator:
             else:
                 final_chunks = candidate_chunks
                 retrieved_tables = candidate_tables
+            stage_timings["table_selection"] = int((time.perf_counter() - _stage_start) * 1000)
 
             schema_context = self._retriever.build_schema_context(final_chunks)
 
-            yield {
-                "status": "progress",
-                "stage": "schema_retrieved",
-                "tables": retrieved_tables,
-            }
+            yield PipelineStageEvent(
+                status="progress",
+                stage="schema_retrieved",
+                tables=retrieved_tables,
+            ).to_sse()
 
             # Fetch conversation history (ConversationBufferMemory)
             conversation_history: list[dict[str, Any]] | None = None
@@ -844,7 +911,8 @@ class QueryOrchestrator:
 
             for attempt in range(1, self._max_retries + 1):
                 try:
-                    yield {"status": "progress", "stage": "generating_sql"}
+                    yield PipelineStageEvent(status="progress", stage="generating_sql").to_sse()
+                    _stage_start = time.perf_counter()
                     generated_sql = await self._generator.generate(
                         question=_stream_effective_q,
                         schema_context=schema_context,
@@ -857,15 +925,19 @@ class QueryOrchestrator:
                         few_shot_examples=_stream_few_shot,
                     )
                     generated_sql.attempt = attempt
+                    stage_timings["generation"] = stage_timings.get("generation", 0) + int(
+                        (time.perf_counter() - _stage_start) * 1000
+                    )
 
-                    yield {
-                        "status": "progress",
-                        "stage": "sql_generated",
-                        "sql": generated_sql.cleaned_sql,
-                    }
+                    yield PipelineStageEvent(
+                        status="progress",
+                        stage="sql_generated",
+                        sql=generated_sql.cleaned_sql,
+                    ).to_sse()
 
                     # Validate
-                    yield {"status": "progress", "stage": "validating_sql"}
+                    yield PipelineStageEvent(status="progress", stage="validating_sql").to_sse()
+                    _stage_start = time.perf_counter()
                     validation = self._validator.validate(generated_sql.cleaned_sql)
                     generated_sql.validation = validation
 
@@ -895,12 +967,20 @@ class QueryOrchestrator:
                             except Exception:
                                 pass  # DB unavailable — skip EXPLAIN, don't fail the query
 
+                    stage_timings["validation"] = stage_timings.get("validation", 0) + int(
+                        (time.perf_counter() - _stage_start) * 1000
+                    )
+
                     if validation.is_valid and not column_errors:
                         if request.execute and self._db_client:
-                            yield {"status": "progress", "stage": "executing_sql"}
+                            yield PipelineStageEvent(status="progress", stage="executing_sql").to_sse()
+                            _stage_start = time.perf_counter()
                             try:
                                 log.info("Executing generated SQL in stream mode (Agentic)")
                                 execution_result = await self._db_client.execute_sql(generated_sql.cleaned_sql)
+                                stage_timings["execution"] = stage_timings.get("execution", 0) + int(
+                                    (time.perf_counter() - _stage_start) * 1000
+                                )
                                 break
                             except DatabaseExecutionError as exc:
                                 execution_error = str(exc)
@@ -910,6 +990,10 @@ class QueryOrchestrator:
                                 execution_error = f"Unexpected execution error: {exc!s}"
                                 all_errors.append(execution_error)
                                 validation.is_valid = False
+                            if "execution" not in stage_timings or not validation.is_valid:
+                                stage_timings["execution"] = stage_timings.get("execution", 0) + int(
+                                    (time.perf_counter() - _stage_start) * 1000
+                                )
                         else:
                             break
 
@@ -963,10 +1047,13 @@ class QueryOrchestrator:
                 prompt_version="v1.0",
                 retrieval_method="vector",
                 response_time_ms=response_time_ms,
+                stage_timings=stage_timings,
                 suggested_chart=generated_sql.suggested_chart,
                 follow_up_questions=generated_sql.follow_up_questions,
                 message=_stream_empty_warning,
             )
+            log.info("Pipeline stage timings (stream)", **{f"{k}_ms": v for k, v in stage_timings.items()})
+            get_stage_metrics().record(stage_timings)
 
             # Save to chat session if session_id provided
             if self._session_service is not None and request.session_id:
@@ -989,13 +1076,13 @@ class QueryOrchestrator:
                 except Exception as cache_exc:
                     log.warning("Failed to cache response", error=str(cache_exc))
 
-            yield {
-                "status": "complete",
-                "cached": False,
-                "data": response.model_dump(),
-                "response_time_ms": response_time_ms,
-            }
+            yield PipelineStageEvent(
+                status="complete",
+                cached=False,
+                data=response.model_dump(),
+                response_time_ms=response_time_ms,
+            ).to_sse()
 
         except Exception as exc:
             log.error("Streaming query failed", error=str(exc))
-            yield {"status": "error", "error": str(exc), "type": type(exc).__name__}
+            yield PipelineStageEvent(status="error", error=str(exc), type=type(exc).__name__).to_sse()
