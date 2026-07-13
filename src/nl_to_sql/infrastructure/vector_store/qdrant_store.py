@@ -15,8 +15,10 @@ from qdrant_client.models import (
     Fusion,
     FusionQuery,
     HnswConfigDiff,
+    IsEmptyCondition,
     MatchAny,
     MatchValue,
+    PayloadField,
     PointStruct,
     Prefetch,
     SparseIndexParams,
@@ -50,13 +52,32 @@ def _to_uuid(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id))
 
 
+def _user_scope_should(user_id: str | None) -> list[Any] | None:
+    """OR-conditions scoping reads to a user's own chunks *plus* shared ones.
+
+    When per-user isolation is active the caller passes the authenticated
+    ``user_id``; a point is then visible if it is tagged with that user
+    (``user_id == X``) **or** is un-tagged/shared (the ``user_id`` payload is
+    missing — e.g. the default database schema ingested globally at startup).
+    Returns ``None`` when no user scoping is requested (shared-only behaviour).
+    """
+    if user_id is None:
+        return None
+    return [
+        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+        IsEmptyCondition(is_empty=PayloadField(key="user_id")),
+    ]
+
+
 def _no_hash_filter(user_id: str | None = None) -> Filter:
-    """Base filter that excludes the hash sentinel, optionally scoped to a user."""
-    must = []
-    if user_id is not None:
-        must.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+    """Base filter that excludes the hash sentinel, optionally scoped to a user.
+
+    With a ``user_id`` the read matches the user's own chunks OR shared
+    (un-tagged) chunks via ``should`` (at-least-one-must-match), so users on
+    the default shared database still retrieve its schema.
+    """
     return Filter(
-        must=must or None,
+        should=_user_scope_should(user_id),
         must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))],
     )
 
@@ -346,6 +367,30 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         except Exception as exc:
             logger.warning("Qdrant delete_by_user failed", error=_exc_detail(exc))
 
+    async def delete_shared(self) -> None:
+        """Delete only shared/un-tagged chunks, preserving per-user chunks.
+
+        Used for the shared re-ingest (startup / schema-monitor / legacy refresh)
+        when per-user isolation is active: dropping the whole collection would
+        wipe every user's uploaded schema, so we delete just the un-tagged
+        ``chunk`` points (``user_id`` payload missing) and keep the hash
+        sentinel and all per-user points intact. Best-effort.
+        """
+        await self._ensure_initialized()
+        try:
+            await self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=Filter(
+                    must=[IsEmptyCondition(is_empty=PayloadField(key="user_id"))],
+                    must_not=[
+                        FieldCondition(key="type", match=MatchValue(value="schema_hash"))
+                    ],
+                ),
+            )
+            logger.info("Qdrant deleted shared (un-tagged) chunks")
+        except Exception as exc:
+            logger.warning("Qdrant delete_shared failed", error=_exc_detail(exc))
+
     async def health_check(self) -> bool:
         try:
             await self._client.get_collections()
@@ -364,10 +409,10 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             if len(table_names) > 1
             else MatchValue(value=table_names[0])
         )
-        must = [FieldCondition(key="table_name", match=match)]
-        if user_id is not None:
-            must.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
-        f = Filter(must=must)
+        f = Filter(
+            must=[FieldCondition(key="table_name", match=match)],
+            should=_user_scope_should(user_id),
+        )
         chunks: list[SchemaChunk] = []
         offset = None
         while True:

@@ -15,8 +15,10 @@ from nl_to_sql.core.exceptions import SchemaIngestionError
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import ColumnInfo, SchemaChunk, SchemaMetadata, TableInfo
+from nl_to_sql.rag.ingestion.chunker import build_column_child_chunks
 from nl_to_sql.rag.ingestion.doc_builder import DocBuilder  # noqa: F401
 from nl_to_sql.rag.ingestion.schema_loader import SchemaLoader  # noqa: F401
+from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 
 logger = structlog.get_logger(__name__)
 
@@ -35,9 +37,23 @@ class SchemaIngestionService:
       D — Depends on IEmbedder and IVectorStore abstractions.
     """
 
-    def __init__(self, embedder: IEmbedder, vector_store: IVectorStore) -> None:
+    def __init__(
+        self,
+        embedder: IEmbedder,
+        vector_store: IVectorStore,
+        per_user_isolation: bool = False,
+        describer: TableDescriber | None = None,
+        descriptions_enabled: bool = False,
+        parent_child_enabled: bool = False,
+    ) -> None:
         self._embedder = embedder
         self._vector_store = vector_store
+        self._per_user_isolation = per_user_isolation
+        # P1 — optional LLM description enrichment at ingest time.
+        self._describer = describer
+        self._descriptions_enabled = descriptions_enabled
+        # P4 — optional parent-child (column-level) chunking.
+        self._parent_child_enabled = parent_child_enabled
 
     async def ingest(
         self, schema: SchemaMetadata, reset: bool = False, user_id: str | None = None
@@ -68,13 +84,36 @@ class SchemaIngestionService:
                 log.info("Resetting user's schema chunks")
                 await self._vector_store.delete_by_user(user_id)
             elif user_id is None:
-                log.info("Resetting vector store collection")
-                await self._vector_store.delete_collection()
+                # A shared re-ingest must not destroy per-user chunks when
+                # isolation is active — delete only the shared/un-tagged chunks.
+                if self._per_user_isolation and hasattr(self._vector_store, "delete_shared"):
+                    log.info("Resetting shared schema chunks (preserving per-user)")
+                    await self._vector_store.delete_shared()
+                else:
+                    log.info("Resetting vector store collection")
+                    await self._vector_store.delete_collection()
+
+        # P1 — enrich tables with LLM-generated NL descriptions before chunking
+        # so the description is embedded alongside the DDL.
+        if self._descriptions_enabled and self._describer is not None:
+            try:
+                await self._describer.enrich(schema.tables)
+            except Exception as exc:
+                log.warning("Table description enrichment failed — continuing", error=str(exc))
 
         chunks = [self._table_to_chunk(table) for table in schema.tables]
         if user_id is not None:
             for chunk in chunks:
                 chunk.chunk_id = f"{user_id}:{chunk.chunk_id}"
+
+        # P4 — derive column-level child chunks from each (namespaced) parent so
+        # fine-grained retrieval hits still resolve to the full table DDL.
+        if self._parent_child_enabled:
+            child_chunks: list[SchemaChunk] = []
+            for parent in chunks:
+                child_chunks.extend(build_column_child_chunks(parent))
+            chunks.extend(child_chunks)
+            log.info("Parent-child chunking applied", children=len(child_chunks))
 
         try:
             texts = [c.content for c in chunks]

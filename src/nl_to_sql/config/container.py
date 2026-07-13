@@ -18,8 +18,10 @@ from nl_to_sql.config.settings import Settings
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.cache.semantic_cache import SemanticCache
+from nl_to_sql.infrastructure.example_store import ExampleStore
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
+from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.rag.retrieval.retrieval_chain import RetrievalChain
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
@@ -133,6 +135,28 @@ class ApplicationContainer(containers.DeclarativeContainer):
         config,
     )
 
+    # ── Query Expander (P3 multi-query source; defined early for schema_retriever) ─
+    query_expander = providers.Singleton(
+        QueryExpander,
+        use_synonyms=config.provided.query_expansion_enabled,
+    )
+
+    # ── Example Store (P2 — dedicated few-shot NL→SQL vector collection) ──────
+    example_store = providers.Singleton(
+        ExampleStore,
+        embedder=embedder,
+        url=config.provided.qdrant_url,
+        api_key=config.provided.qdrant_api_key,
+        collection_name=config.provided.rag_few_shot_collection,
+        dimensions=config.provided.embedding_dimensions,
+    )
+
+    # ── Table Describer (P1 — LLM NL descriptions at ingest) ─────────────────
+    table_describer = providers.Singleton(
+        TableDescriber,
+        llm_provider=llm_provider,
+    )
+
     schema_retriever = providers.Factory(
         SchemaRetriever,
         embedder=embedder,
@@ -140,6 +164,11 @@ class ApplicationContainer(containers.DeclarativeContainer):
         top_k=config.provided.vector_store_top_k,
         use_hybrid_search=_use_hybrid_search,
         hybrid_alpha=config.provided.hybrid_search_alpha,
+        query_expander=query_expander,
+        multi_query_enabled=config.provided.rag_multi_query_enabled,
+        multi_query_max=config.provided.rag_multi_query_max,
+        llm_provider=llm_provider,
+        hyde_enabled=config.provided.rag_hyde_enabled,
     )
 
     # ── Training Data Service (defined early so feedback_learner can reference it) ──
@@ -173,6 +202,10 @@ class ApplicationContainer(containers.DeclarativeContainer):
         SchemaIngestionService,
         embedder=embedder,
         vector_store=vector_store,
+        per_user_isolation=config.provided.schema_per_user_isolation,
+        describer=table_describer,
+        descriptions_enabled=config.provided.rag_schema_descriptions_enabled,
+        parent_child_enabled=config.provided.rag_parent_child_chunking_enabled,
     )
 
     # ── BM25 Store ───────────────────────────────────────────────────────────
@@ -193,6 +226,9 @@ class ApplicationContainer(containers.DeclarativeContainer):
         chunk_overlap=config.provided.chunk_overlap,
         embedding_batch_size=config.provided.embedding_batch_size,
         bm25_enabled=_bm25_effective,
+        per_user_isolation=config.provided.schema_per_user_isolation,
+        llm_provider=llm_provider,
+        descriptions_enabled=config.provided.rag_schema_descriptions_enabled,
     )
 
     # ── RAG: Retrieval Chain ─────────────────────────────────────────────────
@@ -237,12 +273,6 @@ class ApplicationContainer(containers.DeclarativeContainer):
     ttl_manager = providers.Singleton(
         TTLManager,
         base_ttl=config.provided.cache_ttl_seconds,
-    )
-
-    # ── Query Expander ───────────────────────────────────────────────────────
-    query_expander = providers.Singleton(
-        QueryExpander,
-        use_synonyms=config.provided.query_expansion_enabled,
     )
 
     # ── Query Rewriter ───────────────────────────────────────────────────────
@@ -340,6 +370,12 @@ class ApplicationContainer(containers.DeclarativeContainer):
         table_selector=table_selector,
         fk_extractor=fk_extractor,
         column_validator=column_validator,
+        example_store=example_store,
+        few_shot_enabled=config.provided.rag_few_shot_retrieval_enabled,
+        few_shot_top_k=config.provided.rag_few_shot_top_k,
+        adaptive_top_k_enabled=config.provided.rag_adaptive_top_k_enabled,
+        top_k_min=config.provided.rag_adaptive_top_k_min,
+        top_k_max=config.provided.rag_adaptive_top_k_max,
     )
 
     @staticmethod

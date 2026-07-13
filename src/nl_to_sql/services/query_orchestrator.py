@@ -43,6 +43,7 @@ from nl_to_sql.services.sql_generator import SQLGeneratorService
 
 if TYPE_CHECKING:
     from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+    from nl_to_sql.infrastructure.example_store import ExampleStore
     from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
     from nl_to_sql.services.chat_session_service import ChatSessionService
     from nl_to_sql.services.training_data_service import TrainingDataService
@@ -83,6 +84,12 @@ class QueryOrchestrator:
         fk_extractor: "FKRelationshipExtractor | None" = None,
         column_validator: SQLColumnValidator | None = None,
         user_id: str | None = None,
+        example_store: "ExampleStore | None" = None,
+        few_shot_enabled: bool = False,
+        few_shot_top_k: int = 3,
+        adaptive_top_k_enabled: bool = False,
+        top_k_min: int = 2,
+        top_k_max: int = 15,
     ) -> None:
         self._retriever = retriever
         self._generator = generator
@@ -98,6 +105,14 @@ class QueryOrchestrator:
         self._fk_extractor = fk_extractor
         self._column_validator = column_validator
         self._user_id = user_id
+        # P2 — semantic few-shot example retrieval from a dedicated collection.
+        self._example_store = example_store
+        self._few_shot_enabled = few_shot_enabled
+        self._few_shot_top_k = few_shot_top_k
+        # P7 — adaptive top_k scaled by estimated query complexity.
+        self._adaptive_top_k_enabled = adaptive_top_k_enabled
+        self._top_k_min = top_k_min
+        self._top_k_max = top_k_max
 
     @_lf_observe(name="nl2sql.pipeline", capture_input=False)
     @trace_function("pipeline.run")
@@ -278,7 +293,7 @@ class QueryOrchestrator:
         # The known-table list needed by Phase B doesn't depend on Phase A,
         # so both run concurrently.
         log.info("Phase A: Retrieving candidate schema chunks via vector search")
-        intent_top_k = self._get_intent_top_k(request.question)
+        intent_top_k = self._compute_top_k(request.question)
         if self._table_selector is not None:
             candidate_chunks, all_known_tables = await asyncio.gather(
                 self._retriever.retrieve(request.question, top_k=intent_top_k),
@@ -690,19 +705,34 @@ class QueryOrchestrator:
         # Cap at 10
         return min(complexity, 10)
 
-    @staticmethod
-    def _get_intent_top_k(question: str) -> int:
-        """Return 5 for aggregation/join queries, 2 for simple lookups (#04)."""
+    # Keyword sets used by the adaptive top_k heuristic (P7).
+    _JOIN_KEYWORDS = frozenset({
+        "join", "combine", "relate", "across", "between", "with", "compare",
+    })
+    _AGG_KEYWORDS = frozenset({
+        "total", "sum", "average", "avg", "count", "group", "breakdown", "per",
+        "each", "trend", "aggregate", "distribution", "percentage", "ratio",
+        "rank", "pivot",
+    })
+
+    def _compute_top_k(self, question: str) -> int:
+        """Estimate how many schema chunks to retrieve for this question.
+
+        When adaptive top_k (P7) is enabled, scale from a base of 5 by the number
+        of join/aggregation signals so complex multi-table queries retrieve more
+        context, clamped to [top_k_min, top_k_max]. Otherwise fall back to the
+        original coarse heuristic (5 for aggregation/join, 2 for simple lookups).
+        """
         lower = question.lower()
-        for marker in (
-            "total", "sum", "count", "average", "avg", "group", "per", "each",
-            "breakdown", "join", "combine", "across", "compare", "trend",
-            "month", "year", "aggregate", "distribution", "percentage",
-            "ratio", "rank", "pivot",
-        ):
-            if marker in lower:
-                return 5
-        return 2
+        if not self._adaptive_top_k_enabled:
+            markers = self._JOIN_KEYWORDS | self._AGG_KEYWORDS | {"month", "year"}
+            return 5 if any(m in lower for m in markers) else 2
+
+        words = set(lower.replace("?", " ").replace(",", " ").split())
+        score = 5
+        score += len(words & self._JOIN_KEYWORDS) * 2
+        score += len(words & self._AGG_KEYWORDS) * 1
+        return min(max(score, self._top_k_min), self._top_k_max)
 
     async def _check_empty_result(self, sql: str) -> str | None:
         """Run a COUNT without the WHERE clause to detect over-filtered queries (#06)."""
@@ -815,7 +845,7 @@ class QueryOrchestrator:
             stage_timings: dict[str, int] = {}
             _stage_start = time.perf_counter()
             yield PipelineStageEvent(status="progress", stage="retrieving_schema").to_sse()
-            _stream_intent_top_k = self._get_intent_top_k(request.question)
+            _stream_intent_top_k = self._compute_top_k(request.question)
             if self._table_selector is not None:
                 candidate_chunks, all_known_tables = await asyncio.gather(
                     self._retriever.retrieve(request.question, top_k=_stream_intent_top_k),

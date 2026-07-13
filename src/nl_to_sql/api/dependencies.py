@@ -177,6 +177,14 @@ async def get_request_orchestrator(
     if settings.schema_per_user_isolation and resolved_user_id is not None:
         schema_retriever._user_id = resolved_user_id
 
+    # Apply the *live* Phase-3 RAG flags (runtime-adjustable via PUT /config/rag)
+    # to this request's retriever. HyDE uses the per-request provider so it
+    # honours a caller's personal API key.
+    schema_retriever._multi_query_enabled = settings.rag_multi_query_enabled
+    schema_retriever._multi_query_max = settings.rag_multi_query_max
+    schema_retriever._hyde_enabled = settings.rag_hyde_enabled
+    schema_retriever._llm_provider = llm_provider
+
     return QueryOrchestrator(
         retriever=schema_retriever,
         generator=sql_generator,
@@ -192,6 +200,12 @@ async def get_request_orchestrator(
         fk_extractor=container.fk_extractor(),
         column_validator=container.column_validator(),
         user_id=resolved_user_id,
+        example_store=container.example_store(),
+        few_shot_enabled=settings.rag_few_shot_retrieval_enabled,
+        few_shot_top_k=settings.rag_few_shot_top_k,
+        adaptive_top_k_enabled=settings.rag_adaptive_top_k_enabled,
+        top_k_min=settings.rag_adaptive_top_k_min,
+        top_k_max=settings.rag_adaptive_top_k_max,
     )
 
 

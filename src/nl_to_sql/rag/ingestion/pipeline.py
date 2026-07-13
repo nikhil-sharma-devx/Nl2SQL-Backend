@@ -6,6 +6,7 @@ This is the single function you call to trigger a full re-index.
 import structlog
 
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
+from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaMetadata
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
@@ -14,6 +15,7 @@ from nl_to_sql.rag.ingestion.chunker import Chunker
 from nl_to_sql.rag.ingestion.doc_builder import DocBuilder
 from nl_to_sql.rag.ingestion.embedder import IngestionEmbedder
 from nl_to_sql.rag.ingestion.schema_loader import SchemaLoader
+from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 from nl_to_sql.rag.ingestion.vector_writer import VectorWriter
 
 logger = structlog.get_logger(__name__)
@@ -47,9 +49,17 @@ class IngestionPipeline:
         chunk_overlap: int = 200,
         embedding_batch_size: int = 32,
         bm25_enabled: bool = False,
+        per_user_isolation: bool = False,
+        llm_provider: ILLMProvider | None = None,
+        descriptions_enabled: bool = False,
     ) -> None:
         self._schema_loader = SchemaLoader(db_client)
         self._doc_builder = DocBuilder()
+        # P1 — optional LLM description enrichment before chunking.
+        self._descriptions_enabled = descriptions_enabled
+        self._describer = (
+            TableDescriber(llm_provider) if llm_provider is not None else None
+        )
         self._chunker = Chunker(
             strategy=chunk_strategy,
             chunk_size=chunk_size,
@@ -59,7 +69,9 @@ class IngestionPipeline:
             embedder=embedder,
             batch_size=embedding_batch_size,
         )
-        self._vector_writer = VectorWriter(vector_store)
+        self._vector_writer = VectorWriter(
+            vector_store, per_user_isolation=per_user_isolation
+        )
         self._bm25_enabled = bm25_enabled
         self._bm25_store = bm25_store
 
@@ -105,6 +117,14 @@ class IngestionPipeline:
             database=schema.database_name,
             table_count=len(schema.tables),
         )
+
+        # Step 1b: Enrich tables with LLM-generated NL descriptions (P1)
+        if self._descriptions_enabled and self._describer is not None:
+            log.info("Step 1b: Enriching tables with LLM descriptions")
+            try:
+                await self._describer.enrich(schema.tables)
+            except Exception as exc:
+                log.warning("Description enrichment failed — continuing", error=str(exc))
 
         # Step 2: Build documents
         log.info("Step 2: Building document chunks")

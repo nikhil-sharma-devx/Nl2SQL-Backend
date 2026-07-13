@@ -82,11 +82,15 @@ class RetrievalChain:
         self._vector_store = vector_store
 
     @trace_function("retrieval.retrieve")
-    async def retrieve(self, question: str) -> list[SchemaChunk]:
+    async def retrieve(
+        self, question: str, user_id: str | None = None
+    ) -> list[SchemaChunk]:
         """Run the full retrieval pipeline and return ranked schema chunks.
 
         Args:
             question: The user's natural-language question.
+            user_id: When provided, restrict retrieval to this user's chunks
+                (plus shared/un-tagged chunks) for per-user isolation.
 
         Returns:
             Reranked list of SchemaChunk (most relevant first).
@@ -106,6 +110,7 @@ class RetrievalChain:
         dense_task = self._vector_retriever.retrieve(
             query_embedding=query_embedding,
             query_text=question,
+            user_id=user_id,
         )
 
         dense_chunks: list[SchemaChunk]
@@ -173,13 +178,18 @@ class RetrievalChain:
     async def get_schema_for_tables(
         self,
         table_names: list[str],
+        user_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Fetch exact schema chunks by table name (deterministic).
 
         Used in Phase C of two-phase schema grounding.
         """
-        return await self._vector_retriever.get_schema_for_tables(table_names)  # type: ignore[no-any-return]
+        return await self._vector_retriever.get_schema_for_tables(  # type: ignore[no-any-return]
+            table_names, user_id=user_id
+        )
 
-    async def get_all_table_names(self) -> list[str]:
-        """Return all table names in the vector store."""
-        return await self._vector_retriever.get_all_table_names()  # type: ignore[no-any-return]
+    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
+        """Return all table names in the vector store (optionally per user)."""
+        return await self._vector_retriever.get_all_table_names(  # type: ignore[no-any-return]
+            user_id=user_id
+        )
