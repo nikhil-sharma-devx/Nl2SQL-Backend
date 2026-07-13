@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from nl_to_sql.api.dependencies import get_container, get_current_user
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
-from nl_to_sql.config.settings import get_settings
+from nl_to_sql.config.settings import Settings, get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.config import (
     AvailableModelsResponse,
@@ -19,6 +19,8 @@ from nl_to_sql.core.models.config import (
     LLMConfigResponse,
     LLMConfigUpdate,
     LLMConfigUpdateResponse,
+    RagConfigResponse,
+    RagConfigUpdate,
 )
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 

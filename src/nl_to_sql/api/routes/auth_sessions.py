@@ -15,7 +15,11 @@ from nl_to_sql.api.dependencies import (
     get_session_service,
 )
 from nl_to_sql.core.models.auth import UserPublic
-from nl_to_sql.infrastructure.database.models import LoginEvent, UserLoginSession
+from nl_to_sql.infrastructure.database.models import (
+    LoginEvent,
+    RefreshToken,
+    UserLoginSession,
+)
 from nl_to_sql.services.chat_session_service import ChatSessionService
 
 logger = structlog.get_logger(__name__)
@@ -120,7 +124,19 @@ async def logout(
         )
         s = result.scalar_one_or_none()
         if s:
-            s.revoked_at = datetime.utcnow()
+            now = datetime.utcnow()
+            s.revoked_at = now
+            # Also hard-revoke refresh tokens bound to this session so they can
+            # never be exchanged again (defence in depth on top of the session
+            # check performed by /auth/refresh).
+            await db.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.session_id == current_session_id,
+                    RefreshToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            )
             await db.commit()
     auth_cache_invalidate_session(current_user.id, current_session_id)
 

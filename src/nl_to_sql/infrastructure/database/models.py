@@ -406,6 +406,32 @@ class LoginEvent(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class RefreshToken(Base):
+    """Opaque refresh token (hashed at rest) bound to a login session.
+
+    Enables short-lived access tokens with rotation: the raw token is returned
+    to the client only once; the server stores only its SHA-256 hash. On refresh
+    the presented row is revoked (rotated) and a fresh one issued. Revoking the
+    parent login session (``user_login_sessions.revoked_at``) also invalidates
+    its refresh tokens.
+    """
+
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        Index("ix_refresh_tokens_user", "user_id"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    session_id = Column(
+        String(36), ForeignKey("user_login_sessions.id"), nullable=True, index=True
+    )
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 # ── Phase 2 Feature Models ─────────────────────────────────────────────────────
 
 
