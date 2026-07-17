@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = "noreply@nl2sql.local"
 
+    # ── Email digest (activity summary) ──────────────────────────────────────
+    # Master gate. Even when True, a digest only sends if SMTP is configured AND
+    # the user opted in (NotificationPreferences.email_digest) AND they have
+    # activity in the window — so nothing goes out by accident.
+    email_digest_enabled: bool = True
+    email_digest_interval_days: int = 7
+    # Public base URL used to build the one-click unsubscribe link in the email
+    # (e.g. "https://api.example.com"). If empty, falls back to the first CORS
+    # origin; a digest still sends, but the link may be relative.
+    app_base_url: str = ""
+
     # ── LLM ─────────────────────────────────────────────────────────────────
     llm_provider: Literal["groq", "openai", "anthropic", "gemini"] = "groq"
     llm_model: str = "llama-3.3-70b-versatile"

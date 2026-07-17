@@ -17,14 +17,16 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nl_to_sql.workers.digest_worker import run_digest_cycle
 from nl_to_sql.workers.purge_worker import run_account_purge
 from nl_to_sql.workers.retention_worker import run_retention_cleanup
 
 logger = structlog.get_logger(__name__)
 
-# Distinct advisory-lock key per job so purge and retention don't block each other.
+# Distinct advisory-lock key per job so the jobs don't block each other.
 _PURGE_LOCK_KEY = "nl2sql_account_purge"
 _RETENTION_LOCK_KEY = "nl2sql_retention_cleanup"
+_DIGEST_LOCK_KEY = "nl2sql_email_digest"
 
 
 async def _run_with_advisory_lock(
@@ -82,6 +84,11 @@ async def run_maintenance_jobs(
         session_factory,
         _RETENTION_LOCK_KEY,
         lambda: run_retention_cleanup(session_factory),
+    )
+    await _run_with_advisory_lock(
+        session_factory,
+        _DIGEST_LOCK_KEY,
+        lambda: run_digest_cycle(session_factory),
     )
 
 
