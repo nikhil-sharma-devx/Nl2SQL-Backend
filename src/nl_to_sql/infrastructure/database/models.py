@@ -510,6 +510,8 @@ class NotificationPreferences(Base):
     email_digest = Column(Boolean, nullable=False, default=False)
     in_app_enabled = Column(Boolean, nullable=False, default=True)
     marketing_enabled = Column(Boolean, nullable=False, default=False)
+    # Timestamp of the last activity digest sent to this user (cadence guard).
+    last_digest_sent_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
