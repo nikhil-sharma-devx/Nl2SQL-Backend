@@ -55,6 +55,21 @@ class SchemaIngestionService:
         # P4 — optional parent-child (column-level) chunking.
         self._parent_child_enabled = parent_child_enabled
 
+    def apply_runtime_flags(
+        self, *, descriptions_enabled: bool, parent_child_enabled: bool
+    ) -> None:
+        """Refresh the P1/P4 ingest toggles from live settings before a re-ingest.
+
+        This service is captured by long-lived singletons (the schema catalog and
+        monitor), so its construction-time flags would otherwise ignore runtime
+        changes made via ``PUT /config/rag``. Callers refresh these immediately
+        before ``ingest`` so the "re-ingest to take effect" contract holds without
+        a server restart — mirrors how ``get_request_orchestrator`` refreshes the
+        retriever's runtime flags.
+        """
+        self._descriptions_enabled = descriptions_enabled
+        self._parent_child_enabled = parent_child_enabled
+
     async def ingest(
         self, schema: SchemaMetadata, reset: bool = False, user_id: str | None = None
     ) -> int:

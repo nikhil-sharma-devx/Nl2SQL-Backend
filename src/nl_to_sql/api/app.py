@@ -560,8 +560,8 @@ def create_app() -> FastAPI:
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     app.add_exception_handler(NLToSQLBaseError, domain_exception_handler)
-    app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # ── Routers ────────────────────────────────────────────────────────────────

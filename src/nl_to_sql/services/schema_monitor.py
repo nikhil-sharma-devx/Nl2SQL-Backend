@@ -217,6 +217,14 @@ class SchemaMonitor:
             from nl_to_sql.services.schema_ingestion import SchemaIngestionService
             schema_metadata = SchemaIngestionService.build_schema_from_dict(schema_dict)
 
+            # Honour runtime RAG ingestion toggles (P1/P4) set via PUT /config/rag;
+            # this captured singleton would otherwise use stale construction-time flags.
+            from nl_to_sql.config.settings import get_settings
+            s = get_settings()
+            self._ingestion_service.apply_runtime_flags(
+                descriptions_enabled=s.rag_schema_descriptions_enabled,
+                parent_child_enabled=s.rag_parent_child_chunking_enabled,
+            )
             await self._ingestion_service.ingest(schema_metadata, reset=True)
 
             self._logger.info(

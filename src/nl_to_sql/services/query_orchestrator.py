@@ -32,7 +32,11 @@ except ImportError:
 from nl_to_sql.core.interfaces.i_cache import ICache
 from nl_to_sql.core.interfaces.i_sql_validator import ISQLValidator
 from nl_to_sql.core.models.query import PipelineStageEvent, QueryRequest, QueryResponse
-from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics, get_stage_metrics
+from nl_to_sql.infrastructure.cache.cache_metrics import (
+    CacheLayer,
+    get_cache_metrics,
+    get_stage_metrics,
+)
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
 from nl_to_sql.services.query_classifier import QueryClassifier
@@ -374,9 +378,11 @@ class QueryOrchestrator:
 
         # ── Fetch dynamic few-shot examples from training data (#07) ─────────
         few_shot_examples: list[dict[str, Any]] | None = None
-        if self._training_data_service is not None:
+        if self._training_data_service is not None and self._few_shot_enabled:
             try:
-                few_shot_examples = await self._training_data_service.get_recent_examples(limit=2)
+                few_shot_examples = await self._training_data_service.get_recent_examples(
+                    limit=self._few_shot_top_k
+                )
                 if few_shot_examples:
                     log.info("Loaded dynamic few-shot examples", count=len(few_shot_examples))
             except Exception as shot_exc:
@@ -648,7 +654,7 @@ class QueryOrchestrator:
         Returns:
             (cached_payload_or_None, layer) where layer ∈ {exact, semantic, miss}.
         """
-        layer = "miss"
+        layer: CacheLayer = "miss"
         cache_key = self._make_cache_key(question, dialect, self.PROMPT_VERSION)
         cached = await self._cache.get(cache_key)
         if cached:
@@ -657,7 +663,7 @@ class QueryOrchestrator:
             cached = await self._cache.get_semantic(question, user_id=self._user_id)
             if cached:
                 layer = "semantic"
-        get_cache_metrics().record(layer)  # type: ignore[arg-type]
+        get_cache_metrics().record(layer)
         return cached, layer
 
     @staticmethod
@@ -909,9 +915,11 @@ class QueryOrchestrator:
 
             # Fetch dynamic few-shot examples (#07)
             _stream_few_shot: list[dict[str, Any]] | None = None
-            if self._training_data_service is not None:
+            if self._training_data_service is not None and self._few_shot_enabled:
                 try:
-                    _stream_few_shot = await self._training_data_service.get_recent_examples(limit=2)
+                    _stream_few_shot = await self._training_data_service.get_recent_examples(
+                        limit=self._few_shot_top_k
+                    )
                     if _stream_few_shot:
                         log.info("Loaded few-shot examples (stream)", count=len(_stream_few_shot))
                 except Exception as _shot_exc:

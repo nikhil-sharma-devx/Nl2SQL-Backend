@@ -114,9 +114,7 @@ async def get_request_orchestrator(
 
     if credentials is not None:
         try:
-            import types
-
-            from nl_to_sql.config.container import ApplicationContainer, _create_llm_provider
+            from nl_to_sql.config.container import ApplicationContainer, create_llm_provider
             from nl_to_sql.services.auth_service import decode_access_token
 
             token_data = decode_access_token(credentials.credentials)
@@ -130,13 +128,10 @@ async def get_request_orchestrator(
 
             user_key = await api_key_svc.get_key(token_data.user_id, active_provider)
             if user_key:
-                patched = types.SimpleNamespace(
-                    groq_api_key=user_key if active_provider == "groq" else settings.groq_api_key,
-                    openai_api_key=user_key if active_provider == "openai" else settings.openai_api_key,
-                    anthropic_api_key=user_key if active_provider == "anthropic" else settings.anthropic_api_key,
-                    gemini_api_key=user_key if active_provider == "gemini" else settings.gemini_api_key,
-                )
-                llm_provider = _create_llm_provider(active_provider, active_model, patched)  # type: ignore[arg-type]
+                # Build a real Settings with the active provider's key swapped for the
+                # user's personal key, so create_llm_provider gets the expected type.
+                patched = settings.model_copy(update={f"{active_provider}_api_key": user_key})
+                llm_provider = create_llm_provider(active_provider, active_model, patched)
         except Exception:
             pass  # Silently fall through to server key
 
