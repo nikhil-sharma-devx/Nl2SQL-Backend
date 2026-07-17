@@ -78,6 +78,17 @@ async def submit_feedback(
             error_type=body.error_type,
         )
 
+        # P2 — index thumbs-up pairs for semantic few-shot retrieval.
+        if body.feedback_type == "positive" and get_settings().rag_few_shot_retrieval_enabled:
+            try:
+                await container.example_store().index_example(
+                    question=body.question,
+                    sql=body.generated_sql,
+                    user_id=current_user.id,
+                )
+            except Exception as ex_exc:
+                logger.warning("Failed to index positive feedback example", error=str(ex_exc))
+
         if body.feedback_type == "positive":
             return FeedbackResponse(
                 success=True,

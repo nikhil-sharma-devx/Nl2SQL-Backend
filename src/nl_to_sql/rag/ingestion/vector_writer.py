@@ -23,8 +23,11 @@ class VectorWriter:
       D — Depends on IVectorStore abstraction.
     """
 
-    def __init__(self, vector_store: IVectorStore) -> None:
+    def __init__(
+        self, vector_store: IVectorStore, per_user_isolation: bool = False
+    ) -> None:
         self._vector_store = vector_store
+        self._per_user_isolation = per_user_isolation
 
     async def write(
         self,
@@ -48,8 +51,13 @@ class VectorWriter:
         log = logger.bind(chunk_count=len(chunks), reset=reset)
 
         if reset:
-            log.info("Resetting vector store collection")
-            await self._vector_store.delete_collection()
+            # Preserve per-user chunks on a shared re-ingest when isolation is on.
+            if self._per_user_isolation and hasattr(self._vector_store, "delete_shared"):
+                log.info("Resetting shared vector chunks (preserving per-user)")
+                await self._vector_store.delete_shared()
+            else:
+                log.info("Resetting vector store collection")
+                await self._vector_store.delete_collection()
 
         try:
             await self._vector_store.upsert(chunks)

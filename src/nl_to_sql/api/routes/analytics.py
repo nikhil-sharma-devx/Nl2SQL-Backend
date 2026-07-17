@@ -166,7 +166,8 @@ async def get_cache_stats(
     from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics
     if response:
         response.headers["Cache-Control"] = "private, max-age=30"
-    return get_cache_metrics().snapshot()
+    stats: dict[str, Any] = get_cache_metrics().snapshot()
+    return stats
 
 
 @router.get("/latency-breakdown", response_model=LatencyBreakdown)
@@ -178,7 +179,8 @@ async def get_latency_breakdown(
     from nl_to_sql.infrastructure.cache.cache_metrics import get_stage_metrics
     if response:
         response.headers["Cache-Control"] = "private, max-age=30"
-    return get_stage_metrics().snapshot()
+    breakdown: dict[str, Any] = get_stage_metrics().snapshot()
+    return breakdown
 
 
 @router.delete("/reset")

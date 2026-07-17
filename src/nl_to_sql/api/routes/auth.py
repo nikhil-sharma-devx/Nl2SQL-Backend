@@ -17,16 +17,25 @@ from nl_to_sql.core.models.auth import (
     GoogleAuthRequest,
     OTPResendRequest,
     OTPVerifyRequest,
+    RefreshRequest,
     ResetPasswordRequest,
     TokenResponse,
     UserCreate,
     UserLogin,
     UserPublic,
 )
-from nl_to_sql.infrastructure.database.models import LoginEvent, User, UserLoginSession
+from nl_to_sql.infrastructure.database.models import (
+    LoginEvent,
+    RefreshToken,
+    User,
+    UserLoginSession,
+)
 from nl_to_sql.services.auth_service import (
     create_access_token,
+    generate_refresh_token,
     hash_password,
+    hash_refresh_token,
+    refresh_token_expiry,
     verify_google_token,
     verify_password,
 )
@@ -117,11 +126,32 @@ async def _record_login(
         return session_id
 
 
-def _build_token_response(user: User, session_id: str | None = None) -> TokenResponse:
-    """Helper: build a TokenResponse for a given User ORM object."""
-    token = create_access_token(user_id=user.id, email=user.email, session_id=session_id)
+async def _issue_token_response(
+    user: User,
+    session_factory: Any,
+    session_id: str | None = None,
+) -> TokenResponse:
+    """Issue a short-lived access token plus a persisted rotating refresh token.
+
+    Only the SHA-256 hash of the refresh token is stored; the raw value is
+    returned to the client once. The refresh token is bound to the login
+    session (when present) so revoking the session also invalidates it.
+    """
+    access = create_access_token(user_id=user.id, email=user.email, session_id=session_id)
+    raw_refresh = generate_refresh_token()
+    async with session_factory() as db:
+        db.add(
+            RefreshToken(
+                user_id=user.id,
+                session_id=session_id,
+                token_hash=hash_refresh_token(raw_refresh),
+                expires_at=refresh_token_expiry(),
+            )
+        )
+        await db.commit()
     return TokenResponse(
-        access_token=token,
+        access_token=access,
+        refresh_token=raw_refresh,
         token_type="bearer",
         user=UserPublic.model_validate(user),
     )
@@ -227,7 +257,7 @@ async def login(
 
     session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
     logger.info("User logged in", email=user.email, provider="email")
-    return _build_token_response(user, session_id=session_id)
+    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
 
 
 @router.post(
@@ -295,7 +325,7 @@ async def google_auth(
 
     session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
     logger.info("User authenticated via Google", email=user.email)
-    return _build_token_response(user, session_id=session_id)
+    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
 
 
 @router.get(
@@ -308,6 +338,100 @@ async def get_me(
 ) -> UserPublic:
     """Return the authenticated user's profile."""
     return current_user
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Exchange a refresh token for a new access token",
+)
+@limiter.limit("30/minute")
+async def refresh(
+    request: Request,
+    body: RefreshRequest,
+    session_service: ChatSessionService = Depends(get_session_service),
+) -> TokenResponse:
+    """Validate a refresh token, rotate it, and issue a new access token.
+
+    Rotation: the presented token is revoked and a brand-new refresh token is
+    returned. If the token is unknown, already revoked, or expired — or its
+    login session has been revoked — the request is rejected with 401.
+    """
+    from datetime import datetime
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    token_hash = hash_refresh_token(body.refresh_token)
+
+    async with session_service._session_factory() as db_sess:
+        row = (
+            await db_sess.execute(
+                select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+            )
+        ).scalar_one_or_none()
+
+        if row is None or row.revoked_at is not None or row.expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired refresh token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        session_id = row.session_id
+        if session_id:
+            session = (
+                await db_sess.execute(
+                    select(UserLoginSession).where(
+                        UserLoginSession.id == session_id,
+                        UserLoginSession.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if session is None:
+                row.revoked_at = now
+                await db_sess.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has been revoked",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            session.last_active_at = now
+
+        user = (
+            await db_sess.execute(
+                select(User).where(User.id == row.user_id, User.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        if user is None:
+            row.revoked_at = now
+            await db_sess.commit()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or deactivated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Rotate: revoke the presented token, issue a fresh one in the same session.
+        row.revoked_at = now
+        raw_refresh = generate_refresh_token()
+        db_sess.add(
+            RefreshToken(
+                user_id=user.id,
+                session_id=session_id,
+                token_hash=hash_refresh_token(raw_refresh),
+                expires_at=refresh_token_expiry(),
+            )
+        )
+        await db_sess.commit()
+
+        access = create_access_token(
+            user_id=user.id, email=user.email, session_id=session_id
+        )
+        return TokenResponse(
+            access_token=access,
+            refresh_token=raw_refresh,
+            token_type="bearer",
+            user=UserPublic.model_validate(user),
+        )
 
 
 @router.post(
@@ -337,7 +461,7 @@ async def verify_otp(
 
         if user.is_verified:
             _otp_failures.pop(email_key, None)
-            return _build_token_response(user)
+            return await _issue_token_response(user, session_service._session_factory)
 
         # Enforce attempt limit before checking the code
         attempts = _otp_failures.get(email_key, 0)
@@ -370,7 +494,7 @@ async def verify_otp(
 
     session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
     logger.info("User verified via OTP", email=user.email)
-    return _build_token_response(user, session_id=session_id)
+    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
 
 
 @router.post(
@@ -534,7 +658,7 @@ async def reset_password(
         await db_sess.refresh(user)
 
     logger.info("User reset password", email=user.email)
-    return _build_token_response(user)
+    return await _issue_token_response(user, session_service._session_factory)
 
 
 class ChangePasswordRequest(BaseModel):

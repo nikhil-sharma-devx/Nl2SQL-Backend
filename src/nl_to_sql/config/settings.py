@@ -57,7 +57,11 @@ class Settings(BaseSettings):
     # ── Authentication ───────────────────────────────────────────────────────
     jwt_secret_key: str = "change-me-jwt-secret-32-chars-min"
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 10080  # 7 days
+    # Short-lived access token; clients silently refresh it with a refresh token.
+    jwt_expire_minutes: int = 60  # 1 hour
+    # Long-lived refresh token (rotated on every use). Bounds stolen-token blast
+    # radius: a leaked access token is only valid for jwt_expire_minutes.
+    refresh_token_expire_days: int = 30
     google_client_id: str = ""
 
     # ── Email / SMTP ─────────────────────────────────────────────────────────
@@ -101,11 +105,12 @@ class Settings(BaseSettings):
     qdrant_collection_name: str = "schema_chunks"
 
     # Per-user isolation for the (shared) vector-store collection. When enabled,
-    # schema chunks are tagged with `user_id` on write and every read is filtered
-    # by the requesting user's id, so BYOD users never retrieve each other's
-    # tables. Default off preserves the single shared-collection behaviour;
-    # enabling it requires re-ingesting per user (wipe + re-sync).
-    schema_per_user_isolation: bool = False
+    # schema chunks are tagged with `user_id` on write and every read matches the
+    # requesting user's own chunks OR shared (un-tagged) chunks, so BYOD users
+    # never retrieve each other's tables while everyone still sees the default
+    # database's globally-ingested schema. Shared re-ingests (startup / monitor /
+    # legacy refresh) delete only the shared chunks, preserving per-user data.
+    schema_per_user_isolation: bool = True
 
     # ── SQL ──────────────────────────────────────────────────────────────────
     sql_dialect: Literal["postgresql", "mysql"] = "postgresql"
@@ -203,9 +208,45 @@ class Settings(BaseSettings):
     bm25_top_k: int = 5
 
     # ── Chunker ──────────────────────────────────────────────────────────────
-    chunk_strategy: str = "table"  # 'table', 'fixed', or 'sentence'
+    chunk_strategy: str = "table"  # 'table', 'fixed', 'sentence', or 'parent_child'
     chunk_size: int = 1000  # Max chars per chunk (for 'fixed' and 'sentence')
     chunk_overlap: int = 200  # Overlap between chunks (for 'fixed')
+
+    # ── RAG Quality Upgrades (Phase 3) ────────────────────────────────────────
+    # All flags are runtime-adjustable via PUT /api/v1/config/rag and control the
+    # live retrieval + ingestion pipeline. Ingest-changing flags (descriptions,
+    # parent-child) require a schema re-ingest to take effect on existing data.
+
+    # P1 — LLM-generated natural-language description per table at ingest time,
+    # embedded alongside the DDL to close the NL↔DDL vocabulary gap. Adds one LLM
+    # call per table during ingestion; default off (opt-in + requires re-ingest).
+    rag_schema_descriptions_enabled: bool = False
+
+    # P3 — Multi-query retrieval: run vector search on the original question plus
+    # a few synonym expansions and union-dedupe the hits. Cheap recall win; on by default.
+    rag_multi_query_enabled: bool = True
+    rag_multi_query_max: int = 3  # max number of *extra* query variants (besides the original)
+
+    # P2 — Few-shot example retrieval: index successful NL→SQL pairs in a dedicated
+    # vector collection and inject the top-k most similar as concrete examples.
+    rag_few_shot_retrieval_enabled: bool = True
+    rag_few_shot_top_k: int = 3
+    rag_few_shot_collection: str = "query_examples"
+
+    # P4 — Parent-child chunking: index fine-grained column-level child chunks for
+    # retrieval precision while returning the full parent table chunk for generation.
+    # Default off (opt-in + requires re-ingest).
+    rag_parent_child_chunking_enabled: bool = False
+
+    # P5 — HyDE: embed an LLM-generated hypothetical schema description of the
+    # answer instead of the raw question. Adds one LLM call per query; default off.
+    rag_hyde_enabled: bool = False
+
+    # P7 — Adaptive TOP_K: scale the retrieval top_k by estimated query complexity
+    # (joins/aggregations) instead of a fixed value. On by default.
+    rag_adaptive_top_k_enabled: bool = True
+    rag_adaptive_top_k_min: int = 2
+    rag_adaptive_top_k_max: int = 15
 
     # ── Fine-tuning ──────────────────────────────────────────────────────────
     fine_tuning_enabled: bool = False
@@ -299,9 +340,18 @@ class Settings(BaseSettings):
                 )
 
         if self.embedding_provider == "huggingface":
+            # P6 — extend this map when swapping in a higher-quality embedding
+            # model. Switching the model requires a full re-ingestion so the
+            # stored vectors match the new model's dimensionality.
             hf_model_dims = {
                 "all-MiniLM-L6-v2": 384,
                 "all-mpnet-base-v2": 768,
+                "BAAI/bge-small-en-v1.5": 384,
+                "BAAI/bge-base-en-v1.5": 768,
+                "BAAI/bge-large-en-v1.5": 1024,
+                "intfloat/e5-base-v2": 768,
+                "intfloat/e5-large-v2": 1024,
+                "jinaai/jina-embeddings-v3": 1024,
             }
             if self.huggingface_model in hf_model_dims:
                 self.embedding_dimensions = hf_model_dims[self.huggingface_model]

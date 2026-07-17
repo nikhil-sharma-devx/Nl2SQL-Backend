@@ -382,6 +382,15 @@ class SchemaCatalogService:
                 return
             schema = self._catalog_to_schema(header, list(rows))
             uid = user_id if self._isolation else None
+            # Honour runtime RAG ingestion toggles (P1 descriptions, P4 parent-child)
+            # set via PUT /config/rag — this service is a captured singleton, so its
+            # construction-time flags are stale without this refresh.
+            from nl_to_sql.config.settings import get_settings
+            s = get_settings()
+            self._ingestion.apply_runtime_flags(
+                descriptions_enabled=s.rag_schema_descriptions_enabled,
+                parent_child_enabled=s.rag_parent_child_chunking_enabled,
+            )
             await self._ingestion.ingest(schema, reset=True, user_id=uid)
         except Exception as exc:
             logger.warning("Catalog re-embed failed", user_id=user_id, error=str(exc))

@@ -10,6 +10,30 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
+def dedupe_parent_chunks(chunks: list[SchemaChunk]) -> list[SchemaChunk]:
+    """Collapse parent-child chunks back to their parent for LLM context (P4).
+
+    Column-level child chunks (``metadata.is_child``) sharpen retrieval but the
+    LLM needs the full parent table DDL. When a parent chunk for a table is
+    present we drop that table's child chunks; child chunks whose parent is
+    absent are kept so no table is lost. A no-op when parent-child chunking is
+    not in use (no ``is_child`` metadata).
+    """
+    parent_tables = {
+        c.table_name for c in chunks if not c.metadata.get("is_child")
+    }
+    result: list[SchemaChunk] = []
+    seen_ids: set[str] = set()
+    for c in chunks:
+        if c.metadata.get("is_child") and c.table_name in parent_tables:
+            continue
+        if c.chunk_id in seen_ids:
+            continue
+        seen_ids.add(c.chunk_id)
+        result.append(c)
+    return result
+
+
 class ContextBuilder:
     """Formats schema chunks into a structured prompt section for the LLM.
 
@@ -30,6 +54,7 @@ class ContextBuilder:
         if not chunks:
             return "No relevant schema context was found."
 
+        chunks = dedupe_parent_chunks(chunks)
         sections = "\n\n---\n\n".join(c.to_text() for c in chunks)
         context = f"RELEVANT DATABASE SCHEMA:\n\n{sections}"
 
