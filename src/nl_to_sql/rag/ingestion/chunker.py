@@ -2,13 +2,49 @@
 
 The chunking strategy is controlled here and can be changed without touching
 anything else in the pipeline. Supports table-level (one chunk per table),
-fixed-size with overlap, and sentence-aware strategies.
+fixed-size with overlap, sentence-aware, and parent-child strategies.
 """
+import re
+
 import structlog
 
 from nl_to_sql.core.models.schema import SchemaChunk
 
 logger = structlog.get_logger(__name__)
+
+# Matches a column definition line in a table chunk, e.g. "  - customer_id (INT) [FK ...]"
+_COLUMN_LINE_RE = re.compile(r"^\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def build_column_child_chunks(parent: SchemaChunk) -> list[SchemaChunk]:
+    """Derive fine-grained column-level child chunks from a table chunk (P4).
+
+    Each child carries a ``parent_id`` pointing at the parent table chunk so the
+    retrieval layer can hit a precise column chunk yet return the full parent
+    table DDL to the LLM. Children reuse the parent's ``table_name`` so table
+    candidate-extraction downstream is unaffected.
+    """
+    children: list[SchemaChunk] = []
+    for line in parent.content.split("\n"):
+        match = _COLUMN_LINE_RE.match(line)
+        if not match:
+            continue
+        column = match.group(1)
+        children.append(
+            SchemaChunk(
+                chunk_id=f"{parent.chunk_id}#col={column}",
+                table_name=parent.table_name,
+                schema_name=parent.schema_name,
+                content=f"Table {parent.table_name} column {line.strip().lstrip('- ').strip()}",
+                metadata={
+                    **parent.metadata,
+                    "parent_id": parent.chunk_id,
+                    "is_child": True,
+                    "column": column,
+                },
+            )
+        )
+    return children
 
 
 class Chunker:
@@ -51,6 +87,8 @@ class Chunker:
             return self._chunk_fixed_size(documents)
         elif self._strategy == "sentence":
             return self._chunk_sentence_aware(documents)
+        elif self._strategy == "parent_child":
+            return self._chunk_parent_child(documents)
         else:
             logger.warning(
                 "Unknown chunking strategy, falling back to table-level",
@@ -66,6 +104,25 @@ class Chunker:
         """
         logger.info("Using table-level chunking", chunk_count=len(documents))
         return documents
+
+    def _chunk_parent_child(self, documents: list[SchemaChunk]) -> list[SchemaChunk]:
+        """Parent-child chunking (P4) — keep the parent table chunk and add one
+        fine-grained child chunk per column.
+
+        Column-level children improve retrieval precision; the parent table chunk
+        is retained so the LLM still receives full table DDL for generation (the
+        retrieval layer dedupes children back to their parent).
+        """
+        result: list[SchemaChunk] = []
+        for doc in documents:
+            result.append(doc)
+            result.extend(build_column_child_chunks(doc))
+        logger.info(
+            "Parent-child chunking complete",
+            parent_count=len(documents),
+            total_count=len(result),
+        )
+        return result
 
     def _chunk_fixed_size(self, documents: list[SchemaChunk]) -> list[SchemaChunk]:
         """Fixed-size chunking with overlap.

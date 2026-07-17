@@ -1,6 +1,8 @@
 """Authentication service — password hashing, JWT generation, Google token verification."""
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -80,6 +82,30 @@ def decode_access_token(token: str) -> TokenData:
     return TokenData(user_id=user_id, email=email, session_id=payload.get("sid"))
 
 
+# ── Refresh Token Utilities ────────────────────────────────────────────────────
+
+def generate_refresh_token() -> str:
+    """Return a new opaque, URL-safe refresh token (returned to the client once)."""
+    return secrets.token_urlsafe(48)
+
+
+def hash_refresh_token(raw_token: str) -> str:
+    """Return the SHA-256 hex digest stored server-side for a raw refresh token.
+
+    Refresh tokens are high-entropy random strings, so a plain (unsalted) SHA-256
+    is sufficient and lets us look rows up by an indexed equality match.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def refresh_token_expiry() -> datetime:
+    """Return the naive-UTC expiry for a newly issued refresh token."""
+    settings = get_settings()
+    return datetime.now(UTC).replace(tzinfo=None) + timedelta(
+        days=settings.refresh_token_expire_days
+    )
+
+
 # ── Google Token Verification ─────────────────────────────────────────────────
 
 async def verify_google_token(credential: str) -> dict[str, Any]:
@@ -102,7 +128,7 @@ async def verify_google_token(credential: str) -> dict[str, Any]:
         raise ValueError("GOOGLE_CLIENT_ID is not configured on the server")
 
     try:
-        idinfo = google_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
+        idinfo = google_id_token.verify_oauth2_token(
             credential,
             google_requests.Request(),
             settings.google_client_id,

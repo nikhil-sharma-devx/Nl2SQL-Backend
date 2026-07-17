@@ -67,3 +67,39 @@ class DatabaseConfigUpdateResponse(BaseModel):
 
     database_url: str = Field(..., description="Updated database connection string.")
     message: str = Field(..., description="Status message.")
+
+
+class RagConfigResponse(BaseModel):
+    """Current Phase-3 RAG quality configuration (runtime-adjustable)."""
+
+    schema_descriptions_enabled: bool = Field(
+        ..., description="P1 — embed LLM-generated NL table descriptions at ingest (needs re-ingest)."
+    )
+    multi_query_enabled: bool = Field(..., description="P3 — multi-query retrieval.")
+    multi_query_max: int = Field(..., description="Max extra query variants for multi-query.")
+    few_shot_retrieval_enabled: bool = Field(
+        ..., description="P2 — inject semantically-similar past NL→SQL examples."
+    )
+    few_shot_top_k: int = Field(..., description="Number of few-shot examples to inject.")
+    parent_child_chunking_enabled: bool = Field(
+        ..., description="P4 — column-level child chunks at ingest (needs re-ingest)."
+    )
+    hyde_enabled: bool = Field(..., description="P5 — HyDE hypothetical-document embedding.")
+    adaptive_top_k_enabled: bool = Field(..., description="P7 — adaptive retrieval top_k.")
+    adaptive_top_k_min: int = Field(..., description="Lower bound for adaptive top_k.")
+    adaptive_top_k_max: int = Field(..., description="Upper bound for adaptive top_k.")
+
+
+class RagConfigUpdate(BaseModel):
+    """Partial update of the RAG configuration. Only supplied fields change."""
+
+    schema_descriptions_enabled: bool | None = None
+    multi_query_enabled: bool | None = None
+    multi_query_max: int | None = Field(default=None, ge=0, le=10)
+    few_shot_retrieval_enabled: bool | None = None
+    few_shot_top_k: int | None = Field(default=None, ge=0, le=10)
+    parent_child_chunking_enabled: bool | None = None
+    hyde_enabled: bool | None = None
+    adaptive_top_k_enabled: bool | None = None
+    adaptive_top_k_min: int | None = Field(default=None, ge=1, le=50)
+    adaptive_top_k_max: int | None = Field(default=None, ge=1, le=50)

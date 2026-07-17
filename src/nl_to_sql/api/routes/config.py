@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from nl_to_sql.api.dependencies import get_container, get_current_user
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
-from nl_to_sql.config.settings import get_settings
+from nl_to_sql.config.settings import Settings, get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.config import (
     AvailableModelsResponse,
@@ -19,6 +19,8 @@ from nl_to_sql.core.models.config import (
     LLMConfigResponse,
     LLMConfigUpdate,
     LLMConfigUpdateResponse,
+    RagConfigResponse,
+    RagConfigUpdate,
 )
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 
@@ -271,3 +273,91 @@ async def update_database_config(
         database_url=_mask_url(new_url),
         message="Database connection updated successfully.",
     )
+
+
+# ── RAG quality configuration (Phase 3) ─────────────────────────────────────────
+
+# Response field → Settings attribute (settings use an `rag_` prefix).
+_RAG_FIELD_MAP: dict[str, str] = {
+    "schema_descriptions_enabled": "rag_schema_descriptions_enabled",
+    "multi_query_enabled": "rag_multi_query_enabled",
+    "multi_query_max": "rag_multi_query_max",
+    "few_shot_retrieval_enabled": "rag_few_shot_retrieval_enabled",
+    "few_shot_top_k": "rag_few_shot_top_k",
+    "parent_child_chunking_enabled": "rag_parent_child_chunking_enabled",
+    "hyde_enabled": "rag_hyde_enabled",
+    "adaptive_top_k_enabled": "rag_adaptive_top_k_enabled",
+    "adaptive_top_k_min": "rag_adaptive_top_k_min",
+    "adaptive_top_k_max": "rag_adaptive_top_k_max",
+}
+
+
+def _rag_response(s: Settings) -> RagConfigResponse:
+    return RagConfigResponse(
+        schema_descriptions_enabled=s.rag_schema_descriptions_enabled,
+        multi_query_enabled=s.rag_multi_query_enabled,
+        multi_query_max=s.rag_multi_query_max,
+        few_shot_retrieval_enabled=s.rag_few_shot_retrieval_enabled,
+        few_shot_top_k=s.rag_few_shot_top_k,
+        parent_child_chunking_enabled=s.rag_parent_child_chunking_enabled,
+        hyde_enabled=s.rag_hyde_enabled,
+        adaptive_top_k_enabled=s.rag_adaptive_top_k_enabled,
+        adaptive_top_k_min=s.rag_adaptive_top_k_min,
+        adaptive_top_k_max=s.rag_adaptive_top_k_max,
+    )
+
+
+@router.get(
+    "/rag",
+    response_model=RagConfigResponse,
+    summary="Get RAG quality configuration",
+    description="Returns the current Phase-3 RAG retrieval/ingestion feature flags.",
+)
+async def get_rag_config(
+    _user: UserPublic = Depends(get_current_user),
+) -> RagConfigResponse:
+    """Return the current RAG quality configuration."""
+    return _rag_response(get_settings())
+
+
+@router.put(
+    "/rag",
+    response_model=RagConfigResponse,
+    summary="Update RAG quality configuration",
+    description=(
+        "Update Phase-3 RAG feature flags at runtime. Retrieval flags "
+        "(multi-query, HyDE, few-shot, adaptive top_k) take effect on the next "
+        "query; ingest flags (descriptions, parent-child chunking) take effect on "
+        "the next schema re-ingest."
+    ),
+)
+@limiter.limit(_rate)
+async def update_rag_config(
+    request: Request,  # required by SlowAPI for IP extraction
+    body: RagConfigUpdate,
+    container: ApplicationContainer = Depends(get_container),
+    _user: UserPublic = Depends(get_current_user),
+) -> RagConfigResponse:
+    """Partially update the RAG configuration on both live settings singletons."""
+    updates = body.model_dump(exclude_none=True)
+
+    live = get_settings()
+    # The DI container holds its own Settings instance; keep both in sync so the
+    # ingestion factories (container) and the live query path (get_settings) agree.
+    container_settings: Settings = container.config()
+
+    new_min = updates.get("adaptive_top_k_min", live.rag_adaptive_top_k_min)
+    new_max = updates.get("adaptive_top_k_max", live.rag_adaptive_top_k_max)
+    if new_min > new_max:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="adaptive_top_k_min cannot exceed adaptive_top_k_max.",
+        )
+
+    for field, value in updates.items():
+        attr = _RAG_FIELD_MAP[field]
+        setattr(live, attr, value)
+        setattr(container_settings, attr, value)
+
+    logger.info("RAG config updated", fields=list(updates.keys()))
+    return _rag_response(live)

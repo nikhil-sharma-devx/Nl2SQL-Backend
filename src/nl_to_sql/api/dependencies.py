@@ -114,9 +114,7 @@ async def get_request_orchestrator(
 
     if credentials is not None:
         try:
-            import types
-
-            from nl_to_sql.config.container import ApplicationContainer, _create_llm_provider
+            from nl_to_sql.config.container import ApplicationContainer, create_llm_provider
             from nl_to_sql.services.auth_service import decode_access_token
 
             token_data = decode_access_token(credentials.credentials)
@@ -130,13 +128,10 @@ async def get_request_orchestrator(
 
             user_key = await api_key_svc.get_key(token_data.user_id, active_provider)
             if user_key:
-                patched = types.SimpleNamespace(
-                    groq_api_key=user_key if active_provider == "groq" else settings.groq_api_key,
-                    openai_api_key=user_key if active_provider == "openai" else settings.openai_api_key,
-                    anthropic_api_key=user_key if active_provider == "anthropic" else settings.anthropic_api_key,
-                    gemini_api_key=user_key if active_provider == "gemini" else settings.gemini_api_key,
-                )
-                llm_provider = _create_llm_provider(active_provider, active_model, patched)  # type: ignore[arg-type]
+                # Build a real Settings with the active provider's key swapped for the
+                # user's personal key, so create_llm_provider gets the expected type.
+                patched = settings.model_copy(update={f"{active_provider}_api_key": user_key})
+                llm_provider = create_llm_provider(active_provider, active_model, patched)
         except Exception:
             pass  # Silently fall through to server key
 
@@ -177,6 +172,14 @@ async def get_request_orchestrator(
     if settings.schema_per_user_isolation and resolved_user_id is not None:
         schema_retriever._user_id = resolved_user_id
 
+    # Apply the *live* Phase-3 RAG flags (runtime-adjustable via PUT /config/rag)
+    # to this request's retriever. HyDE uses the per-request provider so it
+    # honours a caller's personal API key.
+    schema_retriever._multi_query_enabled = settings.rag_multi_query_enabled
+    schema_retriever._multi_query_max = settings.rag_multi_query_max
+    schema_retriever._hyde_enabled = settings.rag_hyde_enabled
+    schema_retriever._llm_provider = llm_provider
+
     return QueryOrchestrator(
         retriever=schema_retriever,
         generator=sql_generator,
@@ -192,6 +195,12 @@ async def get_request_orchestrator(
         fk_extractor=container.fk_extractor(),
         column_validator=container.column_validator(),
         user_id=resolved_user_id,
+        example_store=container.example_store(),
+        few_shot_enabled=settings.rag_few_shot_retrieval_enabled,
+        few_shot_top_k=settings.rag_few_shot_top_k,
+        adaptive_top_k_enabled=settings.rag_adaptive_top_k_enabled,
+        top_k_min=settings.rag_adaptive_top_k_min,
+        top_k_max=settings.rag_adaptive_top_k_max,
     )
 
 

@@ -28,9 +28,16 @@ class GoogleAuthRequest(BaseModel):
 class TokenResponse(BaseModel):
     """JWT token response returned after successful authentication."""
 
-    access_token: str = Field(..., description="JWT bearer token")
+    access_token: str = Field(..., description="Short-lived JWT bearer token")
+    refresh_token: str = Field(..., description="Long-lived opaque refresh token (rotated on use)")
     token_type: str = Field(default="bearer")
     user: "UserPublic"
+
+
+class RefreshRequest(BaseModel):
+    """Request body for exchanging a refresh token for a new access token."""
+
+    refresh_token: str = Field(..., description="The opaque refresh token issued at login")
 
 
 class OTPVerifyRequest(BaseModel):

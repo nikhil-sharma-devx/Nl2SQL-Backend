@@ -73,7 +73,12 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            content = response.content[0].text if response.content else ""
+            # Concatenate every text block, skipping thinking / tool-use / other
+            # block types that newer Anthropic SDKs may return alongside text.
+            from anthropic.types import TextBlock
+            content = "".join(
+                block.text for block in response.content if isinstance(block, TextBlock)
+            )
             usage = response.usage
             log.debug("Completion received", tokens=usage.input_tokens + usage.output_tokens)
             return LLMResponse(
