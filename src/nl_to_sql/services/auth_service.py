@@ -128,7 +128,7 @@ async def verify_google_token(credential: str) -> dict[str, Any]:
         raise ValueError("GOOGLE_CLIENT_ID is not configured on the server")
 
     try:
-        idinfo = google_id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
+        idinfo = google_id_token.verify_oauth2_token(
             credential,
             google_requests.Request(),
             settings.google_client_id,

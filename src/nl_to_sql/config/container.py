@@ -18,8 +18,8 @@ from nl_to_sql.config.settings import Settings
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.cache.semantic_cache import SemanticCache
-from nl_to_sql.infrastructure.example_store import ExampleStore
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+from nl_to_sql.infrastructure.example_store import ExampleStore
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
 from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor

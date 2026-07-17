@@ -13,7 +13,7 @@ returned in one canonical envelope so the frontend can map errors uniformly
       "retry_after": <optional seconds, rate-limit only>
     }
 """
-from typing import Any
+from typing import Any, cast
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -122,14 +122,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 async def http_exception_handler(
-    request: Request, exc: StarletteHTTPException
+    request: Request, exc: Exception
 ) -> JSONResponse:
     """Route FastAPI/Starlette HTTPExceptions through the canonical envelope.
 
     Without this, `raise HTTPException(404, "...")` returns Starlette's default
     `{"detail": ...}` shape with no `code`/`request_id`, breaking the FE's
     uniform error mapping.
+
+    Registered only for ``StarletteHTTPException``; the ``Exception`` signature
+    matches what ``add_exception_handler`` expects (Starlette types the handler
+    param as ``Exception``), avoiding a per-registration ``type: ignore``.
     """
+    exc = cast(StarletteHTTPException, exc)
     code = f"HTTP_{exc.status_code}"
     message = exc.detail if isinstance(exc.detail, str) else "Request failed"
     payload = _envelope(request, code, message)
@@ -138,12 +143,14 @@ async def http_exception_handler(
 
 
 async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
+    request: Request, exc: Exception
 ) -> JSONResponse:
     """Route 422 request-validation errors through the canonical envelope."""
     # exc.errors() items contain non-JSON-serializable objects (e.g. ValueError
     # in "ctx"); jsonable_encoder normalizes them.
     from fastapi.encoders import jsonable_encoder
+
+    exc = cast(RequestValidationError, exc)
 
     payload = _envelope(
         request,
