@@ -8,10 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, func, select
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_session_service,
+    get_starter_content_service,
+)
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import QueryTemplate
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.starter_content_service import StarterContentService
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +40,7 @@ class QueryTemplateOut(BaseModel):
     template_sql: str
     parameters: list[TemplateParameter]
     tags: list[str]
+    is_builtin: bool
     created_at: datetime
     updated_at: datetime
 
@@ -81,6 +87,7 @@ def _to_out(t: QueryTemplate) -> QueryTemplateOut:
         template_sql=t.template_sql,
         parameters=[TemplateParameter(**p) for p in (t.parameters or [])],
         tags=t.tags or [],
+        is_builtin=t.is_builtin,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -94,7 +101,9 @@ async def list_templates(
     offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
+    starter_content: StarterContentService = Depends(get_starter_content_service),
 ) -> QueryTemplateListResponse:
+    await starter_content.ensure_templates_seeded(current_user.id)
     async with session_service._session_factory() as db:
         q = select(QueryTemplate).where(QueryTemplate.user_id == current_user.id)
         if search:

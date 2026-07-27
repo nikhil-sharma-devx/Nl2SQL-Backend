@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = "noreply@nl2sql.local"
 
+    # ── Slack ────────────────────────────────────────────────────────────────
+    # Incoming webhook URL used by the "Share via Slack" feature. When empty the
+    # share endpoint returns a graceful "not configured" message instead of 500.
+    slack_webhook_url: str = ""
+
     # ── Email digest (activity summary) ──────────────────────────────────────
     # Master gate. Even when True, a digest only sends if SMTP is configured AND
     # the user opted in (NotificationPreferences.email_digest) AND they have
@@ -193,6 +198,14 @@ class Settings(BaseSettings):
     background_jobs_enabled: bool = True
     background_jobs_interval_seconds: int = 86_400  # daily
 
+    # ── Scheduled Queries & Alerts ─────────────────────────────────────────────
+    # Independent of the maintenance loop above — schedules need much finer
+    # polling granularity than once-a-day maintenance jobs.
+    scheduled_queries_enabled: bool = True
+    scheduled_query_check_interval_seconds: int = 60
+    scheduled_query_timeout_seconds: int = 120
+    scheduled_query_max_consecutive_failures: int = 5
+
     # ── Auto Ingest on Startup ───────────────────────────────────────────────
     auto_ingest_schema_on_startup: bool = True
 
@@ -258,6 +271,13 @@ class Settings(BaseSettings):
     rag_adaptive_top_k_enabled: bool = True
     rag_adaptive_top_k_min: int = 2
     rag_adaptive_top_k_max: int = 15
+
+    # ── Conversational memory (multi-turn querying) ──────────────────────────
+    # How many of the most recent conversation turns to keep verbatim when
+    # feeding history into SQL generation. Older turns are compressed to a
+    # one-line summary (or dropped when the token budget is tight) so prompt
+    # size stays bounded across a long refinement session. Cheap; safe to tune.
+    conversation_max_turns: int = 6
 
     # ── Fine-tuning ──────────────────────────────────────────────────────────
     fine_tuning_enabled: bool = False

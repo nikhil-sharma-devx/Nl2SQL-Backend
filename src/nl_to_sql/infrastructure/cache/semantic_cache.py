@@ -38,14 +38,15 @@ class SemanticCache(ICache):  # type: ignore[misc]
         exact_cache: ICache,
         threshold: float = 0.95,
         default_ttl: int = 3600,
-        collection_name: str = "semantic_cache",
     ) -> None:
+        # ``vector_store`` is a DEDICATED store bound to the semantic-cache
+        # collection (see build_semantic_cache_store) — never the schema store,
+        # so clear()'s delete_collection() and cache upserts stay isolated.
         self._embedder = embedder
         self._vector_store = vector_store
         self._exact_cache = exact_cache  # Fallback exact match cache
         self._threshold = threshold
         self._default_ttl = default_ttl
-        self._collection_name = collection_name
         self._logger = logger.bind(component="SemanticCache")
 
     async def get(self, key: str) -> Any | None:
@@ -69,14 +70,14 @@ class SemanticCache(ICache):  # type: ignore[misc]
         self,
         question: str,
         threshold: float | None = None,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Retrieve cached response for semantically similar query.
 
         Args:
             question: The user's natural language question.
             threshold: Similarity threshold (0-1). Defaults to instance threshold.
-            user_id: When provided, only returns results cached by this user.
+            connection_id: When provided, only returns results cached by this user.
 
         Returns:
             Cached response dict if similarity > threshold, else None.
@@ -88,8 +89,8 @@ class SemanticCache(ICache):  # type: ignore[misc]
             # Embed the question
             query_embedding = await self._embedder.embed(question)
 
-            # Retrieve more candidates so we can filter by user_id when needed
-            top_k = 10 if user_id else 1
+            # Retrieve more candidates so we can filter by connection_id when needed
+            top_k = 10 if connection_id else 1
             similar_chunks = await self._vector_store.similarity_search(
                 query_embedding=query_embedding,
                 top_k=top_k,
@@ -99,11 +100,11 @@ class SemanticCache(ICache):  # type: ignore[misc]
                 log.debug("No semantically similar queries found")
                 return None
 
-            # Filter by user_id before scoring â€” prevents cross-user cache leakage
-            if user_id:
+            # Filter by connection_id before scoring â€” prevents cross-user cache leakage
+            if connection_id:
                 similar_chunks = [
                     c for c in similar_chunks
-                    if c.metadata.get("user_id") == user_id
+                    if c.metadata.get("connection_id") == connection_id
                 ]
                 if not similar_chunks:
                     log.debug("No semantic cache entries for this user")
@@ -163,10 +164,10 @@ class SemanticCache(ICache):  # type: ignore[misc]
         question: str,
         response: dict[str, Any],
         ttl: int | None = None,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> None:
         """Store query response in semantic cache (non-blocking â€” write happens in background)."""
-        task = asyncio.create_task(self._write_semantic(question, response, ttl, user_id))
+        task = asyncio.create_task(self._write_semantic(question, response, ttl, connection_id))
         task.add_done_callback(lambda t: None)  # prevent GC
 
     async def _write_semantic(
@@ -174,7 +175,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
         question: str,
         response: dict[str, Any],
         ttl: int | None = None,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> None:
         effective_ttl = ttl if ttl is not None else self._default_ttl
         log = self._logger.bind(question=question[:80], ttl=effective_ttl)
@@ -182,7 +183,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
         try:
             embedding = await self._embedder.embed(question)
 
-            id_namespace = f"{user_id}:" if user_id else ""
+            id_namespace = f"{connection_id}:" if connection_id else ""
             chunk_id = f"semantic:{id_namespace}{hashlib.sha256(question.encode()).hexdigest()}"
             import json
             chunk = SchemaChunk(
@@ -200,7 +201,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
                     "cached_at": time.time(),
                     "ttl": effective_ttl,
                     "type": "semantic_cache",
-                    "user_id": user_id,
+                    "connection_id": connection_id,
                 },
             )
 

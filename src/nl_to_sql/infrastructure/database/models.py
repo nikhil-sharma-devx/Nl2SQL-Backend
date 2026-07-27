@@ -50,7 +50,7 @@ class User(Base):
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
     password_history = relationship("PasswordHistory", back_populates="user", cascade="all, delete-orphan", order_by="desc(PasswordHistory.created_at)")
     api_keys = relationship("UserAPIKey", back_populates="user", cascade="all, delete-orphan")
-    database_connection = relationship("UserDatabaseConnection", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    database_connections = relationship("UserDatabaseConnection", back_populates="user", cascade="all, delete-orphan")
 
 
 class PasswordHistory(Base):
@@ -83,17 +83,41 @@ class UserAPIKey(Base):
 
 
 class UserDatabaseConnection(Base):
-    """Per-user encrypted PostgreSQL connection string (BYOD — Bring Your Own Database)."""
+    """A single database connection owned by a user (multi-connection BYOD).
+
+    A user may own many connections and switch the *active* one at any time.
+
+    - ``connection_id``: stable, non-enumerable UUID used as the external
+      identifier (API + Qdrant payload key + schema-catalog scope). Never expose
+      the integer ``id`` externally.
+    - ``encrypted_url``: Fernet-encrypted DSN. ``NULL`` denotes the built-in
+      "Server Default" connection, which resolves to the platform's shared
+      database — this preserves the pre-multi-connection behaviour for users who
+      never configured a personal database.
+    - ``is_default``: exactly one row per user is the active/default connection;
+      the service enforces the single-default invariant on create/select/delete.
+    """
 
     __tablename__ = "user_database_connections"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_connection_name"),
+        Index("ix_user_database_connections_user", "user_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True, index=True)
-    encrypted_url = Column(Text, nullable=False)
+    connection_id = Column(
+        String(36), nullable=False, unique=True, index=True, default=lambda: str(uuid4())
+    )
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False, default="Default")
+    db_type = Column(String(20), nullable=False, default="postgresql")
+    # NULL = the built-in "Server Default" connection (uses the platform database).
+    encrypted_url = Column(Text, nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    user = relationship("User", back_populates="database_connection")
+    user = relationship("User", back_populates="database_connections")
 
 
 class ChatSession(Base):
@@ -448,6 +472,7 @@ class QueryTemplate(Base):
     template_sql = Column(Text, nullable=False)
     parameters = Column(JSON, nullable=False, default=list)  # [{name, type, description, default}]
     tags = Column(JSON, nullable=False, default=list)
+    is_builtin = Column(Boolean, nullable=False, default=False)  # seeded starter example
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -476,6 +501,41 @@ class GlossaryEntry(Base):
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     term = Column(String(200), nullable=False)
     definition = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Metric(Base):
+    """Semantic layer — a governed business metric, scoped to a DB connection.
+
+    Only ``certified=True`` metrics are injected into the SQL-generation
+    prompt (see ``api/routes/query.py::_load_certified_metrics_context``) —
+    uncertified/draft rows are catalog-only. ``connection_id`` is a loose
+    reference (not an FK object), matching ``UserSchemaTable.connection_id``'s
+    convention: scoping is validated by the service layer, not a DB constraint,
+    since a metric's SQL definition is only meaningful against one specific
+    connection's schema (never injected cross-connection).
+    """
+
+    __tablename__ = "metrics"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "name", name="uq_connection_metric_name"),
+        Index("ix_metrics_connection", "connection_id"),
+        Index("ix_metrics_user", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    metric_id = Column(String(36), unique=True, nullable=False, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    connection_id = Column(String(36), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    sql_definition = Column(Text, nullable=False)
+    dimensions = Column(JSON, nullable=False, default=list)  # list[str]
+    tags = Column(JSON, nullable=False, default=list)  # list[str]
+    owner = Column(String(200), nullable=True)  # free-text owner/team — not an auth role
+    certified = Column(Boolean, nullable=False, default=False)
+    is_builtin = Column(Boolean, nullable=False, default=False)  # seeded starter example
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -515,6 +575,34 @@ class NotificationPreferences(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class SharedQuery(Base):
+    """Export & Share — a shareable snapshot of a query and its result.
+
+    Created by an owner (``user_id``) and accessed publicly via a signed share
+    token (see ``services/export_service.py``). The snapshot stores only the
+    question, generated SQL, and a bounded copy of the result rows — never any
+    DSN, secret, or other user's data. Expiry and revocation are enforced from
+    this row (the token authenticates the ``id``; the DB is authoritative for
+    the 410 expired/revoked semantics).
+    """
+
+    __tablename__ = "shared_queries"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(200), nullable=True)
+    # Natural-language prompt behind the query (stored under both the friendly
+    # and the schema-consistent name via the route mapping).
+    question = Column(Text, nullable=False, default="")
+    nl_prompt = Column(Text, nullable=True)
+    generated_sql = Column(Text, nullable=False, default="")
+    # Bounded copy of the result rows (capped in the service before persist).
+    result_snapshot = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+
 # ── Schema Management (Schema Catalog) Models ───────────────────────────────────
 
 
@@ -527,9 +615,16 @@ class UserSchema(Base):
     """
 
     __tablename__ = "user_schemas"
+    __table_args__ = (
+        UniqueConstraint("connection_id", name="uq_user_schema_connection"),
+        Index("ix_user_schemas_user", "user_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # Owning connection (multi-DB). Nullable only for legacy rows pre-backfill;
+    # the catalog service always sets it. One catalog header per connection.
+    connection_id = Column(String(36), nullable=True, index=True)
     database_name = Column(String(200), nullable=True)
     dialect = Column(String(50), nullable=False, default="postgresql")
     # 'reflected' | 'uploaded' | 'merged'
@@ -550,12 +645,17 @@ class UserSchemaTable(Base):
 
     __tablename__ = "user_schema_tables"
     __table_args__ = (
-        UniqueConstraint("user_id", "schema_name", "table_name", name="uq_user_schema_table"),
+        UniqueConstraint(
+            "connection_id", "schema_name", "table_name", name="uq_conn_schema_table"
+        ),
         Index("ix_user_schema_tables_user", "user_id"),
+        Index("ix_user_schema_tables_connection", "connection_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # Owning connection (multi-DB). Nullable only for legacy rows pre-backfill.
+    connection_id = Column(String(36), nullable=True, index=True)
     schema_name = Column(String(100), nullable=False, default="public")
     table_name = Column(String(200), nullable=False)
     # 'reflected' | 'uploaded'
@@ -567,3 +667,141 @@ class UserSchemaTable(Base):
     first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)  # updated each sync
     is_new = Column(Boolean, nullable=False, default=True)  # cleared once the user has viewed it
+
+
+# ── Auto Charting & Dashboards Models ───────────────────────────────────────────
+
+
+class Dashboard(Base):
+    """A user-owned dashboard: a named, ordered collection of chart widgets.
+
+    Per-user (``user_id`` FK). Widgets cascade-delete with the dashboard. The
+    ``updated_at`` column powers recency ordering on the list view.
+    """
+
+    __tablename__ = "dashboards"
+    __table_args__ = (
+        Index("ix_dashboards_user_updated", "user_id", "updated_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False, default="Untitled Dashboard")
+    is_builtin = Column(Boolean, nullable=False, default=False)  # seeded starter example
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    widgets = relationship(
+        "DashboardWidget",
+        back_populates="dashboard",
+        cascade="all, delete-orphan",
+        order_by="DashboardWidget.position",
+    )
+
+
+class DashboardWidget(Base):
+    """A single chart tile on a dashboard.
+
+    Holds the SQL that produces the tile's data, the recommended/overridden
+    ``chart_type``, a ``chart_config`` JSON compatible with the frontend
+    ``DataChart`` (``{type, x_axis, y_axis}``), a responsive ``layout`` JSON
+    (``{x, y, w, h}``), and an integer ``position`` for deterministic ordering.
+    """
+
+    __tablename__ = "dashboard_widgets"
+    __table_args__ = (
+        Index("ix_dashboard_widgets_dashboard", "dashboard_id"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    dashboard_id = Column(String(36), ForeignKey("dashboards.id"), nullable=False, index=True)
+    title = Column(String(200), nullable=False, default="Untitled")
+    nl_prompt = Column(Text, nullable=True)
+    sql = Column(Text, nullable=False, default="")
+    chart_type = Column(String(20), nullable=False, default="table")
+    chart_config = Column(JSON, nullable=True)  # {type, x_axis, y_axis}
+    layout = Column(JSON, nullable=True)  # {x, y, w, h}
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    dashboard = relationship("Dashboard", back_populates="widgets")
+
+
+# ── Scheduled Queries & Alerts Models ────────────────────────────────────────
+
+
+class ScheduledQuery(Base):
+    """A user-owned recurring natural-language query with email alerting.
+
+    ``connection_id`` is a loose reference (not an FK object) to a
+    ``UserDatabaseConnection.connection_id`` — same convention already used by
+    ``UserSchemaTable.connection_id`` — since connection scoping is validated by
+    the service layer, not enforced at the DB level. ``cron_expr`` is always the
+    canonical, resolved 5-field cron string; ``raw_schedule_text`` retains the
+    original NL phrase ("every morning") for display/edit. ``notify_in_app`` is
+    reserved and not yet delivered (no in-app notification feed exists yet) —
+    kept False by default and not exposed as a working toggle in the UI.
+    """
+
+    __tablename__ = "scheduled_queries"
+    __table_args__ = (
+        Index("ix_scheduled_queries_user", "user_id"),
+        Index("ix_scheduled_queries_connection", "connection_id"),
+        Index("ix_scheduled_queries_next_run", "next_run_at", "is_paused"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    connection_id = Column(String(36), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    nl_prompt = Column(Text, nullable=False)
+    cron_expr = Column(String(100), nullable=False)
+    raw_schedule_text = Column(Text, nullable=True)
+    timezone = Column(String(50), nullable=False, default="UTC")
+    is_paused = Column(Boolean, nullable=False, default=False)
+    notify_email = Column(Boolean, nullable=False, default=True)
+    notify_in_app = Column(Boolean, nullable=False, default=False)
+    # 'always' | 'on_results' | 'on_change'
+    notify_condition = Column(String(20), nullable=False, default="always")
+    last_row_count = Column(Integer, nullable=True)
+    last_result_hash = Column(String(64), nullable=True)
+    next_run_at = Column(DateTime, nullable=True, index=True)
+    last_run_at = Column(DateTime, nullable=True)
+    last_status = Column(String(20), nullable=True)  # 'success' | 'failed' | 'running'
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    is_builtin = Column(Boolean, nullable=False, default=False)  # seeded starter example
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    runs = relationship(
+        "ScheduledQueryRun",
+        back_populates="schedule",
+        cascade="all, delete-orphan",
+        order_by="desc(ScheduledQueryRun.started_at)",
+    )
+
+
+class ScheduledQueryRun(Base):
+    """One execution history record for a ``ScheduledQuery`` (feeds "View history").
+
+    Stores only row_count/generated_sql/error — never the result rows themselves,
+    to avoid unbounded PII retention. The service caps retained rows per schedule.
+    """
+
+    __tablename__ = "scheduled_query_runs"
+    __table_args__ = (
+        Index("ix_scheduled_query_runs_schedule_started", "schedule_id", "started_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    schedule_id = Column(String(36), ForeignKey("scheduled_queries.id"), nullable=False, index=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    status = Column(String(20), nullable=False)  # 'success' | 'failed' | 'timeout'
+    row_count = Column(Integer, nullable=True)
+    generated_sql = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    notified = Column(Boolean, nullable=False, default=False)
+    duration_ms = Column(Integer, nullable=True)
+
+    schedule = relationship("ScheduledQuery", back_populates="runs")

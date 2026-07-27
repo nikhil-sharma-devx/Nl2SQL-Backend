@@ -32,13 +32,13 @@ from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 logger = structlog.get_logger(__name__)
 
 
-def _example_scope_should(user_id: str | None) -> list[Any] | None:
+def _example_scope_should(connection_id: str | None) -> list[Any] | None:
     """OR-conditions scoping reads to a user's own examples plus shared ones."""
-    if user_id is None:
+    if connection_id is None:
         return None
     return [
-        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-        IsEmptyCondition(is_empty=PayloadField(key="user_id")),
+        FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
+        IsEmptyCondition(is_empty=PayloadField(key="connection_id")),
     ]
 
 
@@ -87,7 +87,7 @@ class ExampleStore:
         self._initialized = True
 
     async def index_example(
-        self, question: str, sql: str, user_id: str | None = None
+        self, question: str, sql: str, connection_id: str | None = None
     ) -> None:
         """Embed and upsert a single NL→SQL example (best-effort)."""
         question = (question or "").strip()
@@ -98,10 +98,10 @@ class ExampleStore:
             await self._ensure_initialized()
             embedding = await self._embedder.embed(question)
             # Deterministic id so re-submitting the same pair updates in place.
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_id or ''}:{question}:{sql}"))
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{connection_id or ''}:{question}:{sql}"))
             payload: dict[str, Any] = {"question": question, "sql": sql}
-            if user_id is not None:
-                payload["user_id"] = user_id
+            if connection_id is not None:
+                payload["connection_id"] = connection_id
             await self._client.upsert(
                 collection_name=self._collection_name,
                 points=[PointStruct(id=point_id, vector=embedding, payload=payload)],
@@ -111,7 +111,7 @@ class ExampleStore:
             logger.warning("Failed to index few-shot example — skipping", error=str(exc))
 
     async def search(
-        self, question: str, top_k: int = 3, user_id: str | None = None
+        self, question: str, top_k: int = 3, connection_id: str | None = None
     ) -> list[dict[str, str]]:
         """Return the top-k most similar past examples as {question, sql} dicts."""
         question = (question or "").strip()
@@ -123,7 +123,7 @@ class ExampleStore:
             response = await self._client.query_points(
                 collection_name=self._collection_name,
                 query=embedding,
-                query_filter=Filter(should=_example_scope_should(user_id)),
+                query_filter=Filter(should=_example_scope_should(connection_id)),
                 limit=top_k,
                 with_payload=True,
             )
@@ -139,13 +139,13 @@ class ExampleStore:
             logger.warning("Few-shot example search failed — returning none", error=str(exc))
             return []
 
-    async def count(self, user_id: str | None = None) -> int:
+    async def count(self, connection_id: str | None = None) -> int:
         """Return how many examples are stored (best-effort; 0 on error)."""
         try:
             await self._ensure_initialized()
             result = await self._client.count(
                 collection_name=self._collection_name,
-                count_filter=Filter(should=_example_scope_should(user_id)),
+                count_filter=Filter(should=_example_scope_should(connection_id)),
                 exact=True,
             )
             return int(result.count)

@@ -129,6 +129,16 @@ Your job is to convert a natural language question into a valid, efficient, and 
 
 ---
 
+### 🏅 CERTIFIED METRICS:
+The following are governed, pre-approved metric definitions for this database
+connection. When the user's question maps to one of these metrics (by name or
+clear intent), you MUST use its exact SQL definition/logic rather than
+inventing your own aggregation. Only fall back to ad-hoc calculation if no
+certified metric matches.
+{certified_metrics_section}
+
+---
+
 ### 📚 FEW-SHOT EXAMPLES:
 {few_shot_examples}
 
@@ -250,6 +260,7 @@ class SQLGeneratorService:
         custom_instructions: str | None = None,
         conversation_history: list[dict[str, Any]] | None = None,
         few_shot_examples: list[dict[str, Any]] | None = None,
+        certified_metrics: str | None = None,
     ) -> GeneratedSQL:
         """Generate SQL for the given question.
 
@@ -299,6 +310,12 @@ class SQLGeneratorService:
             else "No custom instructions set."
         )
 
+        # Certified metrics get their own dedicated section — NOT folded into
+        # custom_instructions (which would let a large custom-instructions blob
+        # starve the metrics section, or vice versa). Already capped at load
+        # time (see api/routes/query.py::_load_certified_metrics_context).
+        metrics_section = certified_metrics or "No certified metrics defined for this connection."
+
         # Build dynamic few-shot section — prefer training data examples over static defaults
         if few_shot_examples:
             import json as _json
@@ -307,10 +324,15 @@ class SQLGeneratorService:
                 q = ex.get("question", "").strip()
                 sql = ex.get("sql", "").strip()
                 if q and sql:
+                    # Show only the SQL for retrieved examples. Do NOT include a
+                    # hard-coded suggested_chart here — emitting {"type":"none"} on
+                    # every example biases the model (at temperature 0) to always
+                    # answer "none", which suppressed charts in chat. The output
+                    # contract (incl. suggested_chart) is taught by the system
+                    # prompt and the static examples.
                     shot_parts.append(
                         f'Q: {q}\n'
-                        f'A: {{"sql": {_json.dumps(sql)}, '
-                        f'"follow_up_questions": [], "suggested_chart": {{"type": "none", "x_axis": "", "y_axis": ""}}}}'
+                        f'A: {{"sql": {_json.dumps(sql)}}}'
                     )
             few_shot_text = ("EXAMPLES (from similar past queries):\n\n" + "\n\n".join(shot_parts)) if shot_parts else _FEW_SHOT_EXAMPLES
         else:
@@ -357,6 +379,7 @@ class SQLGeneratorService:
             .replace("{question}", question)
             .replace("{sql_style_instructions}", _build_style_instructions(style_hints))
             .replace("{custom_instructions_section}", instructions_section)
+            .replace("{certified_metrics_section}", metrics_section)
             .replace("{conversation_history}", history_section)
         )
 

@@ -12,12 +12,12 @@ class IVectorStore(ABC):
     """
 
     @abstractmethod
-    async def upsert(self, chunks: list[SchemaChunk], user_id: str | None = None) -> None:
+    async def upsert(self, chunks: list[SchemaChunk], connection_id: str | None = None) -> None:
         """Store schema chunks in the vector store.
 
         Args:
             chunks: Schema chunks with pre-computed embeddings.
-            user_id: When provided, tag each point with this owner so reads can
+            connection_id: When provided, tag each point with this owner so reads can
                 be filtered per user (per-user isolation). ``None`` writes
                 un-tagged points (shared-collection behaviour).
         """
@@ -28,14 +28,14 @@ class IVectorStore(ABC):
         self,
         query_embedding: list[float],
         top_k: int = 5,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Retrieve the top-k most similar schema chunks.
 
         Args:
             query_embedding: The query vector.
             top_k: Number of results to return.
-            user_id: When provided, restrict results to this user's chunks.
+            connection_id: When provided, restrict results to this user's chunks.
 
         Returns:
             Ordered list of SchemaChunk (most relevant first).
@@ -48,7 +48,7 @@ class IVectorStore(ABC):
         ...
 
     @abstractmethod
-    async def count(self, user_id: str | None = None) -> int:
+    async def count(self, connection_id: str | None = None) -> int:
         """Return how many chunks are currently stored (optionally per user)."""
         ...
 
@@ -64,7 +64,7 @@ class IVectorStore(ABC):
         query_embedding: list[float],
         top_k: int = 5,
         alpha: float = 0.5,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Hybrid search combining vector similarity + BM25 keyword search.
 
@@ -73,7 +73,7 @@ class IVectorStore(ABC):
             query_embedding: The query vector for semantic search.
             top_k: Number of results to return.
             alpha: Weight for vector search (1-alpha for BM25).
-            user_id: When provided, restrict results to this user's chunks.
+            connection_id: When provided, restrict results to this user's chunks.
 
         Returns:
             Ordered list of SchemaChunk (most relevant first).
@@ -84,7 +84,7 @@ class IVectorStore(ABC):
     async def get_chunks_by_table_names(
         self,
         table_names: list[str],
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Fetch schema chunks whose table_name is in the given list.
 
@@ -94,7 +94,7 @@ class IVectorStore(ABC):
 
         Args:
             table_names: List of table names to fetch (exact, case-sensitive).
-            user_id: When provided, restrict results to this user's chunks.
+            connection_id: When provided, restrict results to this user's chunks.
 
         Returns:
             List of matching SchemaChunk objects (order not guaranteed).
@@ -102,14 +102,14 @@ class IVectorStore(ABC):
         ...
 
     @abstractmethod
-    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
+    async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         """Return the names of every table currently ingested in the store.
 
         Used to populate the list shown to the LLM during table selection so
         it can only pick from tables that actually exist.
 
         Args:
-            user_id: When provided, restrict to this user's tables.
+            connection_id: When provided, restrict to this user's tables.
 
         Returns:
             Sorted list of unique table name strings.
