@@ -39,8 +39,10 @@ from nl_to_sql.infrastructure.cache.cache_metrics import (
 )
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
+from nl_to_sql.services.correction_detector import CorrectionDetector
 from nl_to_sql.services.query_classifier import QueryClassifier
 from nl_to_sql.services.query_history import QueryHistoryService
+from nl_to_sql.services.query_rewriter import QueryRewriter
 from nl_to_sql.services.schema_retriever import SchemaRetriever
 from nl_to_sql.services.sql_column_validator import SQLColumnValidator
 from nl_to_sql.services.sql_generator import SQLGeneratorService
@@ -53,6 +55,69 @@ if TYPE_CHECKING:
     from nl_to_sql.services.training_data_service import TrainingDataService
 
 logger = structlog.get_logger(__name__)
+
+# Chart types the frontend can actually render for an auto-inferred chart.
+_TEMPORAL_HINTS = ("date", "time", "month", "year", "day", "week", "quarter", "_at")
+
+
+def _is_number(value: Any) -> bool:
+    """True if value is (or parses as) a real number — bool excluded."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value.replace(",", ""))
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _infer_chart_from_result(rows: list[dict[str, Any]] | None) -> dict[str, str] | None:
+    """Deterministically pick a chart config from a result set, or None.
+
+    Conservative: needs at least 2 rows, exactly-usable one categorical/temporal
+    column (x) plus one numeric column (y). A single scalar (e.g. COUNT(*)) or a
+    wide/ungraphable result returns None so we don't force a meaningless chart.
+    Temporal x → line; a small number of categories → pie; otherwise → bar.
+    """
+    if not rows or len(rows) < 2:
+        return None
+    columns = list(rows[0].keys())
+    if len(columns) < 2:
+        return None
+    sample = rows[0]
+    numeric_cols = [c for c in columns if _is_number(sample.get(c))]
+    non_numeric_cols = [c for c in columns if c not in numeric_cols]
+    if not numeric_cols or not non_numeric_cols:
+        return None
+    x_axis = non_numeric_cols[0]
+    y_axis = numeric_cols[0]
+    x_lower = x_axis.lower()
+    if any(h in x_lower for h in _TEMPORAL_HINTS):
+        chart_type = "line"
+    elif len(rows) <= 6:
+        chart_type = "pie"
+    else:
+        chart_type = "bar"
+    return {"type": chart_type, "x_axis": x_axis, "y_axis": y_axis}
+
+
+def _effective_chart(
+    llm_chart: dict[str, Any] | None, rows: list[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    """Prefer the LLM's chart; fall back to a deterministic one from the result.
+
+    Keeps the model's suggestion when it named a real chart type, otherwise
+    derives one from the executed rows so a graphable answer still charts even
+    when the model returned ``none``/nothing (or when a cache-hit path dropped it).
+    """
+    if isinstance(llm_chart, dict) and str(llm_chart.get("type") or "").lower() not in ("", "none"):
+        return llm_chart
+    inferred = _infer_chart_from_result(rows)
+    return inferred if inferred is not None else llm_chart
 
 
 class QueryOrchestrator:
@@ -88,12 +153,16 @@ class QueryOrchestrator:
         fk_extractor: "FKRelationshipExtractor | None" = None,
         column_validator: SQLColumnValidator | None = None,
         user_id: str | None = None,
+        connection_id: str | None = None,
         example_store: "ExampleStore | None" = None,
         few_shot_enabled: bool = False,
         few_shot_top_k: int = 3,
         adaptive_top_k_enabled: bool = False,
         top_k_min: int = 2,
         top_k_max: int = 15,
+        query_rewriter: QueryRewriter | None = None,
+        correction_detector: CorrectionDetector | None = None,
+        conversation_max_turns: int = 6,
     ) -> None:
         self._retriever = retriever
         self._generator = generator
@@ -109,6 +178,9 @@ class QueryOrchestrator:
         self._fk_extractor = fk_extractor
         self._column_validator = column_validator
         self._user_id = user_id
+        # Active database connection — the isolation key for cache + vector reads
+        # so connection A never serves connection B's cached SQL or schema chunks.
+        self._connection_id = connection_id
         # P2 — semantic few-shot example retrieval from a dedicated collection.
         self._example_store = example_store
         self._few_shot_enabled = few_shot_enabled
@@ -117,10 +189,16 @@ class QueryOrchestrator:
         self._adaptive_top_k_enabled = adaptive_top_k_enabled
         self._top_k_min = top_k_min
         self._top_k_max = top_k_max
+        # Natural-language data corrections: detect + rewrite the previous turn.
+        self._query_rewriter = query_rewriter
+        self._correction_detector = correction_detector
+        # Multi-turn conversation memory: cap how many recent turns are fed to
+        # generation verbatim (older turns compressed/dropped by PromptBudget).
+        self._conversation_max_turns = conversation_max_turns
 
     @_lf_observe(name="nl2sql.pipeline", capture_input=False)
     @trace_function("pipeline.run")
-    async def run(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None) -> QueryResponse:
+    async def run(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None, certified_metrics: str | None = None) -> QueryResponse:
         """Execute the full pipeline for a single query request.
 
         Args:
@@ -226,6 +304,10 @@ class QueryOrchestrator:
                 execution_error=execution_error,
                 tokens_used=cached.get("tokens_used", 0),
                 cached=True,
+                # Preserve the cached chart (this rebuild used to drop it), and
+                # fall back to inference from the freshly executed rows.
+                suggested_chart=_effective_chart(cached.get("suggested_chart"), execution_result),
+                follow_up_questions=cached.get("follow_up_questions", []),
             )
 
             # Save to chat session if session_id provided
@@ -340,7 +422,7 @@ class QueryOrchestrator:
                     final_chunks = await self._fk_extractor.expand_tables(
                         final_chunks,
                         max_expansion=3,
-                        user_id=self._user_id,
+                        connection_id=self._connection_id,
                     )
                 except Exception as fk_exc:
                     log.warning("FK expansion failed, using grounded chunks", error=str(fk_exc))
@@ -376,6 +458,15 @@ class QueryOrchestrator:
             except Exception as hist_exc:
                 log.warning("Failed to load conversation history — continuing without", error=str(hist_exc))
 
+        # ── Conversation pruning + compression (bound prompt growth) ──────────
+        conversation_history = self._prune_conversation(conversation_history)
+
+        # ── Ambiguous follow-up clarification (ask instead of guessing) ───────
+        clarification_prompt = self._needs_clarification(request, conversation_history)
+        if clarification_prompt is not None:
+            log.info("Ambiguous follow-up — requesting clarification")
+            return await self._emit_clarification(request, dialect, clarification_prompt, start_time)
+
         # ── Fetch dynamic few-shot examples from training data (#07) ─────────
         few_shot_examples: list[dict[str, Any]] | None = None
         if self._training_data_service is not None and self._few_shot_enabled:
@@ -388,20 +479,10 @@ class QueryOrchestrator:
             except Exception as shot_exc:
                 log.warning("Failed to load few-shot examples", error=str(shot_exc))
 
-        # ── Follow-up detection (#03): inject previous SQL context ────────────
-        _follow_up_words = {"it", "that", "same", "also", "now", "but", "instead", "this", "those", "then"}
-        is_follow_up = (
-            len(request.question.split()) <= 12
-            and bool(_follow_up_words & set(request.question.lower().split()))
-            and bool(conversation_history)
+        # ── Context resolution: corrections + follow-ups (#03) ────────────────
+        effective_question = await self._build_effective_question(
+            request, conversation_history, log
         )
-        effective_question = request.question
-        if is_follow_up and conversation_history:
-            effective_question = (
-                f"{request.question}\n\n"
-                f"[Context — this is a follow-up to the previous query:\n{conversation_history[-1]['sql']}]"
-            )
-            log.info("Follow-up detected — injecting previous SQL context", question=request.question[:60])
 
         # ── Steps 4-6: Generate + Validate with self-correction loop ──────────
         error_feedback: str | None = None
@@ -425,6 +506,7 @@ class QueryOrchestrator:
                     custom_instructions=custom_instructions,
                     conversation_history=conversation_history,
                     few_shot_examples=few_shot_examples,
+                    certified_metrics=certified_metrics,
                 )
                 generated_sql.attempt = attempt
                 stage_timings["generation"] = stage_timings.get("generation", 0) + int(
@@ -611,12 +693,12 @@ class QueryOrchestrator:
         if generated_sql.validation.is_valid:
             try:
                 # Update exact cache
-                cache_key = self._make_cache_key(request.question, dialect, self.PROMPT_VERSION)
+                cache_key = self._make_cache_key(request.question, dialect, self._connection_id, self.PROMPT_VERSION)
                 await self._cache.set(cache_key, response.model_dump())
 
                 # Update semantic cache
                 if hasattr(self._cache, "set_semantic"):
-                    await self._cache.set_semantic(request.question, response.model_dump(), user_id=self._user_id)
+                    await self._cache.set_semantic(request.question, response.model_dump(), connection_id=self._connection_id)
             except Exception as cache_exc:
                 log.warning("Failed to cache response — skipping", error=str(cache_exc))
 
@@ -640,6 +722,219 @@ class QueryOrchestrator:
 
         return response
 
+    async def _build_effective_question(
+        self,
+        request: QueryRequest,
+        conversation_history: list[dict[str, Any]] | None,
+        log: Any,
+    ) -> str:
+        """Resolve the question to actually generate SQL for against the prior turn.
+
+        Two context-carrying cases, checked in order:
+          1. Corrections ("no, I meant customer_name", "use OrderDate instead") —
+             rewrite the previous question with the correction via QueryRewriter
+             and regenerate. Multiple corrections chain naturally: each targets the
+             latest prior turn (``conversation_history[-1]``), which already
+             reflects earlier corrections saved to the session.
+          2. Follow-ups ("now group it by month") — inject the previous SQL as
+             context (the existing keyword heuristic).
+        Falls back to the raw question when there is no prior turn or on any failure.
+        """
+        effective_question: str = request.question
+
+        # ── Correction detection (Natural Language Data Corrections) ──────────
+        force_correction = getattr(request, "is_correction", False)
+        signal = (
+            self._correction_detector.detect(request.question)
+            if self._correction_detector is not None
+            else None
+        )
+        detected = bool(signal and signal.is_correction)
+        if force_correction or detected:
+            if conversation_history and self._query_rewriter is not None:
+                prev_turn = conversation_history[-1]
+                effective_question = await self._query_rewriter.apply_correction(
+                    previous_question=prev_turn["question"],
+                    previous_sql=prev_turn["sql"],
+                    correction=request.question,
+                )
+                log.info(
+                    "Correction detected — rewrote previous turn",
+                    forced=force_correction,
+                    target_term=signal.target_term if signal else None,
+                    effective_question=effective_question[:80],
+                )
+                return effective_question
+            log.info(
+                "Correction detected but no prior turn — handling as a normal query",
+                forced=force_correction,
+            )
+
+        # ── Follow-up detection (#03): inject previous SQL context ────────────
+        if self._is_follow_up(request.question, conversation_history) and conversation_history:
+            effective_question = (
+                f"{request.question}\n\n"
+                f"[Context — this is a follow-up to the previous query:\n{conversation_history[-1]['sql']}]"
+            )
+            log.info("Follow-up detected — injecting previous SQL context", question=request.question[:60])
+
+        return effective_question
+
+    # Words that signal a message is refining/continuing the previous turn.
+    _FOLLOW_UP_WORDS = frozenset(
+        {"it", "that", "same", "also", "now", "but", "instead", "this", "those", "then"}
+    )
+
+    @classmethod
+    def _is_follow_up(
+        cls, question: str, conversation_history: list[dict[str, Any]] | None
+    ) -> bool:
+        """Heuristic: is this a short refinement of the prior turn (needs context)?"""
+        if not conversation_history:
+            return False
+        words = question.lower().split()
+        return len(words) <= 12 and bool(cls._FOLLOW_UP_WORDS & set(words))
+
+    # Connective / deictic / generic-verb noise. A follow-up made up ONLY of
+    # these (no concrete refinement) is too vague to resolve even with context.
+    _CLARIFY_NOISE = _FOLLOW_UP_WORDS | frozenset(
+        {
+            "do", "the", "a", "an", "one", "ones", "other", "another", "different",
+            "again", "please", "what", "about", "how", "with", "for", "of", "to",
+            "change", "fix", "redo", "make", "update", "modify", "adjust", "tweak",
+            "and", "or", "just", "can", "you", "i", "we", "me", "my", "is", "are",
+        }
+    )
+    # Tokens that clearly carry a concrete refinement (sort/filter/limit/…).
+    _REFINEMENT_KEYWORDS = frozenset(
+        {
+            "sort", "order", "group", "filter", "top", "bottom", "limit", "only",
+            "exclude", "include", "ascending", "descending", "asc", "desc", "where",
+            "by", "per", "month", "year", "day", "week", "quarter", "between",
+            "above", "below", "more", "less", "greater", "fewer", "first", "last",
+            "max", "min", "maximum", "minimum", "average", "avg", "sum", "count",
+            "total", "highest", "lowest", "add", "remove", "region", "date",
+        }
+    )
+
+    @classmethod
+    def _is_ambiguous_followup(cls, question: str) -> bool:
+        """True when a follow-up carries no resolvable refinement (pure deixis).
+
+        Resolvable follow-ups ("only 2024", "now Europe", "sort descending",
+        "top 5") all carry a number, a refinement keyword, or a concrete content
+        word — those return False. Pure deictic phrases ("do that", "change it",
+        "the other one") have none and return True.
+        """
+        import re as _re
+
+        tokens = _re.findall(r"[a-z0-9]+", question.lower())
+        if not tokens:
+            return True
+        if any(any(ch.isdigit() for ch in t) for t in tokens):
+            return False
+        if set(tokens) & cls._REFINEMENT_KEYWORDS:
+            return False
+        # Any content word (>2 chars, not connective noise) makes it resolvable.
+        content = [t for t in tokens if len(t) > 2 and t not in cls._CLARIFY_NOISE]
+        return not content
+
+    def _needs_clarification(
+        self,
+        request: QueryRequest,
+        conversation_history: list[dict[str, Any]] | None,
+    ) -> str | None:
+        """Return a clarifying question when an ambiguous follow-up can't be resolved.
+
+        Only fires for detected follow-ups (single-turn and normal queries are
+        never affected) that are too vague to act on even with prior context.
+        Explicit corrections are handled by the correction path, not here.
+        """
+        if not conversation_history:
+            return None
+        if getattr(request, "is_correction", False):
+            return None
+        if not self._is_follow_up(request.question, conversation_history):
+            return None
+        if not self._is_ambiguous_followup(request.question):
+            return None
+        prev_q = str(conversation_history[-1].get("question", "") or "").strip()
+        example = f' (e.g. your previous request was "{prev_q}")' if prev_q else ""
+        return (
+            "Your follow-up is a bit ambiguous — I'm not sure what to change. "
+            "Could you say which column, filter, ordering, or limit you'd like to "
+            f"apply{example}?"
+        )
+
+    def _prune_conversation(
+        self, conversation_history: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        """Bound conversation history to recent turns before it reaches the LLM.
+
+        Delegates to PromptBudget.fit_conversation so prompt size stays bounded
+        across a long refinement session (recent turns verbatim, older ones
+        compressed/dropped). Recency is always preserved.
+        """
+        if not conversation_history:
+            return conversation_history
+        from nl_to_sql.services.prompt_budget import PromptBudget
+
+        budget = PromptBudget(conversation_max_turns=self._conversation_max_turns)
+        kept: list[dict[str, Any]]
+        truncations: list[str]
+        kept, truncations = budget.fit_conversation(
+            conversation_history, budget.budget_tokens
+        )
+        if truncations:
+            logger.info(
+                "Pruned conversation history",
+                original_turns=len(conversation_history),
+                kept_turns=len(kept),
+            )
+        return kept
+
+    async def _emit_clarification(
+        self,
+        request: QueryRequest,
+        dialect: str,
+        clarification_prompt: str,
+        start_time: float,
+    ) -> QueryResponse:
+        """Build (and persist) a clarification response for an ambiguous follow-up."""
+        response = QueryResponse(
+            question=request.question,
+            sql="",
+            dialect=dialect,
+            is_valid=False,
+            validation_errors=[],
+            retrieved_tables=[],
+            used_tables=[],
+            execution_result=None,
+            tokens_used=0,
+            cached=False,
+            message=clarification_prompt,
+            needs_clarification=True,
+            clarification_prompt=clarification_prompt,
+            intent_type="clarification",
+            query_complexity=0,
+            prompt_version="v1.0",
+            retrieval_method="none",
+            response_time_ms=int((time.time() - start_time) * 1000),
+        )
+        if self._session_service is not None and request.session_id:
+            try:
+                await self._session_service.add_message(
+                    session_id=request.session_id,
+                    question=request.question,
+                    response=response,
+                )
+            except Exception as sess_exc:
+                logger.warning(
+                    "Failed to save clarification to chat session — skipping",
+                    error=str(sess_exc),
+                )
+        return response
+
     # Bump this string whenever the prompt template changes to auto-invalidate old cache entries.
     PROMPT_VERSION = "v1.0"
 
@@ -655,25 +950,34 @@ class QueryOrchestrator:
             (cached_payload_or_None, layer) where layer ∈ {exact, semantic, miss}.
         """
         layer: CacheLayer = "miss"
-        cache_key = self._make_cache_key(question, dialect, self.PROMPT_VERSION)
+        cache_key = self._make_cache_key(question, dialect, self._connection_id, self.PROMPT_VERSION)
         cached = await self._cache.get(cache_key)
         if cached:
             layer = "exact"
         elif hasattr(self._cache, "get_semantic"):
-            cached = await self._cache.get_semantic(question, user_id=self._user_id)
+            cached = await self._cache.get_semantic(question, connection_id=self._connection_id)
             if cached:
                 layer = "semantic"
         get_cache_metrics().record(layer)
         return cached, layer
 
     @staticmethod
-    def _make_cache_key(question: str, dialect: str, prompt_version: str = "v1.0") -> str:
-        """Deterministic cache key from question + dialect + prompt version.
+    def _make_cache_key(
+        question: str, dialect: str, connection_id: str | None, prompt_version: str = "v1.0"
+    ) -> str:
+        """Deterministic cache key from question + dialect + connection + version.
 
-        Including prompt_version means changing PROMPT_VERSION automatically
-        invalidates all existing cache entries so stale SQL is never returned.
+        ``connection_id`` scopes the exact cache to a single database connection:
+        the same question against a different database produces different SQL, so
+        cache entries must never be shared across connections. ``prompt_version``
+        auto-invalidates old entries whenever the prompt template changes.
         """
-        raw = json.dumps({"q": question.strip().lower(), "d": dialect.lower(), "pv": prompt_version})
+        raw = json.dumps({
+            "q": question.strip().lower(),
+            "d": dialect.lower(),
+            "c": connection_id or "",
+            "pv": prompt_version,
+        })
         return f"nl2sql:{hashlib.sha256(raw.encode()).hexdigest()}"
 
     @staticmethod
@@ -764,7 +1068,7 @@ class QueryOrchestrator:
             pass
         return None
 
-    async def run_stream(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None) -> AsyncGenerator[dict[str, Any], None]:
+    async def run_stream(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None, certified_metrics: str | None = None) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming version of run() — yields chunks as they're generated.
 
         Yields:
@@ -913,6 +1217,24 @@ class QueryOrchestrator:
                 except Exception as hist_exc:
                     log.warning("Failed to load conversation history in stream", error=str(hist_exc))
 
+            # Conversation pruning + compression (bound prompt growth)
+            conversation_history = self._prune_conversation(conversation_history)
+
+            # Ambiguous follow-up clarification — ask instead of guessing
+            clarification_prompt = self._needs_clarification(request, conversation_history)
+            if clarification_prompt is not None:
+                log.info("Ambiguous follow-up — requesting clarification (stream)")
+                clar_response = await self._emit_clarification(
+                    request, dialect, clarification_prompt, start_time
+                )
+                yield PipelineStageEvent(
+                    status="complete",
+                    cached=False,
+                    data=clar_response.model_dump(),
+                    response_time_ms=clar_response.response_time_ms,
+                ).to_sse()
+                return
+
             # Fetch dynamic few-shot examples (#07)
             _stream_few_shot: list[dict[str, Any]] | None = None
             if self._training_data_service is not None and self._few_shot_enabled:
@@ -925,19 +1247,10 @@ class QueryOrchestrator:
                 except Exception as _shot_exc:
                     log.warning("Failed to load few-shot examples in stream", error=str(_shot_exc))
 
-            # Follow-up detection (#03) in stream mode
-            _stream_fu_words = {"it", "that", "same", "also", "now", "but", "instead", "this", "those", "then"}
-            _stream_effective_q = request.question
-            if (
-                len(request.question.split()) <= 12
-                and bool(_stream_fu_words & set(request.question.lower().split()))
-                and conversation_history
-            ):
-                _stream_effective_q = (
-                    f"{request.question}\n\n"
-                    f"[Context — this is a follow-up to the previous query:\n{conversation_history[-1]['sql']}]"
-                )
-                log.info("Follow-up detected in stream", question=request.question[:60])
+            # Context resolution: corrections + follow-ups (#03) in stream mode
+            _stream_effective_q = await self._build_effective_question(
+                request, conversation_history, log
+            )
 
             # Generate SQL with streaming and retry loop
             error_feedback: str | None = None
@@ -961,6 +1274,7 @@ class QueryOrchestrator:
                         custom_instructions=custom_instructions,
                         conversation_history=conversation_history,
                         few_shot_examples=_stream_few_shot,
+                        certified_metrics=certified_metrics,
                     )
                     generated_sql.attempt = attempt
                     stage_timings["generation"] = stage_timings.get("generation", 0) + int(
@@ -1086,7 +1400,7 @@ class QueryOrchestrator:
                 retrieval_method="vector",
                 response_time_ms=response_time_ms,
                 stage_timings=stage_timings,
-                suggested_chart=generated_sql.suggested_chart,
+                suggested_chart=_effective_chart(generated_sql.suggested_chart, execution_result),
                 follow_up_questions=generated_sql.follow_up_questions,
                 message=_stream_empty_warning,
             )
@@ -1107,10 +1421,10 @@ class QueryOrchestrator:
             # Cache if valid
             if validation.is_valid:
                 try:
-                    cache_key = self._make_cache_key(request.question, dialect, self.PROMPT_VERSION)
+                    cache_key = self._make_cache_key(request.question, dialect, self._connection_id, self.PROMPT_VERSION)
                     await self._cache.set(cache_key, response.model_dump())
                     if hasattr(self._cache, "set_semantic"):
-                        await self._cache.set_semantic(request.question, response.model_dump(), user_id=self._user_id)
+                        await self._cache.set_semantic(request.question, response.model_dump(), connection_id=self._connection_id)
                 except Exception as cache_exc:
                     log.warning("Failed to cache response", error=str(cache_exc))
 

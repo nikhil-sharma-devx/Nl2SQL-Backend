@@ -36,7 +36,10 @@ from nl_to_sql.api.routes import (
     auth,
     auth_sessions,
     config,
+    connections,
+    dashboards,
     data,
+    exports,
     favorited_tables,
     feedback,
     fine_tuning,
@@ -44,11 +47,13 @@ from nl_to_sql.api.routes import (
     health,
     history,
     instructions,
+    metrics,
     notification_prefs,
     profile,
     query,
     query_templates,
     saved_queries,
+    schedules,
     schema,
     sessions,
     training,
@@ -56,6 +61,7 @@ from nl_to_sql.api.routes import (
     usage,
     user_settings,
 )
+from nl_to_sql.api.dependencies import get_container
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.exceptions import NLToSQLBaseError
@@ -73,7 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     feedback_service = container.feedback_service()
     training_service = container.training_data_service()
     api_key_service = container.api_key_service()
-    user_db_service = container.user_db_service()
+    connection_service = container.connection_service()
 
     # Required services — errors propagate and abort startup
     await asyncio.gather(
@@ -87,12 +93,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         feedback_service.initialize(),
         training_service.initialize(),
         api_key_service.initialize(),
-        user_db_service.initialize(),
+        connection_service.initialize(),
         return_exceptions=True,
     )
     _log = structlog.get_logger()
     for name, result in zip(
-        ("analytics", "feedback", "training", "api_key", "user_db"),
+        ("analytics", "feedback", "training", "api_key", "connections"),
         opt_results,
         strict=True,
     ):
@@ -261,6 +267,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         )
 
+    # Start the scheduled-query scheduler (Scheduled Queries & Alerts). A separate,
+    # independent loop from the maintenance scheduler above — schedules need much
+    # finer-grained polling (default 60s) than once-a-day maintenance jobs.
+    scheduled_query_task: asyncio.Task[None] | None = None
+    if settings.scheduled_queries_enabled:
+        from nl_to_sql.workers.scheduled_query_worker import scheduled_query_scheduler_loop
+        scheduled_query_task = asyncio.create_task(
+            scheduled_query_scheduler_loop(
+                session_service._session_factory,
+                container,
+                settings.scheduled_query_check_interval_seconds,
+            )
+        )
+
     yield
 
     # Stop the maintenance scheduler
@@ -268,6 +288,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         maintenance_task.cancel()
         try:
             await maintenance_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # Stop the scheduled-query scheduler
+    if scheduled_query_task is not None:
+        scheduled_query_task.cancel()
+        try:
+            await scheduled_query_task
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -285,6 +313,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         feedback_service.dispose(),
         training_service.dispose(),
         api_key_service.dispose(),
+        connection_service.dispose(),
         return_exceptions=True,
     )
 
@@ -455,8 +484,12 @@ def create_app() -> FastAPI:
             enable_console_export=settings.otel_console_exporter,
         )
 
-    # Create container and wire dependencies
-    container = ApplicationContainer()
+    # Create container and wire dependencies. Reuses the same lru_cache'd
+    # instance that nl_to_sql.api.dependencies._get_container() hands to every
+    # route — otherwise routes resolve services off a second, never-initialized
+    # ApplicationContainer and singletons like ConnectionService/APIKeyService
+    # (which gate on .initialize() having run) blow up with a RuntimeError.
+    container = get_container()
     container.wire(modules=[
         "nl_to_sql.api.dependencies",
         "nl_to_sql.api.routes.auth",
@@ -482,6 +515,8 @@ def create_app() -> FastAPI:
         "nl_to_sql.api.routes.glossary",
         "nl_to_sql.api.routes.tutorial",
         "nl_to_sql.api.routes.notification_prefs",
+        "nl_to_sql.api.routes.exports",
+        "nl_to_sql.api.routes.dashboards",
     ])
 
     app = FastAPI(
@@ -570,6 +605,7 @@ def create_app() -> FastAPI:
     app.include_router(query.router)
     app.include_router(schema.router)
     app.include_router(config.router)
+    app.include_router(connections.router)
     app.include_router(history.router)
     app.include_router(sessions.router)
     app.include_router(analytics.router)
@@ -591,6 +627,10 @@ def create_app() -> FastAPI:
     app.include_router(glossary.router)
     app.include_router(tutorial.router)
     app.include_router(notification_prefs.router)
+    app.include_router(exports.router)
+    app.include_router(dashboards.router)
+    app.include_router(schedules.router)
+    app.include_router(metrics.router)
 
     structlog.get_logger(__name__).info(
         "Application created",

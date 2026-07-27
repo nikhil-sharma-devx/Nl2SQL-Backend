@@ -83,13 +83,13 @@ class RetrievalChain:
 
     @trace_function("retrieval.retrieve")
     async def retrieve(
-        self, question: str, user_id: str | None = None
+        self, question: str, connection_id: str | None = None
     ) -> list[SchemaChunk]:
         """Run the full retrieval pipeline and return ranked schema chunks.
 
         Args:
             question: The user's natural-language question.
-            user_id: When provided, restrict retrieval to this user's chunks
+            connection_id: When provided, restrict retrieval to this user's chunks
                 (plus shared/un-tagged chunks) for per-user isolation.
 
         Returns:
@@ -110,7 +110,7 @@ class RetrievalChain:
         dense_task = self._vector_retriever.retrieve(
             query_embedding=query_embedding,
             query_text=question,
-            user_id=user_id,
+            connection_id=connection_id,
         )
 
         dense_chunks: list[SchemaChunk]
@@ -178,18 +178,18 @@ class RetrievalChain:
     async def get_schema_for_tables(
         self,
         table_names: list[str],
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Fetch exact schema chunks by table name (deterministic).
 
         Used in Phase C of two-phase schema grounding.
         """
         return await self._vector_retriever.get_schema_for_tables(  # type: ignore[no-any-return]
-            table_names, user_id=user_id
+            table_names, connection_id=connection_id
         )
 
-    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
+    async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         """Return all table names in the vector store (optionally per user)."""
         return await self._vector_retriever.get_all_table_names(  # type: ignore[no-any-return]
-            user_id=user_id
+            connection_id=connection_id
         )

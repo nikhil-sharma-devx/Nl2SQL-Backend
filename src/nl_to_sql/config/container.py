@@ -11,6 +11,7 @@ from nl_to_sql.config.factories import (
     build_cache,
     build_embedder,
     build_llm_provider,
+    build_semantic_cache_store,
     build_vector_store,
     create_llm_provider,
 )
@@ -28,9 +29,14 @@ from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
 from nl_to_sql.services.analytics_service import AnalyticsService
 from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.connection_service import ConnectionService
+from nl_to_sql.services.correction_detector import CorrectionDetector
+from nl_to_sql.services.dashboard_service import DashboardService
+from nl_to_sql.services.export_service import ExportService
 from nl_to_sql.services.feedback_learner import FeedbackLearner
 from nl_to_sql.services.feedback_service import FeedbackService
 from nl_to_sql.services.fine_tuning_service import FineTuningService
+from nl_to_sql.services.metrics_service import MetricsService
 from nl_to_sql.services.prompt_manager import PromptManager
 from nl_to_sql.services.query_classifier import QueryClassifier
 from nl_to_sql.services.query_expander import QueryExpander
@@ -38,16 +44,18 @@ from nl_to_sql.services.query_history import QueryHistoryService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
 from nl_to_sql.services.query_rewriter import QueryRewriter
 from nl_to_sql.services.reranker import CrossEncoderReranker
+from nl_to_sql.services.scheduled_query_service import ScheduledQueryService
 from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
+from nl_to_sql.services.schema_doc_service import SchemaDocService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 from nl_to_sql.services.schema_monitor import SchemaMonitor
 from nl_to_sql.services.schema_retriever import SchemaRetriever
 from nl_to_sql.services.sql_column_validator import SQLColumnValidator
 from nl_to_sql.services.sql_generator import SQLGeneratorService
 from nl_to_sql.services.sql_validator import SQLValidatorService
+from nl_to_sql.services.starter_content_service import StarterContentService
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
-from nl_to_sql.services.user_db_service import UserDbConnectionService
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
@@ -88,13 +96,20 @@ class ApplicationContainer(containers.DeclarativeContainer):
         settings=config,
     )
 
+    # Dedicated vector store for the semantic cache — kept separate from the
+    # schema `vector_store` so cache entries never pollute the schema collection
+    # (see build_semantic_cache_store).
+    semantic_cache_vector_store = providers.Singleton(
+        build_semantic_cache_store,
+        settings=config,
+    )
+
     semantic_cache = providers.Singleton(
         SemanticCache,
         embedder=embedder,
-        vector_store=vector_store,
+        vector_store=semantic_cache_vector_store,
         exact_cache=cache,
         threshold=config.provided.semantic_cache_threshold,
-        collection_name=config.provided.semantic_cache_collection,
     )
 
     active_cache = providers.Selector(
@@ -118,9 +133,9 @@ class ApplicationContainer(containers.DeclarativeContainer):
 
     # ── Services ──────────────────────────────────────────────────────────────
 
-    # ── User DB Connection Service (BYOD — per-user encrypted database URLs) ─
-    user_db_service = providers.Singleton(
-        UserDbConnectionService,
+    # ── Connection Service (BYOD — per-user *multiple* encrypted connections) ─
+    connection_service = providers.Singleton(
+        ConnectionService,
         database_url=config.provided.history_database_url,
         secret_key=config.provided.secret_key,
     )
@@ -266,6 +281,25 @@ class ApplicationContainer(containers.DeclarativeContainer):
         secret_key=config.provided.secret_key,
     )
 
+    # ── Export & Share Service ───────────────────────────────────────────────
+    export_service = providers.Singleton(
+        ExportService,
+        settings=config,
+    )
+
+    # ── Dashboard Service (Auto Charting & Dashboards) ───────────────────────
+    dashboard_service = providers.Singleton(
+        DashboardService,
+        session_factory=session_service.provided._session_factory,
+    )
+
+    # ── Scheduled Query Service (Scheduled Queries & Alerts) ─────────────────
+    scheduled_query_service = providers.Singleton(
+        ScheduledQueryService,
+        session_factory=session_service.provided._session_factory,
+        connection_service=connection_service,
+    )
+
     # ── Query Classification ─────────────────────────────────────────────────
     query_classifier = providers.Singleton(QueryClassifier)
 
@@ -281,6 +315,9 @@ class ApplicationContainer(containers.DeclarativeContainer):
         llm_provider=llm_provider,
         enabled=config.provided.query_rewriting_enabled,
     )
+
+    # ── Correction Detector (Natural Language Data Corrections) ──────────────
+    correction_detector = providers.Singleton(CorrectionDetector)
 
     # ── Prompt Manager ───────────────────────────────────────────────────────
     prompt_manager = providers.Singleton(
@@ -334,6 +371,36 @@ class ApplicationContainer(containers.DeclarativeContainer):
         per_user_isolation=config.provided.schema_per_user_isolation,
     )
 
+    # ── Metrics Service (Semantic Layer / Metrics Catalog) ───────────────────
+    metrics_service = providers.Singleton(
+        MetricsService,
+        session_factory=session_service.provided._session_factory,
+        column_validator=column_validator,
+        schema_catalog_service=schema_catalog_service,
+    )
+
+    # ── Starter Content Service (seeds built-in Templates/Metrics/Schedules/Dashboards) ─
+    starter_content_service = providers.Singleton(
+        StarterContentService,
+        session_factory=session_service.provided._session_factory,
+        metrics_service=metrics_service,
+        scheduled_query_service=scheduled_query_service,
+        dashboard_service=dashboard_service,
+    )
+
+    # ── Schema Doc Service (RAG-powered table/column explanations) ───────────
+    # Factory (not Singleton) so each request picks up the current llm_provider,
+    # honouring any runtime provider switch via PUT /api/v1/config/llm.
+    schema_doc_service = providers.Factory(
+        SchemaDocService,
+        catalog=schema_catalog_service,
+        vector_store=vector_store,
+        llm_provider=llm_provider,
+        cache=cache,
+        per_user_isolation=config.provided.schema_per_user_isolation,
+        cache_ttl_seconds=config.provided.cache_ttl_seconds,
+    )
+
     # ── Schema Monitor ───────────────────────────────────────────────────────
     schema_monitor = providers.Singleton(
         SchemaMonitor,
@@ -376,6 +443,9 @@ class ApplicationContainer(containers.DeclarativeContainer):
         adaptive_top_k_enabled=config.provided.rag_adaptive_top_k_enabled,
         top_k_min=config.provided.rag_adaptive_top_k_min,
         top_k_max=config.provided.rag_adaptive_top_k_max,
+        query_rewriter=query_rewriter,
+        correction_detector=correction_detector,
+        conversation_max_turns=config.provided.conversation_max_turns,
     )
 
     @staticmethod

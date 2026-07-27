@@ -71,17 +71,17 @@ class SchemaIngestionService:
         self._parent_child_enabled = parent_child_enabled
 
     async def ingest(
-        self, schema: SchemaMetadata, reset: bool = False, user_id: str | None = None
+        self, schema: SchemaMetadata, reset: bool = False, connection_id: str | None = None
     ) -> int:
         """Ingest a SchemaMetadata object into the vector store.
 
         Args:
             schema: Parsed schema with all tables and columns.
             reset: If True, clears existing chunks before ingesting.
-            user_id: When provided (per-user isolation), each chunk is tagged
+            connection_id: When provided (per-user isolation), each chunk is tagged
                 with this owner and its id is namespaced so it never collides
                 with another user's chunks. ``reset`` then clears only this
-                user's chunks (via ``delete_by_user`` if the store supports it)
+                user's chunks (via ``delete_by_connection`` if the store supports it)
                 instead of the whole collection. ``None`` preserves the shared
                 single-collection behaviour.
 
@@ -91,14 +91,14 @@ class SchemaIngestionService:
         Raises:
             SchemaIngestionError: On embedding or vector store errors.
         """
-        log = logger.bind(database=schema.database_name, dialect=schema.dialect, user_id=user_id)
+        log = logger.bind(database=schema.database_name, dialect=schema.dialect, connection_id=connection_id)
         log.info("Starting schema ingestion", table_count=len(schema.tables))
 
         if reset:
-            if user_id is not None and hasattr(self._vector_store, "delete_by_user"):
+            if connection_id is not None and hasattr(self._vector_store, "delete_by_connection"):
                 log.info("Resetting user's schema chunks")
-                await self._vector_store.delete_by_user(user_id)
-            elif user_id is None:
+                await self._vector_store.delete_by_connection(connection_id)
+            elif connection_id is None:
                 # A shared re-ingest must not destroy per-user chunks when
                 # isolation is active — delete only the shared/un-tagged chunks.
                 if self._per_user_isolation and hasattr(self._vector_store, "delete_shared"):
@@ -117,9 +117,9 @@ class SchemaIngestionService:
                 log.warning("Table description enrichment failed — continuing", error=str(exc))
 
         chunks = [self._table_to_chunk(table) for table in schema.tables]
-        if user_id is not None:
+        if connection_id is not None:
             for chunk in chunks:
-                chunk.chunk_id = f"{user_id}:{chunk.chunk_id}"
+                chunk.chunk_id = f"{connection_id}:{chunk.chunk_id}"
 
         # P4 — derive column-level child chunks from each (namespaced) parent so
         # fine-grained retrieval hits still resolve to the full table DDL.
@@ -142,11 +142,11 @@ class SchemaIngestionService:
             chunk.embedding = embedding
 
         try:
-            await self._vector_store.upsert(chunks, user_id=user_id)
+            await self._vector_store.upsert(chunks, connection_id=connection_id)
 
             # Store the hash in the vector store (global hash — only meaningful
             # for the shared-collection path; skipped for per-user ingestion).
-            if user_id is None and hasattr(self._vector_store, 'update_schema_hash'):
+            if connection_id is None and hasattr(self._vector_store, 'update_schema_hash'):
                 schema_hash = self.compute_schema_hash(schema)
                 self._vector_store.update_schema_hash(schema_hash)
                 log.info("Schema hash stored for change detection", hash=schema_hash[:16])

@@ -1,16 +1,18 @@
-"""SchemaCatalogService — owns the per-user schema catalog (source of truth).
+"""SchemaCatalogService — owns the per-connection schema catalog (source of truth).
 
 The catalog (``user_schemas`` + ``user_schema_tables`` in Supabase) is the
 authoritative record the Schema page reads from; Qdrant is a disposable index
-rebuilt from the catalog. This service:
+rebuilt from the catalog. Every catalog row is scoped to a single database
+**connection** (``connection_id``) so each of a user's connections keeps its own
+tables, and ``user_id`` is retained for ownership + favourites. This service:
 
   - reads the catalog with pin/``is_new`` status joined (``get_catalog``),
-  - reflects a user's live DB into the catalog (``sync_from_live_db``),
+  - reflects a connection's live DB into the catalog (``sync_from_live_db``),
   - overlays/replaces an uploaded JSON schema (``apply_upload``),
   - edits sticky ``user_description`` (``set_table_description``),
   - clears the "new table" badge (``mark_seen``),
 
-and re-embeds the affected user's chunks after any write.
+and re-embeds the affected connection's chunks after any write.
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ class UploadResult:
 
 
 class SchemaCatalogService:
-    """Owns the per-user schema catalog tables and keeps Qdrant in sync."""
+    """Owns the per-connection schema catalog tables and keeps Qdrant in sync."""
 
     def __init__(
         self,
@@ -65,15 +67,19 @@ class SchemaCatalogService:
     # ── Read model ────────────────────────────────────────────────────────────
 
     async def get_catalog(
-        self, user_id: str, schema_name: str | None = None
+        self, user_id: str, connection_id: str, schema_name: str | None = None
     ) -> dict[str, Any]:
-        """Return the catalog for a user with ``pinned`` + ``is_new`` joined."""
+        """Return the catalog for a connection with ``pinned`` + ``is_new`` joined."""
         async with self._session_factory() as db:
             header = (
-                await db.execute(select(UserSchema).where(UserSchema.user_id == user_id))
+                await db.execute(
+                    select(UserSchema).where(UserSchema.connection_id == connection_id)
+                )
             ).scalar_one_or_none()
 
-            q = select(UserSchemaTable).where(UserSchemaTable.user_id == user_id)
+            q = select(UserSchemaTable).where(
+                UserSchemaTable.connection_id == connection_id
+            )
             if schema_name:
                 q = q.where(UserSchemaTable.schema_name == schema_name)
             q = q.order_by(UserSchemaTable.table_name)
@@ -113,10 +119,11 @@ class SchemaCatalogService:
     async def sync_from_live_db(
         self,
         user_id: str,
+        connection_id: str,
         db_client: AsyncDatabaseClient,
         schema_name: str = "public",
     ) -> SyncResult:
-        """Reflect the user's live DB into the catalog, then re-embed if changed."""
+        """Reflect the connection's live DB into the catalog, then re-embed if changed."""
         loader = SchemaLoader(db_client)
         schema = await loader.load(schema_name)
         new_hash = SchemaIngestionService.compute_schema_hash(schema)
@@ -126,14 +133,16 @@ class SchemaCatalogService:
 
         async with self._session_factory() as db:
             header = (
-                await db.execute(select(UserSchema).where(UserSchema.user_id == user_id))
+                await db.execute(
+                    select(UserSchema).where(UserSchema.connection_id == connection_id)
+                )
             ).scalar_one_or_none()
             old_hash = header.schema_hash if header else None
 
             rows = (
                 await db.execute(
                     select(UserSchemaTable).where(
-                        UserSchemaTable.user_id == user_id,
+                        UserSchemaTable.connection_id == connection_id,
                         UserSchemaTable.schema_name == schema_name,
                     )
                 )
@@ -147,6 +156,7 @@ class SchemaCatalogService:
                     db.add(
                         UserSchemaTable(
                             user_id=user_id,
+                            connection_id=connection_id,
                             schema_name=schema_name,
                             table_name=t.name,
                             source="reflected",
@@ -170,7 +180,7 @@ class SchemaCatalogService:
                     await db.delete(r)
 
             if header is None:
-                header = UserSchema(user_id=user_id)
+                header = UserSchema(user_id=user_id, connection_id=connection_id)
                 db.add(header)
             header.database_name = schema.database_name
             header.dialect = schema.dialect
@@ -178,16 +188,17 @@ class SchemaCatalogService:
             header.schema_hash = new_hash
 
             await db.flush()
-            header.source = await self._derive_source(db, user_id)
+            header.source = await self._derive_source(db, connection_id)
             await db.commit()
 
         changed = old_hash != new_hash or bool(new_tables)
         if changed:
-            await self._reembed(user_id)
+            await self._reembed(user_id, connection_id)
 
         logger.info(
             "Schema catalog synced",
             user_id=user_id,
+            connection_id=connection_id,
             changed=changed,
             new_tables=new_tables,
             total=len(live_names),
@@ -197,7 +208,7 @@ class SchemaCatalogService:
     # ── Upload (BYOS path) ────────────────────────────────────────────────────
 
     async def apply_upload(
-        self, user_id: str, raw_json: dict[str, Any], replace: bool
+        self, user_id: str, connection_id: str, raw_json: dict[str, Any], replace: bool
     ) -> UploadResult:
         """Overlay (or replace) the catalog from an uploaded JSON, then re-embed."""
         schema = self._parse_upload(raw_json)
@@ -206,21 +217,27 @@ class SchemaCatalogService:
 
         async with self._session_factory() as db:
             header = (
-                await db.execute(select(UserSchema).where(UserSchema.user_id == user_id))
+                await db.execute(
+                    select(UserSchema).where(UserSchema.connection_id == connection_id)
+                )
             ).scalar_one_or_none()
             if header is None:
-                header = UserSchema(user_id=user_id)
+                header = UserSchema(user_id=user_id, connection_id=connection_id)
                 db.add(header)
 
             if replace:
                 await db.execute(
-                    delete(UserSchemaTable).where(UserSchemaTable.user_id == user_id)
+                    delete(UserSchemaTable).where(
+                        UserSchemaTable.connection_id == connection_id
+                    )
                 )
                 existing: dict[tuple[str, str], UserSchemaTable] = {}
             else:
                 rows = (
                     await db.execute(
-                        select(UserSchemaTable).where(UserSchemaTable.user_id == user_id)
+                        select(UserSchemaTable).where(
+                            UserSchemaTable.connection_id == connection_id
+                        )
                     )
                 ).scalars().all()
                 existing = {(r.schema_name, r.table_name): r for r in rows}
@@ -233,6 +250,7 @@ class SchemaCatalogService:
                     db.add(
                         UserSchemaTable(
                             user_id=user_id,
+                            connection_id=connection_id,
                             schema_name=t.schema_name,
                             table_name=t.name,
                             source="uploaded",
@@ -258,13 +276,14 @@ class SchemaCatalogService:
             header.last_synced_at = now
 
             await db.flush()
-            header.source = await self._derive_source(db, user_id)
+            header.source = await self._derive_source(db, connection_id)
             await db.commit()
 
-        await self._reembed(user_id)
+        await self._reembed(user_id, connection_id)
         logger.info(
             "Schema upload applied",
             user_id=user_id,
+            connection_id=connection_id,
             tables=len(schema.tables),
             replaced=replace,
         )
@@ -273,7 +292,7 @@ class SchemaCatalogService:
     # ── Descriptions & seen flags ─────────────────────────────────────────────
 
     async def set_table_description(
-        self, user_id: str, table_id: int, text: str | None
+        self, user_id: str, connection_id: str, table_id: int, text: str | None
     ) -> dict[str, Any] | None:
         """Set the sticky ``user_description`` on a table and re-embed."""
         async with self._session_factory() as db:
@@ -281,7 +300,7 @@ class SchemaCatalogService:
                 await db.execute(
                     select(UserSchemaTable).where(
                         UserSchemaTable.id == table_id,
-                        UserSchemaTable.user_id == user_id,
+                        UserSchemaTable.connection_id == connection_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -300,10 +319,12 @@ class SchemaCatalogService:
                 "is_new": row.is_new,
                 "last_seen_at": row.last_seen_at,
             }
-        await self._reembed(user_id)
+        await self._reembed(user_id, connection_id)
         return result
 
-    async def mark_seen(self, user_id: str, table_ids: list[int]) -> int:
+    async def mark_seen(
+        self, user_id: str, connection_id: str, table_ids: list[int]
+    ) -> int:
         """Clear the ``is_new`` flag for the given tables. Returns rows updated."""
         if not table_ids:
             return 0
@@ -311,7 +332,7 @@ class SchemaCatalogService:
             rows = (
                 await db.execute(
                     select(UserSchemaTable).where(
-                        UserSchemaTable.user_id == user_id,
+                        UserSchemaTable.connection_id == connection_id,
                         UserSchemaTable.id.in_(table_ids),
                     )
                 )
@@ -321,16 +342,30 @@ class SchemaCatalogService:
             await db.commit()
             return len(rows)
 
+    async def delete_catalog(self, connection_id: str) -> None:
+        """Remove a connection's catalog rows + header (called on connection delete)."""
+        async with self._session_factory() as db:
+            await db.execute(
+                delete(UserSchemaTable).where(
+                    UserSchemaTable.connection_id == connection_id
+                )
+            )
+            await db.execute(
+                delete(UserSchema).where(UserSchema.connection_id == connection_id)
+            )
+            await db.commit()
+        logger.info("Schema catalog deleted", connection_id=connection_id)
+
     # ── Internals ─────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def _derive_source(db: AsyncSession, user_id: str) -> str:
+    async def _derive_source(db: AsyncSession, connection_id: str) -> str:
         """Header source from the set of per-table sources: merged/uploaded/reflected."""
         sources = set(
             (
                 await db.execute(
                     select(UserSchemaTable.source).where(
-                        UserSchemaTable.user_id == user_id
+                        UserSchemaTable.connection_id == connection_id
                     )
                 )
             ).scalars().all()
@@ -362,26 +397,28 @@ class SchemaCatalogService:
             tables=tables,
         )
 
-    async def _reembed(self, user_id: str) -> None:
-        """Rebuild the user's Qdrant chunks from the catalog. Non-fatal on error."""
+    async def _reembed(self, user_id: str, connection_id: str) -> None:
+        """Rebuild the connection's Qdrant chunks from the catalog. Non-fatal on error."""
         try:
             async with self._session_factory() as db:
                 header = (
                     await db.execute(
-                        select(UserSchema).where(UserSchema.user_id == user_id)
+                        select(UserSchema).where(
+                            UserSchema.connection_id == connection_id
+                        )
                     )
                 ).scalar_one_or_none()
                 rows = (
                     await db.execute(
                         select(UserSchemaTable).where(
-                            UserSchemaTable.user_id == user_id
+                            UserSchemaTable.connection_id == connection_id
                         )
                     )
                 ).scalars().all()
             if not rows:
                 return
             schema = self._catalog_to_schema(header, list(rows))
-            uid = user_id if self._isolation else None
+            cid = connection_id if self._isolation else None
             # Honour runtime RAG ingestion toggles (P1 descriptions, P4 parent-child)
             # set via PUT /config/rag — this service is a captured singleton, so its
             # construction-time flags are stale without this refresh.
@@ -391,9 +428,46 @@ class SchemaCatalogService:
                 descriptions_enabled=s.rag_schema_descriptions_enabled,
                 parent_child_enabled=s.rag_parent_child_chunking_enabled,
             )
-            await self._ingestion.ingest(schema, reset=True, user_id=uid)
+            await self._ingestion.ingest(schema, reset=True, connection_id=cid)
         except Exception as exc:
-            logger.warning("Catalog re-embed failed", user_id=user_id, error=str(exc))
+            logger.warning(
+                "Catalog re-embed failed",
+                user_id=user_id,
+                connection_id=connection_id,
+                error=str(exc),
+            )
+
+    async def ensure_embedded(
+        self, user_id: str, connection_id: str, current_vector_count: int
+    ) -> None:
+        """Lazily rebuild a connection's vectors from the catalog when empty.
+
+        Self-heals legacy connections whose Qdrant chunks were tagged under the
+        old ``user_id`` key (pre multi-connection) and therefore no longer match
+        the ``connection_id`` scope: if the store has 0 chunks for this connection
+        but the catalog still holds its tables, re-embed them once.
+        """
+        if current_vector_count > 0:
+            return
+        if await self.has_vectors(connection_id):
+            logger.info(
+                "Lazy re-embed for connection with empty vector store",
+                user_id=user_id,
+                connection_id=connection_id,
+            )
+            await self._reembed(user_id, connection_id)
+
+    async def has_vectors(self, connection_id: str) -> bool:
+        """True if the connection's catalog has any tables (used for lazy re-embed)."""
+        async with self._session_factory() as db:
+            row = (
+                await db.execute(
+                    select(UserSchemaTable.id).where(
+                        UserSchemaTable.connection_id == connection_id
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+        return row is not None
 
     @staticmethod
     def _parse_upload(raw: dict[str, Any]) -> SchemaMetadata:

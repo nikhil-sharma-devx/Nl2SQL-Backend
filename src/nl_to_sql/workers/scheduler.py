@@ -29,6 +29,42 @@ _RETENTION_LOCK_KEY = "nl2sql_retention_cleanup"
 _DIGEST_LOCK_KEY = "nl2sql_email_digest"
 
 
+async def try_advisory_lock(
+    session_factory: async_sessionmaker[AsyncSession], lock_key: str
+) -> bool:
+    """Attempt to acquire a Postgres advisory lock keyed by ``lock_key``.
+
+    Returns ``True`` if acquired (including the non-PostgreSQL/error fallback,
+    which proceeds unconditionally — single-process deployments are the common
+    case). Shared by the job-level lock (:func:`_run_with_advisory_lock`) and
+    any per-row lock (e.g. one per ``ScheduledQuery``, in
+    ``workers/scheduled_query_worker.py``) so both use the identical primitive.
+    """
+    try:
+        async with session_factory() as db:
+            result = await db.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:k))"),
+                {"k": lock_key},
+            )
+            return bool(result.scalar())
+    except Exception:
+        return True  # Non-PostgreSQL or lock unavailable — proceed anyway.
+
+
+async def advisory_unlock(
+    session_factory: async_sessionmaker[AsyncSession], lock_key: str
+) -> None:
+    """Release a previously-acquired advisory lock. Never raises."""
+    try:
+        async with session_factory() as db:
+            await db.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:k))"),
+                {"k": lock_key},
+            )
+    except Exception:
+        pass
+
+
 async def _run_with_advisory_lock(
     session_factory: async_sessionmaker[AsyncSession],
     lock_key: str,
@@ -36,20 +72,9 @@ async def _run_with_advisory_lock(
 ) -> None:
     """Run ``coro_factory`` only if this process wins the advisory lock.
 
-    The lock is held for the duration of the job and released afterwards. On a
-    non-PostgreSQL backend (or if the lock call fails) we fall back to running
-    the job unconditionally — single-process deployments are the common case.
+    The lock is held for the duration of the job and released afterwards.
     """
-    acquired = False
-    try:
-        async with session_factory() as db:
-            result = await db.execute(
-                text("SELECT pg_try_advisory_lock(hashtext(:k))"),
-                {"k": lock_key},
-            )
-            acquired = bool(result.scalar())
-    except Exception:
-        acquired = True  # Non-PostgreSQL or lock unavailable — proceed anyway.
+    acquired = await try_advisory_lock(session_factory, lock_key)
 
     if not acquired:
         logger.info("scheduler: another worker holds the lock — skipping", job=lock_key)
@@ -61,14 +86,7 @@ async def _run_with_advisory_lock(
     except Exception as exc:
         logger.error("scheduler: job failed", job=lock_key, error=str(exc))
     finally:
-        try:
-            async with session_factory() as db:
-                await db.execute(
-                    text("SELECT pg_advisory_unlock(hashtext(:k))"),
-                    {"k": lock_key},
-                )
-        except Exception:
-            pass
+        await advisory_unlock(session_factory, lock_key)
 
 
 async def run_maintenance_jobs(

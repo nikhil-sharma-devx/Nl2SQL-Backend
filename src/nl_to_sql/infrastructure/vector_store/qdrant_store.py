@@ -52,34 +52,93 @@ def _to_uuid(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id))
 
 
-def _user_scope_should(user_id: str | None) -> list[Any] | None:
+def _user_scope_should(connection_id: str | None) -> list[Any] | None:
     """OR-conditions scoping reads to a user's own chunks *plus* shared ones.
 
     When per-user isolation is active the caller passes the authenticated
-    ``user_id``; a point is then visible if it is tagged with that user
-    (``user_id == X``) **or** is un-tagged/shared (the ``user_id`` payload is
+    ``connection_id``; a point is then visible if it is tagged with that user
+    (``connection_id == X``) **or** is un-tagged/shared (the ``connection_id`` payload is
     missing — e.g. the default database schema ingested globally at startup).
     Returns ``None`` when no user scoping is requested (shared-only behaviour).
     """
-    if user_id is None:
+    if connection_id is None:
         return None
     return [
-        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-        IsEmptyCondition(is_empty=PayloadField(key="user_id")),
+        FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
+        IsEmptyCondition(is_empty=PayloadField(key="connection_id")),
     ]
 
 
-def _no_hash_filter(user_id: str | None = None) -> Filter:
-    """Base filter that excludes the hash sentinel, optionally scoped to a user.
+def _no_hash_filter(
+    connection_id: str | None = None,
+    reserved_types: tuple[str, ...] = ("schema_hash",),
+) -> Filter:
+    """Base read filter: excludes reserved non-schema point types, optionally
+    scoped to a user.
 
-    With a ``user_id`` the read matches the user's own chunks OR shared
+    ``reserved_types`` are point ``type``s that must never surface in a schema
+    read/count — always the ``schema_hash`` sentinel, plus ``semantic_cache`` on
+    the schema collection so any legacy cache points written there (before the
+    cache got its own collection) stay invisible to retrieval and the chunk
+    count. The cache's *own* store keeps the default (``schema_hash`` only) so
+    its ``semantic_cache`` points remain searchable.
+
+    With a ``connection_id`` the read matches the user's own chunks OR shared
     (un-tagged) chunks via ``should`` (at-least-one-must-match), so users on
     the default shared database still retrieve its schema.
     """
-    return Filter(
-        should=_user_scope_should(user_id),
-        must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))],
+    type_match = (
+        MatchAny(any=list(reserved_types))
+        if len(reserved_types) > 1
+        else MatchValue(value=reserved_types[0])
     )
+    return Filter(
+        should=_user_scope_should(connection_id),
+        must_not=[FieldCondition(key="type", match=type_match)],
+    )
+
+
+def _dedupe_prefer_own(items: list[Any], requesting_user: str | None) -> list[Any]:
+    """Collapse points sharing a ``(schema_name, table_name)`` to a single one,
+    preferring the requesting user's own (``connection_id``-tagged) point over the
+    shared (un-tagged) copy — "own-else-shared" visibility.
+
+    With own-OR-shared reads a user who has re-embedded their own copy of a table
+    also matches the shared copy, so both would be returned — wasting retrieval
+    slots and double-weighting the table in fusion/reranking. This keeps the
+    user's own chunk when present, else the shared one, preserving original order
+    (i.e. rank). No-op when unscoped (``requesting_user is None``).
+
+    Column-level child chunks (P4, ``is_child``) are passed through untouched:
+    they share a ``table_name`` but are distinct columns and must not collapse.
+    Operates on any object exposing a ``.payload`` dict (query points / scroll
+    records).
+    """
+    if requesting_user is None:
+        return items
+    kept: list[Any] = []
+    index_by_table: dict[tuple[str, str], int] = {}
+    for item in items:
+        payload = item.payload or {}
+        if payload.get("is_child"):
+            kept.append(item)
+            continue
+        table = payload.get("table_name", "")
+        if not table:
+            kept.append(item)
+            continue
+        key = (payload.get("schema_name", "public"), table)
+        existing_idx = index_by_table.get(key)
+        if existing_idx is None:
+            index_by_table[key] = len(kept)
+            kept.append(item)
+        elif payload.get("connection_id") == requesting_user:
+            existing_payload = kept[existing_idx].payload or {}
+            if existing_payload.get("connection_id") != requesting_user:
+                # Replace the shared duplicate with the user's own copy, keeping
+                # the earlier (higher-ranked) position.
+                kept[existing_idx] = item
+    return kept
 
 
 def _payload_to_chunk(payload: dict[str, Any]) -> SchemaChunk:
@@ -114,6 +173,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         api_key: str | None = None,
         collection_name: str = "schema_chunks",
         dimensions: int = 384,
+        non_schema_types: tuple[str, ...] = ("schema_hash",),
     ) -> None:
         client_kwargs: dict[str, Any] = {
             "url": url,
@@ -124,6 +184,10 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self._client = AsyncQdrantClient(**client_kwargs)
         self._collection_name = collection_name
         self._dimensions = dimensions
+        # Point ``type``s excluded from every schema read/count. The schema store
+        # adds ``semantic_cache`` here so stray cache points never leak into
+        # retrieval; the cache's own store keeps only ``schema_hash``.
+        self._reserved_types = non_schema_types
         self._sparse_model: Any = None
         self._schema_hash: str | None = None
         self._initialized = False
@@ -206,7 +270,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                 pass
 
         # Ensure payload indexes exist (idempotent — safe to call on existing collections)
-        for field in ("table_name", "type", "user_id"):
+        for field in ("table_name", "type", "connection_id"):
             try:
                 await self._client.create_payload_index(
                     collection_name=self._collection_name,
@@ -235,7 +299,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
 
     # ── IVectorStore ──────────────────────────────────────────────────────────
 
-    async def upsert(self, chunks: list[SchemaChunk], user_id: str | None = None) -> None:
+    async def upsert(self, chunks: list[SchemaChunk], connection_id: str | None = None) -> None:
         await self._ensure_initialized()
         valid = [c for c in chunks if c.embedding is not None]
         if not valid:
@@ -261,7 +325,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                     "schema_name": c.schema_name,
                     "content": c.content,
                     "type": "chunk",
-                    **({"user_id": user_id} if user_id is not None else {}),
+                    **({"connection_id": connection_id} if connection_id is not None else {}),
                     **c.metadata,
                 },
             )
@@ -283,19 +347,23 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self,
         query_embedding: list[float],
         top_k: int = 5,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         await self._ensure_initialized()
-        no_hash = _no_hash_filter(user_id)
+        no_hash = _no_hash_filter(connection_id, self._reserved_types)
+        # Over-fetch when user-scoped so own-else-shared dedup still yields top_k
+        # (a table has at most a shared + an own copy, so 2x is sufficient).
+        fetch_k = top_k * 2 if connection_id is not None else top_k
         response = await self._client.query_points(
             collection_name=self._collection_name,
             query=query_embedding,
             using="dense",
             query_filter=no_hash,
-            limit=top_k,
+            limit=fetch_k,
             with_payload=True,
         )
-        return [_payload_to_chunk(p.payload or {}) for p in response.points]
+        points = _dedupe_prefer_own(list(response.points), connection_id)[:top_k]
+        return [_payload_to_chunk(p.payload or {}) for p in points]
 
     async def hybrid_search(
         self,
@@ -303,34 +371,37 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         query_embedding: list[float],
         top_k: int = 5,
         alpha: float = 0.5,
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Dense + BM42 sparse search fused with Qdrant's RRF."""
         await self._ensure_initialized()
-        no_hash = _no_hash_filter(user_id)
+        no_hash = _no_hash_filter(connection_id, self._reserved_types)
         sparse_q = await asyncio.to_thread(self._embed_sparse_query, query_text)
+        # Over-fetch when user-scoped so own-else-shared dedup still yields top_k.
+        fetch_k = top_k * 2 if connection_id is not None else top_k
         response = await self._client.query_points(
             collection_name=self._collection_name,
             prefetch=[
                 Prefetch(
                     query=query_embedding,
                     using="dense",
-                    limit=top_k * 2,
+                    limit=fetch_k * 2,
                     filter=no_hash,
                 ),
                 Prefetch(
                     query=sparse_q,
                     using="sparse",
-                    limit=top_k * 2,
+                    limit=fetch_k * 2,
                     filter=no_hash,
                 ),
             ],
             query=FusionQuery(fusion=Fusion.RRF),
             query_filter=no_hash,
-            limit=top_k,
+            limit=fetch_k,
             with_payload=True,
         )
-        return [_payload_to_chunk(p.payload or {}) for p in response.points]
+        points = _dedupe_prefer_own(list(response.points), connection_id)[:top_k]
+        return [_payload_to_chunk(p.payload or {}) for p in points]
 
     async def delete_collection(self) -> None:
         try:
@@ -344,28 +415,28 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self._initialized = False
         self._schema_hash = None
 
-    async def count(self, user_id: str | None = None) -> int:
+    async def count(self, connection_id: str | None = None) -> int:
         await self._ensure_initialized()
         result = await self._client.count(
             collection_name=self._collection_name,
-            count_filter=_no_hash_filter(user_id),
+            count_filter=_no_hash_filter(connection_id, self._reserved_types),
             exact=True,
         )
         return result.count
 
-    async def delete_by_user(self, user_id: str) -> None:
+    async def delete_by_connection(self, connection_id: str) -> None:
         """Delete all of a user's chunks (per-user reset). Best-effort."""
         await self._ensure_initialized()
         try:
             await self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=Filter(
-                    must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+                    must=[FieldCondition(key="connection_id", match=MatchValue(value=connection_id))]
                 ),
             )
-            logger.info("Qdrant deleted user chunks", user_id=user_id)
+            logger.info("Qdrant deleted user chunks", connection_id=connection_id)
         except Exception as exc:
-            logger.warning("Qdrant delete_by_user failed", error=_exc_detail(exc))
+            logger.warning("Qdrant delete_by_connection failed", error=_exc_detail(exc))
 
     async def delete_shared(self) -> None:
         """Delete only shared/un-tagged chunks, preserving per-user chunks.
@@ -373,7 +444,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         Used for the shared re-ingest (startup / schema-monitor / legacy refresh)
         when per-user isolation is active: dropping the whole collection would
         wipe every user's uploaded schema, so we delete just the un-tagged
-        ``chunk`` points (``user_id`` payload missing) and keep the hash
+        ``chunk`` points (``connection_id`` payload missing) and keep the hash
         sentinel and all per-user points intact. Best-effort.
         """
         await self._ensure_initialized()
@@ -381,7 +452,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             await self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=Filter(
-                    must=[IsEmptyCondition(is_empty=PayloadField(key="user_id"))],
+                    must=[IsEmptyCondition(is_empty=PayloadField(key="connection_id"))],
                     must_not=[
                         FieldCondition(key="type", match=MatchValue(value="schema_hash"))
                     ],
@@ -399,7 +470,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             return False
 
     async def get_chunks_by_table_names(
-        self, table_names: list[str], user_id: str | None = None
+        self, table_names: list[str], connection_id: str | None = None
     ) -> list[SchemaChunk]:
         await self._ensure_initialized()
         if not table_names:
@@ -411,9 +482,9 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         )
         f = Filter(
             must=[FieldCondition(key="table_name", match=match)],
-            should=_user_scope_should(user_id),
+            should=_user_scope_should(connection_id),
         )
-        chunks: list[SchemaChunk] = []
+        all_records: list[Any] = []
         offset = None
         while True:
             records, next_offset = await self._client.scroll(
@@ -423,15 +494,18 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                 limit=500,
                 offset=offset,
             )
-            chunks.extend(_payload_to_chunk(r.payload or {}) for r in records)
+            all_records.extend(records)
             if next_offset is None:
                 break
             offset = next_offset
-        return chunks
+        # Own-else-shared: a user with their own copy of a table would otherwise
+        # get both it and the shared copy for the same table.
+        deduped = _dedupe_prefer_own(all_records, connection_id)
+        return [_payload_to_chunk(r.payload or {}) for r in deduped]
 
-    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
+    async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         await self._ensure_initialized()
-        no_hash = _no_hash_filter(user_id)
+        no_hash = _no_hash_filter(connection_id, self._reserved_types)
         names: set[str] = set()
         offset = None
         while True:

@@ -14,11 +14,12 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
+    get_active_connection_id,
     get_current_user,
-    get_db_client,
     get_ingestion_pipeline,
+    get_request_db_client,
     get_schema_catalog,
-    get_user_db_service,
+    get_schema_doc_service,
     get_vector_store,
 )
 from nl_to_sql.api.middleware.rate_limiter import limiter
@@ -27,7 +28,7 @@ from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
 from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
-from nl_to_sql.services.user_db_service import UserDbConnectionService
+from nl_to_sql.services.schema_doc_service import SchemaDocService, SchemaExplanation
 
 logger = structlog.get_logger(__name__)
 
@@ -76,21 +77,6 @@ def _validate_upload_shape(raw: Any) -> dict[str, Any]:
             if not isinstance(c, dict) or not isinstance(c.get("name"), str):
                 raise HTTPException(status_code=400, detail="Each column needs a string 'name'.")
     return cast(dict[str, Any], raw)
-
-
-async def _resolve_user_db_client(
-    user_id: str,
-    user_db_service: UserDbConnectionService,
-    server_client: AsyncDatabaseClient,
-) -> AsyncDatabaseClient:
-    """Return the user's BYOD client, falling back to the server default."""
-    try:
-        client = await user_db_service.get_client(user_id)
-        if client is not None:
-            return client
-    except Exception as exc:
-        logger.warning("Failed to resolve per-user DB client — using server default", error=str(exc))
-    return server_client
 
 
 # ── Response / request models ───────────────────────────────────────────────────
@@ -172,12 +158,13 @@ class MarkSeenResponse(BaseModel):
 async def list_schema_tables(
     schema_name: str | None = None,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
 ) -> SchemaTablesResponse:
-    """Read model for the Schema page — the per-user catalog."""
+    """Read model for the Schema page — the active connection's catalog."""
     if schema_name:
         _validate_schema_name(schema_name)
-    data = await catalog.get_catalog(current_user.id, schema_name)
+    data = await catalog.get_catalog(current_user.id, connection_id, schema_name)
     return SchemaTablesResponse.model_validate(data)
 
 
@@ -189,9 +176,10 @@ async def list_schema_tables(
 async def get_schema_table(
     table_id: int,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
 ) -> CatalogTable:
-    data = await catalog.get_catalog(current_user.id)
+    data = await catalog.get_catalog(current_user.id, connection_id)
     for t in data["tables"]:
         if t["id"] == table_id:
             return CatalogTable.model_validate(t)
@@ -207,13 +195,16 @@ async def patch_schema_table(
     table_id: int,
     body: TableDescriptionPatch,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
 ) -> CatalogTable:
-    result = await catalog.set_table_description(current_user.id, table_id, body.user_description)
+    result = await catalog.set_table_description(
+        current_user.id, connection_id, table_id, body.user_description
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Table not found.")
     # Re-read to include pinned status.
-    data = await catalog.get_catalog(current_user.id)
+    data = await catalog.get_catalog(current_user.id, connection_id)
     for t in data["tables"]:
         if t["id"] == table_id:
             return CatalogTable.model_validate(t)
@@ -228,10 +219,43 @@ async def patch_schema_table(
 async def mark_tables_seen(
     body: MarkSeenRequest,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
 ) -> MarkSeenResponse:
-    updated = await catalog.mark_seen(current_user.id, body.table_ids)
+    updated = await catalog.mark_seen(current_user.id, connection_id, body.table_ids)
     return MarkSeenResponse(updated=updated)
+
+
+# ── RAG-powered explanations ────────────────────────────────────────────────────
+
+
+@router.get(
+    "/explain",
+    response_model=SchemaExplanation,
+    summary="RAG-powered explanation for a table or column",
+    description=(
+        "Generates a structured explanation (description, business meaning, "
+        "relationships, example usage, common joins, example SQL) for a table "
+        "or column from the user's schema documentation. Results are cached."
+    ),
+)
+@limiter.limit("30/minute")
+async def explain_schema(
+    request: Request,
+    table: str,
+    column: str | None = None,
+    current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
+    svc: SchemaDocService = Depends(get_schema_doc_service),
+) -> SchemaExplanation:
+    """Return a cached-or-generated explanation for a schema table/column."""
+    if not table or len(table) > _MAX_STRING_LEN:
+        raise HTTPException(status_code=400, detail="Invalid table name.")
+    if column is not None and len(column) > _MAX_STRING_LEN:
+        raise HTTPException(status_code=400, detail="Invalid column name.")
+    return await svc.explain(
+        user_id=current_user.id, connection_id=connection_id, table=table, column=column
+    )
 
 
 # ── Sync (auto-generate) + upload (BYOS) ────────────────────────────────────────
@@ -247,14 +271,15 @@ async def sync_schema(
     request: Request,
     schema_name: str = "public",
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
-    user_db_service: UserDbConnectionService = Depends(get_user_db_service),
-    server_client: AsyncDatabaseClient = Depends(get_db_client),
+    db_client: AsyncDatabaseClient = Depends(get_request_db_client),
 ) -> SyncResponse:
     _validate_schema_name(schema_name)
-    db_client = await _resolve_user_db_client(current_user.id, user_db_service, server_client)
     try:
-        result = await catalog.sync_from_live_db(current_user.id, db_client, schema_name)
+        result = await catalog.sync_from_live_db(
+            current_user.id, connection_id, db_client, schema_name
+        )
     except Exception as exc:
         logger.error("Schema sync failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Schema sync failed: {exc}") from exc
@@ -282,9 +307,10 @@ async def ingest_schema(
     file: UploadFile = File(..., description="Schema JSON file (see /docs for format)"),
     reset: bool = False,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
 ) -> IngestResponse:
-    """Ingest an uploaded schema JSON file into the user's catalog."""
+    """Ingest an uploaded schema JSON file into the active connection's catalog."""
     # Size guard — read at most _MAX_UPLOAD_BYTES + 1 to detect overflow.
     content = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(content) > _MAX_UPLOAD_BYTES:
@@ -298,7 +324,7 @@ async def ingest_schema(
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
 
     raw = _validate_upload_shape(raw)
-    result = await catalog.apply_upload(current_user.id, raw, replace=reset)
+    result = await catalog.apply_upload(current_user.id, connection_id, raw, replace=reset)
     return IngestResponse(
         message=(
             f"{'Replaced' if reset else 'Merged'} {result.tables} table(s) into your schema catalog."
@@ -317,10 +343,12 @@ async def ingest_schema(
     description="Returns how many schema chunks are currently stored.",
 )
 async def schema_status(
+    current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
     vector_store: IVectorStore = Depends(get_vector_store),
 ) -> SchemaStatusResponse:
-    """Return the current state of the vector store."""
-    count = await vector_store.count()
+    """Return the vector-store state for the active connection."""
+    count = await vector_store.count(connection_id=connection_id)
     healthy = await vector_store.health_check()
     return SchemaStatusResponse(chunks_stored=count, vector_store_ready=healthy)
 
@@ -368,9 +396,9 @@ async def refresh_schema(
 async def visualize_schema(
     schema_name: str = "public",
     current_user: UserPublic = Depends(get_current_user),
-    db_client: AsyncDatabaseClient = Depends(get_db_client),
+    db_client: AsyncDatabaseClient = Depends(get_request_db_client),
 ) -> dict[str, Any]:
-    """Reflect schema from the live DB and return it for visualization."""
+    """Reflect schema from the active connection's DB and return it for visualization."""
     _validate_schema_name(schema_name)
     try:
         schema_def = await db_client.reflect_schema(schema_name=schema_name)
