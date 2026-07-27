@@ -138,6 +138,110 @@ class AsyncDatabaseClient:
                 f"Failed to execute SQL: {exc}", detail=str(exc)
             ) from exc
 
+    @trace_function("database.explain")
+    async def explain(self, sql: str, *, analyze: bool = False) -> dict[str, Any]:
+        """Run ``EXPLAIN`` for a query-cost / row-count preview (PostgreSQL only).
+
+        Never executes the statement unless ``analyze=True`` on a read query.
+        Write/DDL statements are detected and ANALYZE is refused for them, so a
+        preview can never mutate data.
+
+        Args:
+            sql: The SQL statement to preview.
+            analyze: When True (and the statement is a read), run
+                ``EXPLAIN (ANALYZE, FORMAT JSON)`` — actually executing the read.
+
+        Returns:
+            A dict with ``supported`` (bool), ``estimated_rows`` (int | None),
+            ``estimated_cost`` (float | None), ``plan`` (simplified tree | None),
+            ``warnings`` (list of {type, message}) and ``message`` (str | None).
+            Never raises to the caller — unsupported dialects / errors return a
+            graceful ``supported=False`` result.
+        """
+        import json
+
+        from sqlalchemy import text
+
+        from nl_to_sql.infrastructure.database.explain_utils import (
+            is_write_statement,
+            parse_explain_plan,
+        )
+
+        dialect = self._engine.dialect.name
+        if dialect != "postgresql":
+            logger.info("explain: unsupported dialect", dialect=dialect)
+            return {
+                "supported": False,
+                "estimated_rows": None,
+                "estimated_cost": None,
+                "plan": None,
+                "warnings": [],
+                "message": (
+                    "Query preview is only supported on PostgreSQL databases "
+                    f"(current dialect: {dialect})."
+                ),
+            }
+
+        # Never execute (ANALYZE) a write statement — plan it only.
+        if analyze and is_write_statement(sql):
+            logger.warning("explain: refusing ANALYZE on a write statement — plain EXPLAIN only")
+            analyze = False
+
+        options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
+        explain_sql = f"EXPLAIN ({options}) {sql}"
+        set_span_attribute("db.statement", explain_sql)
+
+        try:
+            async with self.session() as sess:
+                await self._apply_session_guards(sess)
+                result = await sess.execute(text(explain_sql))
+                row = result.fetchone()
+        except Exception as exc:
+            logger.warning("explain failed", error=str(exc))
+            return {
+                "supported": False,
+                "estimated_rows": None,
+                "estimated_cost": None,
+                "plan": None,
+                "warnings": [],
+                "message": f"Could not generate a preview for this query: {exc}",
+            }
+
+        if row is None:
+            return {
+                "supported": False,
+                "estimated_rows": None,
+                "estimated_cost": None,
+                "plan": None,
+                "warnings": [],
+                "message": "The database returned no query plan.",
+            }
+
+        raw = row[0]
+        try:
+            plan_json = json.loads(raw) if isinstance(raw, str) else raw
+            parsed: dict[str, Any] = parse_explain_plan(plan_json)
+        except Exception as exc:
+            logger.warning("explain: failed to parse plan", error=str(exc))
+            return {
+                "supported": False,
+                "estimated_rows": None,
+                "estimated_cost": None,
+                "plan": None,
+                "warnings": [],
+                "message": f"Could not parse the query plan: {exc}",
+            }
+
+        parsed["supported"] = True
+        parsed["message"] = None
+        logger.info(
+            "explain complete",
+            estimated_rows=parsed["estimated_rows"],
+            estimated_cost=parsed["estimated_cost"],
+            warnings=len(parsed["warnings"]),
+        )
+        return parsed
+
     async def execute_sql_stream(self, sql: str, batch_size: int = 100) -> AsyncGenerator[list[dict[str, Any]], None]:
         """Execute SQL and yield result rows in batches for large result sets.
 

@@ -37,14 +37,14 @@ class VectorRetriever:
         self,
         query_embedding: list[float],
         query_text: str = "",
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Search the vector store for the most relevant schema chunks.
 
         Args:
             query_embedding: Dense vector of the user's question.
             query_text: Original question text (used for hybrid search).
-            user_id: When provided, restrict results to this user's chunks
+            connection_id: When provided, restrict results to this user's chunks
                 (plus shared/un-tagged chunks) for per-user isolation.
 
         Returns:
@@ -56,7 +56,7 @@ class VectorRetriever:
         """
         log = logger.bind(top_k=self._top_k)
 
-        count = await self._vector_store.count(user_id=user_id)
+        count = await self._vector_store.count(connection_id=connection_id)
         if count == 0:
             raise EmptySchemaError(
                 "Vector store is empty. Run the ingestion pipeline to load the schema."
@@ -74,14 +74,14 @@ class VectorRetriever:
                     query_embedding=query_embedding,
                     top_k=self._top_k,
                     alpha=self._hybrid_alpha,
-                    user_id=user_id,
+                    connection_id=connection_id,
                 )
             else:
                 log.debug("Using pure vector search")
                 chunks = await self._vector_store.similarity_search(
                     query_embedding=query_embedding,
                     top_k=self._top_k,
-                    user_id=user_id,
+                    connection_id=connection_id,
                 )
         except Exception as exc:
             raise SchemaRetrievalError(
@@ -98,7 +98,7 @@ class VectorRetriever:
     async def get_schema_for_tables(
         self,
         table_names: list[str],
-        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> list[SchemaChunk]:
         """Deterministically fetch exact schema chunks by table name.
 
@@ -107,7 +107,7 @@ class VectorRetriever:
 
         Args:
             table_names: List of exact table names.
-            user_id: When provided, restrict to this user's (plus shared) chunks.
+            connection_id: When provided, restrict to this user's (plus shared) chunks.
 
         Returns:
             List of SchemaChunk objects.
@@ -115,7 +115,7 @@ class VectorRetriever:
         if not table_names:
             return []
         chunks = await self._vector_store.get_chunks_by_table_names(
-            table_names, user_id=user_id
+            table_names, connection_id=connection_id
         )
         logger.info(
             "Exact schema chunks fetched",
@@ -124,8 +124,8 @@ class VectorRetriever:
         )
         return chunks  # type: ignore[no-any-return]
 
-    async def get_all_table_names(self, user_id: str | None = None) -> list[str]:
+    async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         """Return all table names in the vector store (optionally per user)."""
         return await self._vector_store.get_all_table_names(  # type: ignore[no-any-return]
-            user_id=user_id
+            connection_id=connection_id
         )

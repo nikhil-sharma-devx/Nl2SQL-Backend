@@ -44,6 +44,14 @@ class EmptySchemaError(NLToSQLBaseError):
     """Raised when the vector store has no schema chunks for querying."""
 
 
+class TableNotFoundError(NLToSQLBaseError):
+    """Raised when a requested table/column does not exist for the user.
+
+    Scoped per user: a table owned by another user is reported as "not found"
+    (never confirmed to exist) so cross-user existence cannot be probed.
+    """
+
+
 # ── Validation Errors ─────────────────────────────────────────────────────────
 
 
@@ -84,3 +92,56 @@ class ConfigurationError(NLToSQLBaseError):
 
 class DatabaseExecutionError(NLToSQLBaseError):
     """Raised when executing a query against the target database fails."""
+
+
+# ── Connection (multi-DB) Errors ──────────────────────────────────────────────
+
+
+class ConnectionNotFoundError(NLToSQLBaseError):
+    """Raised when a database connection does not exist for the current user.
+
+    Scoped per user: a connection owned by another user is reported as "not
+    found" (never confirmed to exist) so cross-user existence cannot be probed.
+    """
+
+
+class ConnectionValidationError(NLToSQLBaseError):
+    """Raised when a connection's inputs are invalid (bad DSN, duplicate name)."""
+
+
+class ConnectionTestError(NLToSQLBaseError):
+    """Raised when a database connection cannot be reached during a test."""
+
+
+# ── Scheduled Query Errors ────────────────────────────────────────────────────
+
+
+class ScheduleNotFoundError(NLToSQLBaseError):
+    """Raised when a scheduled query does not exist for the current user.
+
+    Scoped per user: a schedule owned by another user is reported as "not
+    found" (never confirmed to exist) so cross-user existence cannot be probed.
+    """
+
+
+class ScheduleValidationError(NLToSQLBaseError):
+    """Raised when a schedule's inputs are invalid (bad cron/NL phrase, unknown connection)."""
+
+
+class ScheduleExecutionError(NLToSQLBaseError):
+    """Raised when a scheduled query fails to execute (orchestrator/DB error)."""
+
+
+# ── Metrics Catalog Errors ────────────────────────────────────────────────────
+
+
+class MetricNotFoundError(NLToSQLBaseError):
+    """Raised when a metric does not exist for the current user/connection.
+
+    Scoped per user+connection: a metric outside the caller's access is
+    reported as "not found" (never confirmed to exist).
+    """
+
+
+class MetricValidationError(NLToSQLBaseError):
+    """Raised when a metric's inputs are invalid (duplicate name, bad SQL definition)."""

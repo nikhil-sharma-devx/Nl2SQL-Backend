@@ -77,6 +77,12 @@ class QueryRequest(BaseModel):
         default=False,
         description="If true, stream the SQL generation response for faster perceived latency.",
     )
+    is_correction: bool = Field(
+        default=False,
+        description="If true, treat this message as a correction of the previous turn: "
+        "rewrite the prior question with this correction and regenerate SQL. "
+        "Corrections are also auto-detected from phrasing when this is false.",
+    )
 
 
 class QueryResponse(BaseModel):
@@ -111,6 +117,16 @@ class QueryResponse(BaseModel):
     message: str | None = Field(
         default=None,
         description="Optional message for greetings or off-topic responses.",
+    )
+    needs_clarification: bool = Field(
+        default=False,
+        description="True when an ambiguous follow-up needs the user to disambiguate "
+        "before SQL can be generated. Defaults False (normal responses unaffected).",
+    )
+    clarification_prompt: str | None = Field(
+        default=None,
+        description="A clarifying question to show the user when needs_clarification "
+        "is True; the user's inline answer continues the conversation.",
     )
     suggested_chart: dict[str, Any] | None = Field(
         default=None,

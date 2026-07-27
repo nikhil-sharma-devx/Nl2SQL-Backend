@@ -21,17 +21,32 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nl_to_sql.core.exceptions import (
+    ConnectionNotFoundError,
+    ConnectionTestError,
+    ConnectionValidationError,
     DatabaseExecutionError,
     EmptySchemaError,
     LLMProviderError,
+    MetricNotFoundError,
+    MetricValidationError,
     NLToSQLBaseError,
     RateLimitError,
+    ScheduleExecutionError,
+    ScheduleNotFoundError,
+    ScheduleValidationError,
     SchemaRetrievalError,
     SQLGenerationError,
     SQLValidationError,
+    TableNotFoundError,
 )
 
+# NOTE: ordering matters — the handler iterates and stops at the first match, so
+# specific subclasses must precede NLToSQLBaseError (the catch-all base).
 _ERROR_STATUS_MAP: dict[type, int] = {
+    ConnectionNotFoundError: 404,
+    ConnectionValidationError: 400,
+    ConnectionTestError: 400,
+    TableNotFoundError: 404,
     EmptySchemaError: 503,
     SchemaRetrievalError: 503,
     RateLimitError: 429,
@@ -39,10 +54,19 @@ _ERROR_STATUS_MAP: dict[type, int] = {
     SQLGenerationError: 422,
     SQLValidationError: 422,
     DatabaseExecutionError: 422,
+    ScheduleNotFoundError: 404,
+    ScheduleValidationError: 400,
+    ScheduleExecutionError: 424,
+    MetricNotFoundError: 404,
+    MetricValidationError: 400,
     NLToSQLBaseError: 500,
 }
 
 _ERROR_CODE_MAP: dict[type, str] = {
+    ConnectionNotFoundError: "CONNECTION_NOT_FOUND",
+    ConnectionValidationError: "CONNECTION_INVALID",
+    ConnectionTestError: "CONNECTION_TEST_FAILED",
+    TableNotFoundError: "TABLE_NOT_FOUND",
     EmptySchemaError: "SCHEMA_NOT_LOADED",
     SchemaRetrievalError: "SCHEMA_RETRIEVAL_FAILED",
     RateLimitError: "RATE_LIMIT_EXCEEDED",
@@ -50,6 +74,11 @@ _ERROR_CODE_MAP: dict[type, str] = {
     SQLGenerationError: "SQL_GENERATION_FAILED",
     SQLValidationError: "SQL_VALIDATION_FAILED",
     DatabaseExecutionError: "DATABASE_EXECUTION_FAILED",
+    ScheduleNotFoundError: "SCHEDULE_NOT_FOUND",
+    ScheduleValidationError: "SCHEDULE_INVALID",
+    ScheduleExecutionError: "SCHEDULE_EXECUTION_FAILED",
+    MetricNotFoundError: "METRIC_NOT_FOUND",
+    MetricValidationError: "METRIC_INVALID",
     NLToSQLBaseError: "INTERNAL_ERROR",
 }
 

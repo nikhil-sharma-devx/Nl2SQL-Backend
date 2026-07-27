@@ -8,8 +8,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
+    get_active_connection_id,
     get_current_user,
     get_llm_provider,
+    get_metrics_service,
     get_request_orchestrator,
     get_session_service,
 )
@@ -18,6 +20,7 @@ from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.query import QueryRequest, QueryResponse
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.metrics_service import MetricsService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
 from nl_to_sql.services.question_suggestion_service import (
     QuestionSuggestionService,
@@ -71,6 +74,39 @@ async def _load_glossary_context(user_id: str, session_factory: Any, char_limit:
         return None
     lines = [f"- {e.term}: {e.definition}" for e in entries]
     block = "Business glossary:\n" + "\n".join(lines)
+    if len(block) > char_limit:
+        block = block[:char_limit].rsplit("\n", 1)[0]  # don't cut mid-line
+    return block
+
+
+async def _load_certified_metrics_context(
+    connection_id: str | None, metrics_svc: Any, char_limit: int = 800
+) -> str | None:
+    """Return a compact certified-metrics block to inject into the prompt.
+
+    Only ``certified=True`` metrics are ever surfaced here (uncertified/draft
+    metrics are catalog-only) — scoped by ``connection_id`` (not ``user_id``),
+    since a metric's SQL is only meaningful against one specific connection's
+    schema. Capped at ``char_limit`` (never cut mid-line), mirroring
+    ``_load_glossary_context``'s pattern but as an independent, larger budget
+    since metrics carry SQL, not just a sentence.
+    """
+    if not connection_id:
+        return None
+    try:
+        metrics = await metrics_svc.list_certified_for_prompt(connection_id)
+    except Exception:
+        return None
+    if not metrics:
+        return None
+    lines = []
+    for m in metrics:
+        dims = ", ".join(m.get("dimensions") or [])
+        line = f"- {m['name']}: {m.get('description') or ''}\n  SQL: {m['sql_definition']}"
+        if dims:
+            line += f"\n  Dimensions: {dims}"
+        lines.append(line)
+    block = "Certified metrics (prefer these over ad-hoc calculations):\n" + "\n".join(lines)
     if len(block) > char_limit:
         block = block[:char_limit].rsplit("\n", 1)[0]  # don't cut mid-line
     return block
@@ -172,6 +208,8 @@ async def nl_to_sql_query(
     orchestrator: QueryOrchestrator = Depends(get_request_orchestrator),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
+    connection_id: str = Depends(get_active_connection_id),
+    metrics_svc: MetricsService = Depends(get_metrics_service),
 ) -> QueryResponse:
     """Main endpoint: NL question → SQL response."""
     user_settings = await _load_user_settings(current_user.id, session_service._session_factory)
@@ -183,19 +221,23 @@ async def nl_to_sql_query(
     style_hints = _build_style_hints(user_settings)
     model_override = user_settings.default_model if user_settings else None
 
-    custom_instructions, glossary_ctx, tables_hint = await asyncio.gather(
+    custom_instructions, glossary_ctx, tables_hint, certified_metrics = await asyncio.gather(
         _load_user_instructions(current_user.id, session_service._session_factory),
         _load_glossary_context(current_user.id, session_service._session_factory),
         _load_favorited_tables_hint(current_user.id, session_service._session_factory),
+        _load_certified_metrics_context(connection_id, metrics_svc),
     )
 
-    # Merge glossary and pinned-table hints into custom_instructions
+    # Merge glossary and pinned-table hints into custom_instructions. Certified
+    # metrics are NOT merged here — they get their own dedicated prompt section
+    # (see sql_generator.py's {certified_metrics_section}) so a large
+    # custom-instructions blob can't starve it or vice versa.
     extra_parts = [p for p in (glossary_ctx, tables_hint) if p]
     if extra_parts:
         base = custom_instructions or ""
         custom_instructions = "\n\n".join(filter(None, [base, *extra_parts]))
 
-    response = await orchestrator.run(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions)
+    response = await orchestrator.run(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions, certified_metrics=certified_metrics)
     response = _apply_user_settings(response, user_settings)
     background_tasks.add_task(_record_metrics, current_user.id, response.tokens_used, session_service._session_factory)
     return response
@@ -222,6 +264,7 @@ async def _stream_sql_generation(
     style_hints: dict[str, Any] | None = None,
     model_override: str | None = None,
     custom_instructions: str | None = None,
+    certified_metrics: str | None = None,
     user_id: str | None = None,
     session_factory: Any = None,
 ) -> AsyncGenerator[str, None]:
@@ -231,7 +274,7 @@ async def _stream_sql_generation(
     from fastapi.encoders import jsonable_encoder
 
     try:
-        async for chunk in orchestrator.run_stream(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions):
+        async for chunk in orchestrator.run_stream(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions, certified_metrics=certified_metrics):
             # Apply user settings and record metrics on the final complete chunk
             if (
                 isinstance(chunk, dict)
@@ -279,6 +322,8 @@ async def nl_to_sql_query_stream(
     orchestrator: QueryOrchestrator = Depends(get_request_orchestrator),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
+    connection_id: str = Depends(get_active_connection_id),
+    metrics_svc: MetricsService = Depends(get_metrics_service),
 ) -> StreamingResponse:
     """Streaming endpoint: NL question → SQL response (streamed)."""
     user_settings = await _load_user_settings(current_user.id, session_service._session_factory)
@@ -290,10 +335,11 @@ async def nl_to_sql_query_stream(
     style_hints = _build_style_hints(user_settings)
     model_override = user_settings.default_model if user_settings else None
 
-    custom_instructions, glossary_ctx, tables_hint = await asyncio.gather(
+    custom_instructions, glossary_ctx, tables_hint, certified_metrics = await asyncio.gather(
         _load_user_instructions(current_user.id, session_service._session_factory),
         _load_glossary_context(current_user.id, session_service._session_factory),
         _load_favorited_tables_hint(current_user.id, session_service._session_factory),
+        _load_certified_metrics_context(connection_id, metrics_svc),
     )
     extra_parts = [p for p in (glossary_ctx, tables_hint) if p]
     if extra_parts:
@@ -307,6 +353,7 @@ async def nl_to_sql_query_stream(
             style_hints=style_hints,
             model_override=model_override,
             custom_instructions=custom_instructions,
+            certified_metrics=certified_metrics,
             user_id=current_user.id,
             session_factory=session_service._session_factory,
         ),
@@ -452,6 +499,74 @@ async def execute_sql(
             success=False,
             error=str(exc),
         )
+
+
+class PreviewRequest(BaseModel):
+    """Request body for a query cost / row-count preview."""
+
+    sql: str = Field(..., max_length=50_000, description="The SQL query to preview")
+
+
+class PreviewWarning(BaseModel):
+    """A single performance warning derived from the query plan."""
+
+    type: str = Field(..., description="Warning category, e.g. 'seq_scan' or 'expensive_join'")
+    message: str = Field(..., description="Human-readable warning text")
+
+
+class PreviewResponse(BaseModel):
+    """Response body for a query cost / row-count preview."""
+
+    sql: str = Field(..., description="The previewed SQL query")
+    supported: bool = Field(..., description="False when preview is unavailable (non-PostgreSQL / error)")
+    estimated_rows: int | None = Field(None, description="Planner's estimated row count")
+    estimated_cost: float | None = Field(None, description="Planner's estimated total cost")
+    plan: dict[str, Any] | None = Field(None, description="Simplified execution plan tree")
+    warnings: list[PreviewWarning] = Field(default_factory=list, description="Performance warnings")
+    message: str | None = Field(None, description="Explanatory note when not supported")
+
+
+@router.post(
+    "/query/preview",
+    response_model=PreviewResponse,
+    summary="Preview a query's estimated cost, row count and plan",
+    description=(
+        "Runs EXPLAIN (never EXPLAIN ANALYZE on writes) against the configured "
+        "database to preview estimated row count, estimated cost, the execution "
+        "plan, and performance warnings (sequential scans, expensive joins) — "
+        "without executing the query. Returns a graceful 'not supported' result "
+        "on non-PostgreSQL databases."
+    ),
+)
+@limiter.limit(_rate)
+async def preview_sql(
+    request: Request,
+    body: PreviewRequest,
+    orchestrator: QueryOrchestrator = Depends(get_request_orchestrator),
+    current_user: UserPublic = Depends(get_current_user),
+) -> PreviewResponse:
+    """Endpoint: preview a query's estimated cost / row count / plan (opt-in)."""
+    import structlog
+
+    log = structlog.get_logger(__name__)
+
+    db_client = orchestrator._db_client
+    if not db_client:
+        return PreviewResponse(
+            sql=body.sql,
+            supported=False,
+            warnings=[],
+            message="Database client not configured.",
+        )
+
+    result = await db_client.explain(body.sql)
+    log.info(
+        "query preview generated",
+        user_id=current_user.id,
+        supported=result.get("supported"),
+        warnings=len(result.get("warnings", [])),
+    )
+    return PreviewResponse(sql=body.sql, **result)
 
 
 @router.post(

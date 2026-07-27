@@ -295,10 +295,10 @@ def _mask_url(url: str) -> str:
     return re.sub(r"(:)[^:@]+(@)", r"\1***\2", url)
 
 
-def _get_user_db_service() -> Any:
+def _get_connection_service() -> Any:
     try:
         from nl_to_sql.api.dependencies import _get_container
-        return _get_container().user_db_service()
+        return _get_container().connection_service()
     except Exception:
         return None
 
@@ -306,70 +306,50 @@ def _get_user_db_service() -> Any:
 @router.get(
     "/database",
     response_model=DatabaseConnectionResponse,
-    summary="Get current personal database connection status",
+    summary="Get current personal database connection status (deprecated)",
+    description=(
+        "DEPRECATED — use GET /api/v1/connections. Reports the status of the "
+        "active/default connection for backward compatibility."
+    ),
 )
 async def get_database_connection(
     current_user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConnectionResponse:
-    svc = _get_user_db_service()
+    svc = _get_connection_service()
     if svc is None:
         return DatabaseConnectionResponse(has_connection=False)
-    url = await svc.get_raw(current_user.id)
-    if url is None:
+    info = await svc.get_default_info(current_user.id)
+    if not info.has_dsn:
         return DatabaseConnectionResponse(has_connection=False)
-    return DatabaseConnectionResponse(has_connection=True, url_preview=_mask_url(url))
+    return DatabaseConnectionResponse(has_connection=True, url_preview=info.url_preview)
 
 
 @router.put(
     "/database",
     response_model=DatabaseConnectionSaveResponse,
-    summary="Save or update personal database connection",
+    summary="Save or update personal database connection (deprecated)",
     description=(
-        "Accepts any PostgreSQL connection string (Supabase, Neon, Railway, RDS, etc.). "
-        "Validates connectivity before saving. Stored encrypted at rest. "
-        "Once saved, your queries run against your own database instead of the server default."
+        "DEPRECATED — use POST /api/v1/connections. Validates connectivity and "
+        "stores the DSN (encrypted) on the active/default connection."
     ),
 )
 async def save_database_connection(
     body: SaveDatabaseRequest,
     current_user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConnectionSaveResponse:
-    from sqlalchemy import text
-
-    from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
-    from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
-
     raw = body.database_url.strip()
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database URL cannot be empty.")
 
-    normalised = to_async_database_url(raw)
-
-    # Validate the connection before saving
-    try:
-        tmp = AsyncDatabaseClient(database_url=normalised)
-        async with tmp.session() as sess:
-            await sess.execute(text("SELECT 1"))
-        await tmp.dispose()
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid connection string format. Check host, port, username and password.",
-        ) from exc
-    except Exception as exc:
-        logger.warning("Database connection test failed", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not connect to the database. Check your credentials and host.",
-        ) from exc
-
-    svc = _get_user_db_service()
+    svc = _get_connection_service()
     if svc is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database service unavailable.")
 
-    await svc.save(current_user.id, normalised)
+    # ConnectionService validates + tests the DSN, raising ConnectionValidationError
+    # / ConnectionTestError (mapped to 400 by the global error handler).
+    info = await svc.upsert_default_dsn(current_user.id, raw)
     return DatabaseConnectionSaveResponse(
-        url_preview=_mask_url(normalised),
+        url_preview=info.url_preview or _mask_url(raw),
         message="Database connection saved. Your queries will now use this database.",
     )
 
@@ -377,14 +357,17 @@ async def save_database_connection(
 @router.delete(
     "/database",
     response_model=DatabaseConnectionDeleteResponse,
-    summary="Remove personal database connection",
-    description="Removes your stored connection. Queries will fall back to the server default database.",
+    summary="Remove personal database connection (deprecated)",
+    description=(
+        "DEPRECATED — use DELETE /api/v1/connections/{id}. Clears the DSN on the "
+        "active connection, reverting it to the server default database."
+    ),
 )
 async def delete_database_connection(
     current_user: UserPublic = Depends(get_current_user),
 ) -> DatabaseConnectionDeleteResponse:
-    svc = _get_user_db_service()
+    svc = _get_connection_service()
     if svc is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database service unavailable.")
-    await svc.delete(current_user.id)
+    await svc.clear_default_dsn(current_user.id)
     return DatabaseConnectionDeleteResponse(message="Database connection removed. Falling back to server default.")
