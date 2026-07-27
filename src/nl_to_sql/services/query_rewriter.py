@@ -32,6 +32,26 @@ Original Question: {question}
 Clarified Question:"""
 
 
+_CORRECTION_PROMPT = """You are a query correction assistant for a natural-language-to-SQL system.
+
+A user previously asked a question that produced a SQL query. They are now giving \
+a short CORRECTION — changing a column, table, filter, metric, or value \
+(e.g. "no, I meant customer_name", "use OrderDate instead", "not revenue, use profit").
+
+Rewrite the ORIGINAL question into a single, self-contained natural-language \
+question that incorporates the correction. Preserve everything else about the \
+original intent. Do NOT return SQL. Output ONLY the corrected question, nothing else.
+
+Original question: {previous_question}
+
+Previous SQL:
+{previous_sql}
+
+User correction: {correction}
+
+Corrected question:"""
+
+
 class QueryRewriter:
     """Uses LLM to clarify ambiguous questions before processing.
 
@@ -106,6 +126,89 @@ class QueryRewriter:
                 error=str(exc),
             )
             return question
+
+    async def apply_correction(
+        self,
+        previous_question: str,
+        previous_sql: str,
+        correction: str,
+    ) -> str:
+        """Rewrite the previous turn's question by applying a user correction.
+
+        Combines the previous question (and its SQL for grounding) with a short
+        correction into a single self-contained question, so the user needn't
+        restate the whole ask. LLM-backed, with a deterministic concatenation
+        fallback on any failure — mirroring ``rewrite()`` error handling.
+
+        Args:
+            previous_question: The original NL question from the prior turn.
+            previous_sql: The SQL generated for the prior turn (grounding context).
+            correction: The user's new correction message.
+
+        Returns:
+            A corrected, self-contained NL question. Never raises.
+        """
+        fallback = self._deterministic_correction(previous_question, correction)
+        if not correction.strip():
+            return previous_question
+
+        try:
+            self._logger.debug(
+                "Applying correction",
+                previous=previous_question[:60],
+                correction=correction[:60],
+            )
+
+            prompt = (
+                _CORRECTION_PROMPT
+                .replace("{previous_question}", previous_question)
+                .replace("{previous_sql}", previous_sql or "(none)")
+                .replace("{correction}", correction)
+            )
+
+            response = await self._llm.complete(
+                system_prompt="You rewrite a question by applying a user's correction.",
+                user_prompt=prompt,
+                temperature=self._temperature,
+                max_tokens=250,
+            )
+
+            corrected = str(response.content).strip()
+
+            if corrected and len(corrected) < 1000:
+                self._logger.info(
+                    "Correction applied",
+                    correction=correction[:50],
+                    corrected=corrected[:80],
+                )
+                return corrected
+
+            self._logger.debug("Correction produced invalid result — using fallback")
+            return fallback
+
+        except LLMProviderError as exc:
+            self._logger.warning(
+                "Correction rewrite failed — using deterministic fallback",
+                error=str(exc),
+            )
+            return fallback
+        except Exception as exc:
+            self._logger.warning(
+                "Unexpected error in correction rewrite — using fallback",
+                error=str(exc),
+            )
+            return fallback
+
+    @staticmethod
+    def _deterministic_correction(previous_question: str, correction: str) -> str:
+        """Fallback: fold the correction into the previous question textually."""
+        prev = previous_question.strip()
+        corr = correction.strip()
+        if not corr:
+            return prev
+        if not prev:
+            return corr
+        return f"{prev} (correction: {corr})"
 
     def is_ambiguous(self, question: str) -> bool:
         """Quick heuristic check for ambiguity.

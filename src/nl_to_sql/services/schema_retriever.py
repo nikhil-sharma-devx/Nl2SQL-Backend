@@ -53,7 +53,7 @@ class SchemaRetriever:
         top_k: int = 5,
         use_hybrid_search: bool = False,
         hybrid_alpha: float = 0.5,
-        user_id: str | None = None,
+        connection_id: str | None = None,
         query_expander: object | None = None,
         multi_query_enabled: bool = False,
         multi_query_max: int = 3,
@@ -67,7 +67,7 @@ class SchemaRetriever:
         self._hybrid_alpha = hybrid_alpha
         # When set (per-user isolation), every vector-store read is scoped to
         # this user so retrieval never sees another user's tables.
-        self._user_id = user_id
+        self._connection_id = connection_id
         # P3 — multi-query retrieval (original + synonym expansions).
         self._query_expander = query_expander
         self._multi_query_enabled = multi_query_enabled
@@ -93,7 +93,7 @@ class SchemaRetriever:
         effective_k = top_k if top_k is not None else self._top_k
         log = logger.bind(question=question[:80], top_k=effective_k)
 
-        count = await self._vector_store.count(user_id=self._user_id)
+        count = await self._vector_store.count(connection_id=self._connection_id)
         if count == 0:
             raise EmptySchemaError(
                 "Vector store is empty. Run 'make ingest' to load the schema."
@@ -175,12 +175,12 @@ class SchemaRetriever:
                 query_embedding=query_embedding,
                 top_k=top_k,
                 alpha=self._hybrid_alpha,
-                user_id=self._user_id,
+                connection_id=self._connection_id,
             )
         return await self._vector_store.similarity_search(  # type: ignore[no-any-return]
             query_embedding=query_embedding,
             top_k=top_k,
-            user_id=self._user_id,
+            connection_id=self._connection_id,
         )
 
     @staticmethod
@@ -252,7 +252,7 @@ class SchemaRetriever:
         log = logger.bind(tables=table_names)
         log.debug("Fetching exact schema chunks by table name")
         chunks = await self._vector_store.get_chunks_by_table_names(
-            table_names, user_id=self._user_id
+            table_names, connection_id=self._connection_id
         )
         log.info(
             "Exact schema chunks fetched",
@@ -271,5 +271,5 @@ class SchemaRetriever:
             Sorted list of unique table name strings.
         """
         return await self._vector_store.get_all_table_names(  # type: ignore[no-any-return]
-            user_id=self._user_id
+            connection_id=self._connection_id
         )

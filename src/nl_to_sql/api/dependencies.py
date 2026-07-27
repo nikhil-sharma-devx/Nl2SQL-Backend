@@ -16,11 +16,17 @@ from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseCli
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
 from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.connection_service import ConnectionService
+from nl_to_sql.services.dashboard_service import DashboardService
+from nl_to_sql.services.export_service import ExportService
+from nl_to_sql.services.metrics_service import MetricsService
 from nl_to_sql.services.query_history import QueryHistoryService
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
+from nl_to_sql.services.scheduled_query_service import ScheduledQueryService
 from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
+from nl_to_sql.services.schema_doc_service import SchemaDocService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
-from nl_to_sql.services.user_db_service import UserDbConnectionService
+from nl_to_sql.services.starter_content_service import StarterContentService
 
 
 @lru_cache(maxsize=1)
@@ -50,6 +56,11 @@ def get_schema_catalog() -> SchemaCatalogService:
     return _get_container().schema_catalog_service()
 
 
+def get_schema_doc_service() -> SchemaDocService:
+    """Dependency: SchemaDocService (RAG-powered schema explanations)."""
+    return _get_container().schema_doc_service()
+
+
 def get_vector_store() -> IVectorStore:
     """Dependency: IVectorStore (for health checks and status)."""
     return _get_container().vector_store()
@@ -75,6 +86,93 @@ def get_session_service() -> ChatSessionService:
     return _get_container().session_service()
 
 
+def get_export_service() -> ExportService:
+    """Dependency: ExportService (query export + share-link delivery)."""
+    return _get_container().export_service()
+
+
+def get_dashboard_service() -> DashboardService:
+    """Dependency: DashboardService (per-user dashboards + chart recommendation)."""
+    return _get_container().dashboard_service()
+
+
+def get_scheduled_query_service() -> ScheduledQueryService:
+    """Dependency: ScheduledQueryService (per-user recurring NL queries + alerts)."""
+    return _get_container().scheduled_query_service()
+
+
+def get_metrics_service() -> MetricsService:
+    """Dependency: MetricsService (connection-scoped certified metrics catalog)."""
+    return _get_container().metrics_service()
+
+
+def get_starter_content_service() -> StarterContentService:
+    """Dependency: StarterContentService (seeds built-in example content)."""
+    return _get_container().starter_content_service()
+
+
+# Connections whose vectors have already been checked/self-healed this process
+# (bounds the lazy re-embed to one Qdrant round-trip per connection per worker).
+_vectors_checked: set[str] = set()
+
+
+async def resolve_active_connection(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> tuple[str | None, str | None, AsyncDatabaseClient]:
+    """Resolve (user_id, connection_id, db_client) for the current request.
+
+    The active connection is the user's persisted default. A connection with no
+    stored DSN (the built-in "Server Default") resolves the client to the
+    platform database. Never raises — falls back to the server default client.
+    """
+    container = _get_container()
+    db_client = container.db_client()
+    if credentials is None:
+        return None, None, db_client
+    try:
+        from nl_to_sql.services.auth_service import decode_access_token
+
+        token_data = decode_access_token(credentials.credentials)
+        conn_svc = container.connection_service()
+        connection_id = await conn_svc.get_active_connection_id(token_data.user_id)
+        user_client = await conn_svc.get_client(connection_id)
+        if user_client is not None:
+            db_client = user_client
+        return token_data.user_id, connection_id, db_client
+    except Exception:
+        return None, None, db_client
+
+
+async def _maybe_self_heal_vectors(
+    user_id: str | None, connection_id: str | None
+) -> None:
+    """One-time lazy re-embed of a connection whose vector store is empty."""
+    if not user_id or not connection_id or connection_id in _vectors_checked:
+        return
+    _vectors_checked.add(connection_id)
+    try:
+        container = _get_container()
+        count = await container.vector_store().count(connection_id=connection_id)
+        await container.schema_catalog_service().ensure_embedded(
+            user_id, connection_id, count
+        )
+    except Exception:
+        pass  # non-fatal — retrieval will surface an empty-schema error if truly empty
+
+
+async def get_request_db_client(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer_scheme)] = None,
+) -> AsyncDatabaseClient:
+    """Resolve the active-connection database client, falling back to the server default.
+
+    Mirrors the DB-client resolution inside ``get_request_orchestrator`` so
+    widget "refresh" re-runs each SQL against the authenticated user's currently
+    selected database connection.
+    """
+    _user_id, _connection_id, db_client = await resolve_active_connection(credentials)
+    return db_client
+
+
 def get_ingestion_pipeline() -> IngestionPipeline:
     """Dependency: IngestionPipeline (for schema refresh from live DB)."""
     return _get_container().ingestion_pipeline()
@@ -85,9 +183,9 @@ def get_api_key_service() -> APIKeyService:
     return _get_container().api_key_service()
 
 
-def get_user_db_service() -> UserDbConnectionService:
-    """Dependency: UserDbConnectionService (per-user BYOD connections)."""
-    return _get_container().user_db_service()
+def get_connection_service() -> ConnectionService:
+    """Dependency: ConnectionService (per-user multiple BYOD connections)."""
+    return _get_container().connection_service()
 
 
 # Must be defined before get_request_orchestrator — used as a default arg (evaluated at definition time)
@@ -103,9 +201,14 @@ async def get_request_orchestrator(
       1. Authenticated user's personal API key (if stored for the active provider)
       2. Server's configured key
     Falls back silently — never raises an exception from this dependency.
+
+    The actual ~15-service assembly is shared with the no-HTTP-context worker
+    path via :func:`nl_to_sql.services.orchestrator_factory.build_orchestrator`
+    (moved out of this module so ``workers/`` can reuse it without importing
+    ``api/`` — see that module's docstring).
     """
     from nl_to_sql.config.settings import get_settings
-    from nl_to_sql.services.sql_generator import SQLGeneratorService
+    from nl_to_sql.services.orchestrator_factory import build_orchestrator
 
     container = _get_container()
     settings = get_settings()
@@ -135,72 +238,16 @@ async def get_request_orchestrator(
         except Exception:
             pass  # Silently fall through to server key
 
-    # Resolve per-user database client (BYOD) — falls back to server default
-    db_client = container.db_client()
-    if credentials is not None:
-        try:
-            from nl_to_sql.services.auth_service import decode_access_token
-            token_data = decode_access_token(credentials.credentials)
-            user_db_svc = container.user_db_service()
-            user_client = await user_db_svc.get_client(token_data.user_id)
-            if user_client is not None:
-                db_client = user_client
-        except Exception:
-            pass  # Silently fall through to server default
-
-    sql_generator = SQLGeneratorService(
-        llm_provider=llm_provider,
-        dialect=settings.sql_dialect,
-        temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
-        feedback_learner=container.feedback_learner(),
+    # Resolve the active connection (user_id, connection_id, client). Falls back
+    # to the server default client for the built-in "Server Default" connection.
+    resolved_user_id, resolved_connection_id, db_client = await resolve_active_connection(
+        credentials
     )
+    # Self-heal legacy connections whose vectors predate connection_id scoping.
+    await _maybe_self_heal_vectors(resolved_user_id, resolved_connection_id)
 
-    # Resolve user_id for per-user cache isolation
-    resolved_user_id: str | None = None
-    if credentials is not None:
-        try:
-            from nl_to_sql.services.auth_service import decode_access_token
-            _td = decode_access_token(credentials.credentials)
-            resolved_user_id = _td.user_id
-        except Exception:
-            pass
-
-    # Per-user schema retrieval isolation (flag-gated). When enabled, scope every
-    # vector-store read to the authenticated user's chunks.
-    schema_retriever = container.schema_retriever()
-    if settings.schema_per_user_isolation and resolved_user_id is not None:
-        schema_retriever._user_id = resolved_user_id
-
-    # Apply the *live* Phase-3 RAG flags (runtime-adjustable via PUT /config/rag)
-    # to this request's retriever. HyDE uses the per-request provider so it
-    # honours a caller's personal API key.
-    schema_retriever._multi_query_enabled = settings.rag_multi_query_enabled
-    schema_retriever._multi_query_max = settings.rag_multi_query_max
-    schema_retriever._hyde_enabled = settings.rag_hyde_enabled
-    schema_retriever._llm_provider = llm_provider
-
-    return QueryOrchestrator(
-        retriever=schema_retriever,
-        generator=sql_generator,
-        validator=container.sql_validator(),
-        cache=container.active_cache(),
-        max_retries=settings.sql_max_retries,
-        db_client=db_client,
-        query_history=container.query_history(),
-        query_classifier=container.query_classifier(),
-        session_service=container.session_service(),
-        training_data_service=container.training_data_service(),
-        table_selector=container.table_selector(),
-        fk_extractor=container.fk_extractor(),
-        column_validator=container.column_validator(),
-        user_id=resolved_user_id,
-        example_store=container.example_store(),
-        few_shot_enabled=settings.rag_few_shot_retrieval_enabled,
-        few_shot_top_k=settings.rag_few_shot_top_k,
-        adaptive_top_k_enabled=settings.rag_adaptive_top_k_enabled,
-        top_k_min=settings.rag_adaptive_top_k_min,
-        top_k_max=settings.rag_adaptive_top_k_max,
+    return build_orchestrator(
+        container, settings, llm_provider, resolved_user_id, resolved_connection_id, db_client
     )
 
 
@@ -309,6 +356,19 @@ async def get_current_user(
     user_public = UserPublic.model_validate(user)
     _auth_cache_set(cache_key, user_public)
     return user_public
+
+
+async def get_active_connection_id(
+    current_user: UserPublic = Security(get_current_user),
+) -> str:
+    """Dependency: the current user's active (default) connection id.
+
+    Ensures the user always has at least one connection (a Server Default is
+    created on demand), so routes can rely on a non-null connection id.
+    """
+    return await _get_container().connection_service().get_active_connection_id(
+        current_user.id
+    )
 
 
 async def require_admin(
