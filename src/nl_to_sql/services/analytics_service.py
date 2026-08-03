@@ -6,7 +6,7 @@ import structlog
 from sqlalchemy import Integer, String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from nl_to_sql.infrastructure.database.models import ChatMessage, QueryHistoryRecord
+from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, QueryHistoryRecord
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
 
 logger = structlog.get_logger(__name__)
@@ -51,10 +51,11 @@ class AnalyticsService:
         # Schema is initialized once globally via query_history.initialize() on startup
         self._logger.info("Analytics database initialized (schema checked globally)")
 
-    async def get_summary(self, days: int = 30) -> dict[str, Any]:
-        """Get overall analytics summary.
+    async def get_summary(self, user_id: str, days: int = 30) -> dict[str, Any]:
+        """Get overall analytics summary for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             days: Number of days to look back.
 
         Returns:
@@ -75,7 +76,9 @@ class AnalyticsService:
                         func.avg(ChatMessage.response_time_ms).filter(
                             ChatMessage.sql != "", ChatMessage.response_time_ms.isnot(None)
                         ).label("avg_latency"),
-                    ).where(ChatMessage.timestamp >= cutoff)
+                    )
+                    .join(ChatSession, ChatMessage.session_id == ChatSession.id)
+                    .where(ChatMessage.timestamp >= cutoff, ChatSession.user_id == user_id)
                 )
                 row = agg_result.one()
                 total_queries = row.total or 0
@@ -113,10 +116,11 @@ class AnalyticsService:
             self._logger.error("Failed to get analytics summary", error=str(e))
             raise
 
-    async def get_popular_queries(self, limit: int = 10, days: int = 30) -> list[dict[str, Any]]:
-        """Get most frequently asked queries.
+    async def get_popular_queries(self, user_id: str, limit: int = 10, days: int = 30) -> list[dict[str, Any]]:
+        """Get most frequently asked queries for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             limit: Number of queries to return.
             days: Number of days to look back.
 
@@ -134,9 +138,11 @@ class AnalyticsService:
                         ChatMessage.question,
                         func.count().label("count"),
                     )
+                    .join(ChatSession, ChatMessage.session_id == ChatSession.id)
                     .where(
                         ChatMessage.timestamp >= cutoff,
                         ChatMessage.sql != "",  # Only messages with SQL
+                        ChatSession.user_id == user_id,
                     )
                     .group_by(ChatMessage.question)
                     .order_by(func.count().desc())
@@ -152,10 +158,11 @@ class AnalyticsService:
             self._logger.error("Failed to get popular queries", error=str(e))
             raise
 
-    async def get_failure_patterns(self, days: int = 30) -> list[dict[str, Any]]:
-        """Get common failure patterns.
+    async def get_failure_patterns(self, user_id: str, days: int = 30) -> list[dict[str, Any]]:
+        """Get common failure patterns for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             days: Number of days to look back.
 
         Returns:
@@ -175,11 +182,13 @@ class AnalyticsService:
                         validation_errors_text,
                         func.count().label("count"),
                     )
+                    .join(ChatSession, ChatMessage.session_id == ChatSession.id)
                     .where(
                         ChatMessage.timestamp >= cutoff,
                         ChatMessage.sql != "",
                         ChatMessage.is_valid.is_(False),
                         ChatMessage.validation_errors.isnot(None),
+                        ChatSession.user_id == user_id,
                     )
                     .group_by(validation_errors_text)
                     .order_by(func.count().desc())
@@ -195,10 +204,11 @@ class AnalyticsService:
             self._logger.error("Failed to get failure patterns", error=str(e))
             raise
 
-    async def get_table_usage(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
-        """Get most frequently retrieved tables.
+    async def get_table_usage(self, user_id: str, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
+        """Get most frequently retrieved tables for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             days: Number of days to look back.
             limit: Number of tables to return.
 
@@ -215,16 +225,18 @@ class AnalyticsService:
                 rows = (await session.execute(
                     text("""
                         SELECT tbl, count(*) AS cnt
-                        FROM chat_messages,
-                             jsonb_array_elements_text(retrieved_tables::jsonb) AS tbl
-                        WHERE timestamp >= :cutoff
-                          AND sql != ''
-                          AND retrieved_tables IS NOT NULL
+                        FROM chat_messages
+                        JOIN chat_sessions ON chat_sessions.id = chat_messages.session_id,
+                             jsonb_array_elements_text(chat_messages.retrieved_tables::jsonb) AS tbl
+                        WHERE chat_messages.timestamp >= :cutoff
+                          AND chat_messages.sql != ''
+                          AND chat_messages.retrieved_tables IS NOT NULL
+                          AND chat_sessions.user_id = :user_id
                         GROUP BY tbl
                         ORDER BY cnt DESC
                         LIMIT :lim
                     """),
-                    {"cutoff": cutoff, "lim": limit},
+                    {"cutoff": cutoff, "lim": limit, "user_id": user_id},
                 )).all()
 
             return [{"table_name": row.tbl, "usage_count": row.cnt} for row in rows]
@@ -232,10 +244,11 @@ class AnalyticsService:
             self._logger.error("Failed to get table usage", error=str(e))
             raise
 
-    async def get_intent_distribution(self, days: int = 30) -> list[dict[str, Any]]:
-        """Get distribution of query intent types.
+    async def get_intent_distribution(self, user_id: str, days: int = 30) -> list[dict[str, Any]]:
+        """Get distribution of query intent types for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             days: Number of days to look back.
 
         Returns:
@@ -251,10 +264,12 @@ class AnalyticsService:
                         ChatMessage.intent_type,
                         func.count().label("count"),
                     )
+                    .join(ChatSession, ChatMessage.session_id == ChatSession.id)
                     .where(
                         ChatMessage.timestamp >= cutoff,
                         ChatMessage.sql != "",
                         ChatMessage.intent_type.isnot(None),
+                        ChatSession.user_id == user_id,
                     )
                     .group_by(ChatMessage.intent_type)
                     .order_by(func.count().desc())
@@ -269,10 +284,11 @@ class AnalyticsService:
             self._logger.error("Failed to get intent distribution", error=str(e))
             raise
 
-    async def get_prompt_version_performance(self, days: int = 30) -> list[dict[str, Any]]:
-        """Get performance metrics for each prompt version.
+    async def get_prompt_version_performance(self, user_id: str, days: int = 30) -> list[dict[str, Any]]:
+        """Get performance metrics for each prompt version for a single user.
 
         Args:
+            user_id: Only aggregate messages from sessions owned by this user.
             days: Number of days to look back.
 
         Returns:
@@ -291,10 +307,12 @@ class AnalyticsService:
                             cast(ChatMessage.is_valid, Integer)
                         ).label("successes"),
                     )
+                    .join(ChatSession, ChatMessage.session_id == ChatSession.id)
                     .where(
                         ChatMessage.timestamp >= cutoff,
                         ChatMessage.sql != "",
                         ChatMessage.prompt_version.isnot(None),
+                        ChatSession.user_id == user_id,
                     )
                     .group_by(ChatMessage.prompt_version)
                 )

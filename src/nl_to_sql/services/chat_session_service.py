@@ -178,23 +178,40 @@ class ChatSessionService:
             result = await session.execute(query)
             return result.scalar() or 0
 
-    async def list_all_messages(self, limit: int = 50, offset: int = 0) -> list[ChatMessage]:
-        """Return all chat messages paginated, newest first (global across all sessions)."""
+    async def list_all_messages(
+        self, limit: int = 50, offset: int = 0, user_id: str | None = None
+    ) -> list[ChatMessage]:
+        """Return chat messages paginated, newest first, scoped to the user's own sessions.
+
+        Args:
+            limit: Maximum number of messages to return.
+            offset: Number of messages to skip.
+            user_id: If provided, only return messages from sessions owned by this user.
+        """
         async with self._session_factory() as session:
-            result = await session.execute(
+            query = (
                 select(ChatMessage)
+                .join(ChatSession, ChatMessage.session_id == ChatSession.id)
                 .order_by(ChatMessage.timestamp.desc())
                 .limit(limit)
                 .offset(offset)
             )
+            if user_id is not None:
+                query = query.where(ChatSession.user_id == user_id)
+            result = await session.execute(query)
             return list(result.scalars().all())
 
-    async def count_all_messages(self) -> int:
-        """Return total count of all chat messages."""
+    async def count_all_messages(self, user_id: str | None = None) -> int:
+        """Return total count of chat messages, optionally scoped to a user's own sessions."""
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(sqlalchemy.func.count()).select_from(ChatMessage)
+            query = (
+                select(sqlalchemy.func.count())
+                .select_from(ChatMessage)
+                .join(ChatSession, ChatMessage.session_id == ChatSession.id)
             )
+            if user_id is not None:
+                query = query.where(ChatSession.user_id == user_id)
+            result = await session.execute(query)
             return result.scalar() or 0
 
     async def add_message(self, session_id: str, question: str, response: QueryResponse) -> ChatMessage:

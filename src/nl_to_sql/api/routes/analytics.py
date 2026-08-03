@@ -84,10 +84,10 @@ async def get_analytics_summary(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> dict[str, Any]:
-    """Get overall analytics summary."""
+    """Get overall analytics summary, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_summary(days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_summary(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/popular-queries", response_model=list[PopularQuery])
@@ -98,10 +98,10 @@ async def get_popular_queries(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> list[dict[str, Any]]:
-    """Get most frequently asked queries."""
+    """Get most frequently asked queries, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_popular_queries(limit=limit, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_popular_queries(user_id=current_user.id, limit=limit, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/failure-patterns", response_model=list[FailurePattern])
@@ -111,10 +111,10 @@ async def get_failure_patterns(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> list[dict[str, Any]]:
-    """Get common failure patterns."""
+    """Get common failure patterns, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_failure_patterns(days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_failure_patterns(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/table-usage", response_model=list[TableUsage])
@@ -125,10 +125,10 @@ async def get_table_usage(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> list[dict[str, Any]]:
-    """Get most frequently retrieved tables."""
+    """Get most frequently retrieved tables, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_table_usage(limit=limit, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_table_usage(user_id=current_user.id, limit=limit, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/intent-distribution", response_model=list[IntentDistribution])
@@ -138,10 +138,10 @@ async def get_intent_distribution(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> list[dict[str, Any]]:
-    """Get distribution of query intent types."""
+    """Get distribution of query intent types, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_intent_distribution(days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_intent_distribution(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/prompt-versions", response_model=list[PromptVersionPerformance])
@@ -151,10 +151,10 @@ async def get_prompt_version_performance(
     current_user: UserPublic = Depends(get_current_user),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> list[dict[str, Any]]:
-    """Get performance metrics for each prompt version."""
+    """Get performance metrics for each prompt version, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_prompt_version_performance(days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_prompt_version_performance(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
 
 
 @router.get("/cache-stats", response_model=CacheStats)

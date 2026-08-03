@@ -63,8 +63,8 @@ async def get_history(
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> HistoryListResponse:
-    """Retrieve paginated query history from chat_messages."""
-    messages, total = await _gather_history(session_service, limit, offset)
+    """Retrieve paginated query history from chat_messages, scoped to the caller."""
+    messages, total = await _gather_history(session_service, limit, offset, current_user.id)
 
     return HistoryListResponse(
         entries=[
@@ -98,12 +98,12 @@ async def get_history(
 
 
 async def _gather_history(
-    session_service: ChatSessionService, limit: int, offset: int
+    session_service: ChatSessionService, limit: int, offset: int, user_id: str
 ) -> tuple[Any, Any]:
-    """Fetch messages and total count concurrently."""
+    """Fetch messages and total count concurrently, scoped to the caller's own sessions."""
     return await asyncio.gather(
-        session_service.list_all_messages(limit=limit, offset=offset),
-        session_service.count_all_messages(),
+        session_service.list_all_messages(limit=limit, offset=offset, user_id=user_id),
+        session_service.count_all_messages(user_id=user_id),
     )
 
 
