@@ -38,13 +38,19 @@ A production-grade REST API that converts plain-English questions into validated
 - **Favorited Tables** — users pin tables that receive retrieval priority in hybrid search
 - **Onboarding & Tutorial** — server-tracked onboarding checklist and step-by-step tutorial progress, persisted per user
 - **Notification Preferences** — per-user email digest, in-app alert, and marketing opt-in settings
-- **Authentication** — email/password with OTP verification, Google OAuth 2.0, JWT sessions, password reset
+- **Authentication** — email/password with OTP verification, Google OAuth 2.0, short-lived JWTs + rotating refresh tokens, password reset
+- **Multiple database connections** — connect and switch between several target databases per user (BYOD), each with its own derived schema catalog and vector index
+- **Dashboards & auto-charting** — save query results as dashboard widgets; the backend recommends a chart type per result shape
+- **Scheduled queries & alerts** — cron-style recurring NL queries with email notification on completion/failure
+- **Metrics catalog** — certified, reusable business metrics (name + SQL definition) injected into the SQL-generation prompt
+- **Export & share** — export results as CSV/JSON/SQL/PDF, or create a revocable public share link/email/Slack post
+- **Multi-turn conversation** — follow-up questions resolve against prior turns in the same chat session
 - **BYOK** — users supply their own LLM API keys; server keys are the fallback
 - **Analytics** — token usage, success/failure rates, table popularity, intent distribution, prompt version tracking
 - **Training data pipeline** — collects feedback, exports fine-tuning JSONL, starts and monitors OpenAI/Together fine-tune jobs
 - **Observability** — OpenTelemetry (OTLP), LangFuse tracing, structured JSON logs (structlog)
-- **Rate limiting** — per-IP rate limiting via SlowAPI, configurable requests-per-minute
-- **Background workers** — data retention purge and TTL cleanup run as async tasks
+- **Rate limiting** — per-IP/per-user rate limiting via SlowAPI, configurable requests-per-minute
+- **Background workers** — scheduled-query execution, data retention purge, and TTL cleanup run as async tasks
 
 ---
 
@@ -59,7 +65,7 @@ A production-grade REST API that converts plain-English questions into validated
 | Vector store | Qdrant (default) · Chroma · FAISS | Swappable via `VECTOR_STORE_PROVIDER` |
 | Keyword search | BM25 (rank-bm25) | Hybrid retrieval alongside vector search |
 | Database | PostgreSQL via async SQLAlchemy | Supabase recommended for managed hosting |
-| Migrations | Alembic | 3 migrations: initial schema, perf indexes, filter column indexes |
+| Migrations | Alembic | 17 migrations — schema catalog, refresh tokens, multi-connections, dashboards, scheduled queries, metrics catalog, and more (see `alembic/versions/`) |
 | Cache | Redis · in-memory fallback · semantic cache | Semantic cache uses cosine similarity threshold |
 | Auth | JWT + Google OAuth + aiosmtplib OTP | passlib bcrypt, python-jose |
 | DI | dependency-injector | Constructor-injection container |
@@ -197,15 +203,21 @@ All routes are prefixed `/api/v1` and documented at `/docs`.
 
 | Group | Endpoints | Description |
 |---|---|---|
-| **Auth** | `POST /auth/register` `POST /auth/login` `POST /auth/google` `POST /auth/verify-otp` `POST /auth/forgot-password` `POST /auth/reset-password` | Registration, login, OAuth, OTP |
-| **Query** | `POST /query` `POST /query/stream` (SSE) `POST /query/explain` `POST /query/execute` `POST /query/suggestions` | Core NL→SQL pipeline |
-| **Schema** | `POST /schema/ingest` `POST /schema/refresh` `GET /schema/status` `GET /schema/visualize` | Schema management |
+| **Auth** | `POST /auth/register` `POST /auth/login` `POST /auth/google` `POST /auth/verify-otp` `POST /auth/forgot-password` `POST /auth/reset-password` `POST /auth/refresh` | Registration, login, OAuth, OTP, refresh-token rotation |
+| **Auth Sessions** | `GET /auth-sessions` `DELETE /auth-sessions/{id}` `POST /auth-sessions/revoke-all` | Active login-session management |
+| **Query** | `POST /query` `POST /query/stream` (SSE) `POST /query/explain` `POST /query/execute` `POST /query/suggestions` | Core NL→SQL pipeline, incl. multi-turn follow-ups |
+| **Schema** | `POST /schema/sync` `POST /schema/ingest` `GET /schema/tables` `GET /schema/status` `GET /schema/visualize` | Schema catalog: live-DB sync + upload overlay |
+| **Connections** | `GET/POST /connections` `PUT/DELETE /connections/{id}` `POST /connections/{id}/test` `POST /connections/{id}/select` | Multiple database connections (BYOD) per user |
 | **Sessions** | `GET/POST /sessions` `GET/DELETE /sessions/{id}` `POST /sessions/{id}/messages` | Chat session history |
 | **History** | `GET /history` `DELETE /history` `GET /history/export` | Query history log |
 | **Saved Queries** | `GET/POST /saved-queries` `PATCH/DELETE /saved-queries/{id}` `POST /saved-queries/{id}/run` | Bookmarked queries |
 | **Query Templates** | `GET/POST /query-templates` `GET/PATCH/DELETE /query-templates/{id}` `POST /query-templates/{id}/render` | Parameterized NL+SQL templates with `{{placeholder}}` substitution |
 | **Glossary** | `GET/POST /glossary` `GET/PATCH/DELETE /glossary/{id}` | Business dictionary — terms injected into query prompts |
 | **Favorited Tables** | `GET/POST /favorited-tables` `DELETE /favorited-tables/{id}` | User-pinned tables with retrieval priority |
+| **Dashboards** | `GET/POST /dashboards` `GET/PATCH/DELETE /dashboards/{id}` `POST /dashboards/{id}/duplicate` | Saved widgets with auto-recommended chart type |
+| **Scheduled Queries** | `GET/POST /schedules` `GET/PUT/DELETE /schedules/{id}` `POST /schedules/{id}/pause` `/resume` `/run-now` | Recurring NL queries with email alerts |
+| **Metrics** | `GET/POST /metrics` `GET/PUT/DELETE /metrics/{id}` `POST /metrics/{id}/certify` `/uncertify` | Certified business-metrics catalog |
+| **Exports & Shares** | `POST /exports/{format}` `POST /shares` `DELETE /shares/{id}` `GET /shares/{token}` (public) | CSV/JSON/SQL/PDF export, revocable share links |
 | **Onboarding** | `GET/PATCH /onboarding` | Onboarding checklist state (7 items, progress %) |
 | **Tutorial** | `GET /tutorial/progress` `POST /tutorial/step/{step_id}/complete` `POST /tutorial/reset` | Step-by-step tutorial progress |
 | **Notification Prefs** | `GET/PATCH /notification-preferences` | Email digest, in-app alerts, marketing opt-ins |
@@ -213,7 +225,7 @@ All routes are prefixed `/api/v1` and documented at `/docs`.
 | **Training** | `GET /training/stats` `GET /training/export` `GET /training/download` | Fine-tuning data |
 | **Fine-tuning** | `POST /fine-tuning/prepare` `POST /fine-tuning/start` `GET /fine-tuning/status/{id}` `POST /fine-tuning/deploy` | LLM fine-tuning jobs |
 | **Profile / BYOK** | `GET/PUT/DELETE /profile/api-keys/{provider}` | Per-user API keys |
-| **Config** | `GET/PUT /config/database` `GET/PUT /config/llm` `GET /config/models` | Runtime config |
+| **Config** | `GET/PUT /config/database` `GET/PUT /config/llm` `GET/PUT /config/rag` `GET /config/models` | Runtime config, incl. RAG feature flags |
 | **Settings** | `GET/PATCH /settings` `GET/PUT /instructions` | User preferences |
 | **Account** | `GET/PUT /account/retention` `POST /account/delete` | Account management |
 | **Health** | `GET /health` `GET /ready` | Liveness and readiness probes |
@@ -229,16 +241,22 @@ backend/
 │   │   ├── app.py              # Application factory (lifespan, middleware, routers)
 │   │   ├── dependencies.py     # FastAPI dependency providers
 │   │   ├── middleware/         # Error handler, request logger, rate limiter
-│   │   └── routes/             # One module per route group (25 routers)
+│   │   └── routes/             # One module per route group (~29 routers)
 │   │       ├── query.py            # Core NL→SQL + stream + explain + execute
 │   │       ├── auth.py             # Registration, login, OAuth, OTP
+│   │       ├── connections.py      # Multiple DB connections (BYOD) per user
+│   │       ├── schema.py           # Schema catalog sync/upload
+│   │       ├── dashboards.py       # Saved widgets + auto-charting
+│   │       ├── schedules.py        # Scheduled queries & alerts
+│   │       ├── metrics.py          # Certified metrics catalog
+│   │       ├── exports.py          # Export (CSV/JSON/SQL/PDF) + share links
 │   │       ├── glossary.py         # Business dictionary CRUD
 │   │       ├── query_templates.py  # Parameterized template CRUD + render
 │   │       ├── favorited_tables.py # Pinned table management
 │   │       ├── onboarding.py       # Onboarding checklist state
 │   │       ├── tutorial.py         # Tutorial step progress
 │   │       ├── notification_prefs.py  # Notification preferences
-│   │       └── ...                 # 17 additional route modules
+│   │       └── ...                 # remaining route modules
 │   ├── config/
 │   │   ├── settings.py         # Pydantic-settings, all env vars
 │   │   └── container.py        # dependency-injector ApplicationContainer
@@ -269,10 +287,9 @@ backend/
 │       ├── retention_worker.py # Async background data retention enforcement
 │       └── purge_worker.py     # Expired record purge
 ├── alembic/
-│   └── versions/
-│       ├── 0001_initial_schema.py
-│       ├── 0002_performance_indexes.py
-│       └── 0003_filter_column_indexes.py   # Indexes on deleted_at, status columns
+│   └── versions/                # 17 migrations: initial schema → schema catalog,
+│                                 # refresh tokens, multi-connections, dashboards,
+│                                 # scheduled queries, metrics catalog, and more
 ├── Dockerfile                  # Multi-stage build (python:3.13-slim)
 ├── docker-compose.yml          # API + Qdrant + Redis
 ├── pyproject.toml              # Hatchling build, Ruff, Mypy, pytest config

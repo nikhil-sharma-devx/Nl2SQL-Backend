@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_session_service,
+)
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.models.auth import (
     ForgotPasswordRequest,
@@ -313,6 +316,7 @@ async def google_auth(
                 google_sub=google_sub,
             )
             db_sess.add(user)
+            await db_sess.flush()  # to get user.id
         else:
             # Existing user — link Google sub if not yet linked
             if user.google_sub is None:

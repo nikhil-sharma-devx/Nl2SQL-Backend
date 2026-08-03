@@ -85,17 +85,20 @@ class MetricsService:
         return row
 
     async def _get_owned(
-        self, db: AsyncSession, user_id: str, connection_id: str, metric_id: str
+        self,
+        db: AsyncSession,
+        user_id: str,
+        connection_id: str,
+        metric_id: str,
     ) -> Metric:
         """Fetch a metric the user created, within the given connection (write scope)."""
+        conditions = [
+            Metric.metric_id == metric_id,
+            Metric.connection_id == connection_id,
+            Metric.user_id == user_id,
+        ]
         row = (
-            await db.execute(
-                select(Metric).where(
-                    Metric.metric_id == metric_id,
-                    Metric.connection_id == connection_id,
-                    Metric.user_id == user_id,
-                )
-            )
+            await db.execute(select(Metric).where(*conditions))
         ).scalar_one_or_none()
         if row is None:
             raise MetricNotFoundError("Metric not found.")
@@ -304,8 +307,7 @@ class MetricsService:
         the same ownership check as every other mutation. This app has no
         roles system yet (a real semantic layer would want a distinct
         "steward" role, separate from "anyone who can create metrics") — a
-        known governance gap, left as a Phase-6 (RBAC) follow-up rather than
-        half-building an ad-hoc permission model now.
+        known governance gap, left as a follow-up.
         """
         async with self._session_factory() as db:
             row = await self._get_owned(db, user_id, connection_id, metric_id)

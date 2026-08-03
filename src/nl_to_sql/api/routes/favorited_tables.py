@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_session_service,
+)
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import FavoritedTable
 from nl_to_sql.services.chat_session_service import ChatSessionService
