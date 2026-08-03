@@ -13,7 +13,10 @@ import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from nl_to_sql.api.dependencies import get_connection_service, get_current_user
+from nl_to_sql.api.dependencies import (
+    get_connection_service,
+    get_current_user,
+)
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.connection_service import ConnectionInfo, ConnectionService
@@ -102,7 +105,10 @@ async def update_connection(
     svc: ConnectionService = Depends(get_connection_service),
 ) -> ConnectionOut:
     info = await svc.update(
-        current_user.id, connection_id, name=body.name, raw_url=body.database_url
+        current_user.id,
+        connection_id,
+        name=body.name,
+        raw_url=body.database_url,
     )
     return _to_out(info)
 

@@ -22,6 +22,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from nl_to_sql.api.dependencies import get_container
 from nl_to_sql.api.middleware.error_handler import (
     domain_exception_handler,
     http_exception_handler,
@@ -61,7 +62,6 @@ from nl_to_sql.api.routes import (
     usage,
     user_settings,
 )
-from nl_to_sql.api.dependencies import get_container
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.exceptions import NLToSQLBaseError

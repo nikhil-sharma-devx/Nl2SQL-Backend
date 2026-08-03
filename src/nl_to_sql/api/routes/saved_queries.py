@@ -7,7 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_session_service,
+)
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import SavedQuery
 from nl_to_sql.services.chat_session_service import ChatSessionService

@@ -208,7 +208,11 @@ class SchemaCatalogService:
     # ── Upload (BYOS path) ────────────────────────────────────────────────────
 
     async def apply_upload(
-        self, user_id: str, connection_id: str, raw_json: dict[str, Any], replace: bool
+        self,
+        user_id: str,
+        connection_id: str,
+        raw_json: dict[str, Any],
+        replace: bool,
     ) -> UploadResult:
         """Overlay (or replace) the catalog from an uploaded JSON, then re-embed."""
         schema = self._parse_upload(raw_json)

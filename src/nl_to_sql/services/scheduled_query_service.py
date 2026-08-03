@@ -91,15 +91,17 @@ class ScheduledQueryService:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     async def _get_owned(
-        self, db: AsyncSession, user_id: str, schedule_id: str
+        self,
+        db: AsyncSession,
+        user_id: str,
+        schedule_id: str,
     ) -> ScheduledQuery:
+        conditions = [
+            ScheduledQuery.id == schedule_id,
+            ScheduledQuery.user_id == user_id,
+        ]
         row = (
-            await db.execute(
-                select(ScheduledQuery).where(
-                    ScheduledQuery.id == schedule_id,
-                    ScheduledQuery.user_id == user_id,
-                )
-            )
+            await db.execute(select(ScheduledQuery).where(*conditions))
         ).scalar_one_or_none()
         if row is None:
             raise ScheduleNotFoundError("Schedule not found.")
@@ -145,7 +147,9 @@ class ScheduledQueryService:
     # ── CRUD ─────────────────────────────────────────────────────────────────────
 
     async def list_schedules(
-        self, user_id: str, connection_id: str | None = None
+        self,
+        user_id: str,
+        connection_id: str | None = None,
     ) -> list[ScheduleInfo]:
         async with self._session_factory() as db:
             stmt = select(ScheduledQuery).where(ScheduledQuery.user_id == user_id)

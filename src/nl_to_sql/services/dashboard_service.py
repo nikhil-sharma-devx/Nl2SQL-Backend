@@ -234,13 +234,15 @@ class DashboardService:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     async def _load_owned(
-        self, db: AsyncSession, user_id: str, dashboard_id: str
+        self,
+        db: AsyncSession,
+        user_id: str,
+        dashboard_id: str,
     ) -> Dashboard | None:
         """Load a user-owned dashboard with widgets eager-loaded, or ``None``."""
+        conditions = [Dashboard.id == dashboard_id, Dashboard.user_id == user_id]
         result = await db.execute(
-            select(Dashboard)
-            .options(selectinload(Dashboard.widgets))
-            .where(Dashboard.id == dashboard_id, Dashboard.user_id == user_id)
+            select(Dashboard).options(selectinload(Dashboard.widgets)).where(*conditions)
         )
         return result.scalar_one_or_none()
 
@@ -271,7 +273,10 @@ class DashboardService:
         dashboard_id = str(uuid4())
         async with self._session_factory() as db:
             dashboard = Dashboard(
-                id=dashboard_id, user_id=user_id, name=name[:200], is_builtin=is_builtin
+                id=dashboard_id,
+                user_id=user_id,
+                name=name[:200],
+                is_builtin=is_builtin,
             )
             db.add(dashboard)
             for idx, widget_data in enumerate(widgets or []):
@@ -293,22 +298,24 @@ class DashboardService:
             return await self._load_owned(db, user_id, dashboard_id)
 
     async def list_dashboards(
-        self, user_id: str, limit: int = 20, offset: int = 0
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
     ) -> tuple[list[Dashboard], int]:
         """Return ``(dashboards, total)`` for a user, most-recently-updated first."""
+        conditions = [Dashboard.user_id == user_id]
         async with self._session_factory() as db:
             total = (
                 await db.execute(
-                    select(func.count())
-                    .select_from(Dashboard)
-                    .where(Dashboard.user_id == user_id)
+                    select(func.count()).select_from(Dashboard).where(*conditions)
                 )
             ).scalar_one()
 
             result = await db.execute(
                 select(Dashboard)
                 .options(selectinload(Dashboard.widgets))
-                .where(Dashboard.user_id == user_id)
+                .where(*conditions)
                 .order_by(Dashboard.updated_at.desc())
                 .limit(limit)
                 .offset(offset)
@@ -316,9 +323,7 @@ class DashboardService:
             items = list(result.scalars().all())
         return items, int(total)
 
-    async def rename(
-        self, user_id: str, dashboard_id: str, name: str
-    ) -> Dashboard | None:
+    async def rename(self, user_id: str, dashboard_id: str, name: str) -> Dashboard | None:
         """Rename a user-owned dashboard; ``None`` if not found."""
         async with self._session_factory() as db:
             dashboard = await self._load_owned(db, user_id, dashboard_id)
@@ -337,7 +342,11 @@ class DashboardService:
                 return None
 
             new_id = str(uuid4())
-            clone = Dashboard(id=new_id, user_id=user_id, name=f"{source.name} (copy)"[:200])
+            clone = Dashboard(
+                id=new_id,
+                user_id=user_id,
+                name=f"{source.name} (copy)"[:200],
+            )
             db.add(clone)
             for widget in source.widgets:
                 db.add(

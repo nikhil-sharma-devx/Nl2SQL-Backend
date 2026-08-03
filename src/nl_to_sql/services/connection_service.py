@@ -229,16 +229,18 @@ class ConnectionService:
         )
 
     async def _get_owned(
-        self, db: AsyncSession, user_id: str, connection_id: str
+        self,
+        db: AsyncSession,
+        user_id: str,
+        connection_id: str,
     ) -> UserDatabaseConnection:
         """Fetch a connection the user owns, or raise ConnectionNotFoundError (404)."""
+        conditions = [
+            UserDatabaseConnection.connection_id == connection_id,
+            UserDatabaseConnection.user_id == user_id,
+        ]
         row = (
-            await db.execute(
-                select(UserDatabaseConnection).where(
-                    UserDatabaseConnection.connection_id == connection_id,
-                    UserDatabaseConnection.user_id == user_id,
-                )
-            )
+            await db.execute(select(UserDatabaseConnection).where(*conditions))
         ).scalar_one_or_none()
         if row is None:
             raise ConnectionNotFoundError("Connection not found.")
@@ -336,11 +338,12 @@ class ConnectionService:
     async def list_connections(self, user_id: str) -> list[ConnectionInfo]:
         await self.ensure_default_connection(user_id)
         factory = self._require_factory()
+        conditions = [UserDatabaseConnection.user_id == user_id]
         async with factory() as db:
             rows = (
                 await db.execute(
                     select(UserDatabaseConnection)
-                    .where(UserDatabaseConnection.user_id == user_id)
+                    .where(*conditions)
                     .order_by(UserDatabaseConnection.created_at)
                 )
             ).scalars().all()
@@ -356,7 +359,11 @@ class ConnectionService:
         return infos
 
     async def create(
-        self, user_id: str, name: str, raw_url: str, db_type: str | None = None
+        self,
+        user_id: str,
+        name: str,
+        raw_url: str,
+        db_type: str | None = None,
     ) -> ConnectionInfo:
         """Validate + test + encrypt + store a new connection (becomes default if first)."""
         name = name.strip()

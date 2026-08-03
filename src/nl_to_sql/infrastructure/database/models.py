@@ -481,7 +481,9 @@ class FavoritedTable(Base):
     """P2 - User-pinned tables that get retrieval priority during query generation."""
 
     __tablename__ = "favorited_tables"
-    __table_args__ = (UniqueConstraint("user_id", "table_name", name="uq_user_favorited_table"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "table_name", name="uq_user_favorited_table"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -495,7 +497,9 @@ class GlossaryEntry(Base):
     """P2 - Business dictionary entries injected into the generation prompt."""
 
     __tablename__ = "glossary_entries"
-    __table_args__ = (UniqueConstraint("user_id", "term", name="uq_user_glossary_term"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "term", name="uq_user_glossary_term"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)

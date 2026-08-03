@@ -118,3 +118,83 @@ def backfill_multi_connections(bind: Connection) -> None:
             ),
             {"t": True},
         )
+
+
+def backfill_personal_organizations(bind: Connection) -> None:
+    """Create a personal ``Organization`` + OWNER membership for every user lacking one.
+
+    Idempotent: only processes users with no ``organization_memberships`` row at
+    all, so re-running after new users have self-bootstrapped via the
+    registration hook (``OrganizationService.bootstrap_personal_org``) is a
+    no-op for them. The ``slug`` embeds the generated org id, which trivially
+    guarantees uniqueness without a retry loop.
+    """
+    now = datetime.utcnow()
+    users = bind.execute(
+        text(
+            "SELECT id, email, full_name FROM users "
+            "WHERE id NOT IN (SELECT user_id FROM organization_memberships)"
+        )
+    ).fetchall()
+    for u in users:
+        org_id = str(uuid.uuid4())
+        display_name = u.full_name or u.email
+        bind.execute(
+            text(
+                "INSERT INTO organizations "
+                "(id, name, slug, is_personal, owner_user_id, created_at, updated_at) "
+                "VALUES (:id, :name, :slug, :personal, :owner, :now, :now)"
+            ),
+            {
+                "id": org_id,
+                "name": f"{display_name}'s Organization",
+                "slug": f"personal-{org_id}",
+                "personal": True,
+                "owner": u.id,
+                "now": now,
+            },
+        )
+        bind.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(organization_id, user_id, role, is_default, created_at, updated_at) "
+                "VALUES (:org, :user, :role, :is_default, :now, :now)"
+            ),
+            {"org": org_id, "user": u.id, "role": "OWNER", "is_default": True, "now": now},
+        )
+
+
+# Every table that gained a nullable organization_id column in migration 0015.
+_ORG_SCOPED_TABLES: tuple[str, ...] = (
+    "user_database_connections",
+    "metrics",
+    "query_templates",
+    "scheduled_queries",
+    "dashboards",
+    "saved_queries",
+    "user_schemas",
+    "user_schema_tables",
+    "glossary_entries",
+    "favorited_tables",
+    "shared_queries",
+)
+
+
+def backfill_resource_organization_ids(bind: Connection) -> None:
+    """Stamp every legacy resource row with its owner's default organization.
+
+    Idempotent: only rows with ``organization_id IS NULL`` are touched. Must
+    run after :func:`backfill_personal_organizations` so every ``user_id`` has
+    a default-membership row to look up.
+    """
+    for tbl in _ORG_SCOPED_TABLES:
+        bind.execute(
+            text(
+                f"UPDATE {tbl} SET organization_id = ("  # noqa: S608 - fixed table names
+                "  SELECT om.organization_id FROM organization_memberships om "
+                f"  WHERE om.user_id = {tbl}.user_id AND om.is_default = :t "
+                "  LIMIT 1"
+                ") WHERE organization_id IS NULL"
+            ),
+            {"t": True},
+        )
