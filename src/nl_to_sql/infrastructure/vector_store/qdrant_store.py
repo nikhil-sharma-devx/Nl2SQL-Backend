@@ -226,7 +226,10 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        exists = await self._client.collection_exists(self._collection_name)
+        try:
+            exists = await self._client.collection_exists(self._collection_name)
+        except Exception as exc:
+            raise VectorStoreError(f"Qdrant collection_exists failed: {_exc_detail(exc)}") from exc
         if not exists:
             try:
                 await self._client.create_collection(

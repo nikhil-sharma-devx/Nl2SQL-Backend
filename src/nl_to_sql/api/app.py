@@ -201,7 +201,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                                 except Exception:
                                     pass
                 except Exception as e:
-                    structlog.get_logger().error("Background schema ingestion failed", error=str(e))
+                    structlog.get_logger().error(
+                        "Background schema ingestion failed",
+                        error=str(e) or repr(e),
+                        exc_info=True,
+                    )
 
             # Run the entire workflow in the background to avoid blocking API startup
             _task = asyncio.create_task(_auto_ingest_workflow())
