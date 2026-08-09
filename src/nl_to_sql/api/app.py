@@ -524,7 +524,7 @@ def create_app() -> FastAPI:
     ])
 
     app = FastAPI(
-        title="NL-to-SQL RAG API",
+        title="Vectrix API",
         description=(
             "Production-grade pipeline that converts natural language questions "
             "into SQL queries using Retrieval-Augmented Generation (RAG)."

@@ -187,7 +187,7 @@ This code will expire in 10 minutes.
 If you did not request this, please ignore this email.
 
 Thanks,
-NL-to-SQL RAG Team
+Vectrix Team
     """)
 
     try:

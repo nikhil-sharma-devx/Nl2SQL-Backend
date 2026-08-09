@@ -133,7 +133,7 @@ def render_digest_email(
     queries = digest["queries"]
     tokens = digest["tokens"]
     recent = digest.get("recent_questions", [])
-    subject = f"Your NL2SQL activity — {queries} quer{'y' if queries == 1 else 'ies'} this week"
+    subject = f"Your Vectrix activity — {queries} quer{'y' if queries == 1 else 'ies'} this week"
 
     recent_txt = "\n".join(f"  • {q}" for q in recent) or "  (none)"
     text = (
@@ -142,14 +142,14 @@ def render_digest_email(
         f"  Queries run: {queries}\n"
         f"  Tokens used: {tokens:,}\n\n"
         f"Recent questions:\n{recent_txt}\n\n"
-        f"— NL2SQL\n\n"
+        f"— Vectrix\n\n"
         f"Unsubscribe from these emails: {unsubscribe_url}\n"
     )
 
     recent_html = "".join(f"<li>{_esc(q)}</li>" for q in recent) or "<li>(none)</li>"
     html = (
         f"<div style=\"font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;color:#111\">"
-        f"<h2 style=\"margin:0 0 4px\">Your NL2SQL activity</h2>"
+        f"<h2 style=\"margin:0 0 4px\">Your Vectrix activity</h2>"
         f"<p style=\"color:#555;margin:0 0 16px\">Last {period_days} days</p>"
         f"<p>Hi {_esc(name)},</p>"
         f"<table style=\"border-collapse:collapse;margin:12px 0\">"

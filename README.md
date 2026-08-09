@@ -1,4 +1,6 @@
-# NL2SQL — Backend
+# Vectrix — Backend
+
+> Where natural language meets your schema.
 
 A production-grade REST API that converts plain-English questions into validated, executable SQL using a Retrieval-Augmented Generation (RAG) pipeline. Supports PostgreSQL and MySQL, streams results over SSE, self-corrects failed SQL, and ships with auth, analytics, fine-tuning, observability, glossary, query templates, and onboarding built in.
 

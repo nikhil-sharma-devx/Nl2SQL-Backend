@@ -285,12 +285,12 @@ async def email_share(
     title = share.title or "a query"
     subject = f"{current_user.full_name or 'Someone'} shared {title} with you"
     text = (
-        f"{current_user.full_name or 'Someone'} shared an NL2SQL query with you.\n\n"
+        f"{current_user.full_name or 'Someone'} shared a Vectrix query with you.\n\n"
         f"View it here: {url}\n"
     )
     html = (
         f"<div style=\"font-family:system-ui,sans-serif\">"
-        f"<p>{_esc(current_user.full_name or 'Someone')} shared an NL2SQL query with you.</p>"
+        f"<p>{_esc(current_user.full_name or 'Someone')} shared a Vectrix query with you.</p>"
         f"<p><a href=\"{_esc(url)}\">Open the shared query</a></p></div>"
     )
     sent = await export_service.send_share_email(body.to_email, subject, text, html)
