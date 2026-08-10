@@ -101,7 +101,7 @@ async def build_orchestrator_for_connection(
     """
     llm_provider = container.llm_provider()
     conn_svc = container.connection_service()
-    db_client = await conn_svc.get_client(connection_id)
+    db_client = await conn_svc.get_client(user_id, connection_id)
     if db_client is None:
         db_client = container.db_client()
     return build_orchestrator(

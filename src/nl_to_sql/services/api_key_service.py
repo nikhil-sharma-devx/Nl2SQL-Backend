@@ -6,6 +6,8 @@ from datetime import datetime
 
 import structlog
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -18,6 +20,16 @@ from nl_to_sql.infrastructure.database.models import Base, UserAPIKey
 
 logger = structlog.get_logger(__name__)
 
+# KDF versions for deriving the Fernet key from `secret_key`. v1 is a plain
+# sha256 digest (not a formal KDF); v2 is HKDF-SHA256. New/updated rows always
+# write CURRENT_KDF_VERSION; old rows keep decrypting via v1 until their next
+# write ("migrate opportunistically", not a bulk backfill — a backfill would
+# require decrypting and immediately re-encrypting every row with no
+# behavioral upside, and secret_key is meant to be high-entropy already).
+CURRENT_KDF_VERSION = 2
+
+_HKDF_INFO = b"nl2sql-fernet-v2"
+
 
 def _to_async_url(url: str) -> str:
     url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -28,9 +40,16 @@ def _to_async_url(url: str) -> str:
     return url
 
 
-def _make_fernet(secret_key: str) -> Fernet:
+def _make_fernet_v1(secret_key: str) -> Fernet:
     key = base64.urlsafe_b64encode(hashlib.sha256(secret_key.encode()).digest())
     return Fernet(key)
+
+
+def _make_fernet_v2(secret_key: str) -> Fernet:
+    derived = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO
+    ).derive(secret_key.encode())
+    return Fernet(base64.urlsafe_b64encode(derived))
 
 
 class APIKeyService:
@@ -42,7 +61,8 @@ class APIKeyService:
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         database_url: str | None = None,
     ) -> None:
-        self._fernet = _make_fernet(secret_key)
+        self._fernet_v1 = _make_fernet_v1(secret_key)
+        self._fernet_v2 = _make_fernet_v2(secret_key)
         self._session_factory: async_sessionmaker[AsyncSession] | None = session_factory
         self._database_url = _to_async_url(database_url) if database_url else None
         self._engine: AsyncEngine | None = None
@@ -73,14 +93,17 @@ class APIKeyService:
             await self._engine.dispose()
 
     async def _encrypt(self, value: str) -> str:
+        """Encrypt with the current (v2/HKDF) key — every new/updated row upgrades."""
         import asyncio
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: self._fernet.encrypt(value.encode()).decode())
+        return await loop.run_in_executor(None, lambda: self._fernet_v2.encrypt(value.encode()).decode())
 
-    async def _decrypt(self, value: str) -> str:
+    async def _decrypt(self, value: str, kdf_version: int = 1) -> str:
+        """Decrypt with the Fernet matching ``kdf_version`` (legacy rows default to v1)."""
         import asyncio
+        fernet = self._fernet_v2 if kdf_version >= CURRENT_KDF_VERSION else self._fernet_v1
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: self._fernet.decrypt(value.encode()).decode())
+        return await loop.run_in_executor(None, lambda: fernet.decrypt(value.encode()).decode())
 
     async def save_key(self, user_id: str, provider: str, api_key: str) -> None:
         """Store (or update) an encrypted API key for a user+provider pair."""
@@ -92,10 +115,21 @@ class APIKeyService:
             from sqlalchemy.dialects.postgresql import insert as pg_insert
             stmt = (
                 pg_insert(UserAPIKey)
-                .values(user_id=user_id, provider=provider, encrypted_key=encrypted, created_at=now, updated_at=now)
+                .values(
+                    user_id=user_id,
+                    provider=provider,
+                    encrypted_key=encrypted,
+                    kdf_version=CURRENT_KDF_VERSION,
+                    created_at=now,
+                    updated_at=now,
+                )
                 .on_conflict_do_update(
                     constraint="uq_user_api_key_provider",
-                    set_={"encrypted_key": encrypted, "updated_at": now},
+                    set_={
+                        "encrypted_key": encrypted,
+                        "kdf_version": CURRENT_KDF_VERSION,
+                        "updated_at": now,
+                    },
                 )
             )
             await sess.execute(stmt)
@@ -109,7 +143,7 @@ class APIKeyService:
         try:
             async with self._session_factory() as sess:
                 result = await sess.execute(
-                    select(UserAPIKey.encrypted_key).where(
+                    select(UserAPIKey.encrypted_key, UserAPIKey.kdf_version).where(
                         UserAPIKey.user_id == user_id,
                         UserAPIKey.provider == provider,
                     )
@@ -117,7 +151,7 @@ class APIKeyService:
                 row = result.one_or_none()
                 if row is None:
                     return None
-                return await self._decrypt(row.encrypted_key)
+                return await self._decrypt(row.encrypted_key, row.kdf_version)
         except Exception as exc:
             logger.warning(
                 "Failed to get API key",

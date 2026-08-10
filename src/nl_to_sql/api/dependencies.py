@@ -156,7 +156,7 @@ async def resolve_active_connection(
     try:
         conn_svc = container.connection_service()
         connection_id = await conn_svc.get_active_connection_id(token_data.user_id)
-        user_client = await conn_svc.get_client(connection_id)
+        user_client = await conn_svc.get_client(token_data.user_id, connection_id)
         if user_client is not None:
             db_client = user_client
         return token_data.user_id, connection_id, db_client

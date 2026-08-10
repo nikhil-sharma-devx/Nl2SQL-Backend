@@ -85,6 +85,10 @@ class UserAPIKey(Base):
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     provider = Column(String(20), nullable=False)
     encrypted_key = Column(Text, nullable=False)
+    # 1 = legacy sha256(secret_key) derivation, 2 = HKDF-SHA256. New/updated
+    # rows always write the current version; older rows decrypt via v1 until
+    # next write ("migrate opportunistically" — see api_key_service.py).
+    kdf_version = Column(Integer, nullable=False, default=1, server_default="1")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -122,6 +126,8 @@ class UserDatabaseConnection(Base):
     db_type = Column(String(20), nullable=False, default="postgresql")
     # NULL = the built-in "Server Default" connection (uses the platform database).
     encrypted_url = Column(Text, nullable=True)
+    # See UserAPIKey.kdf_version — same versioned-KDF scheme, same module.
+    kdf_version = Column(Integer, nullable=False, default=1, server_default="1")
     is_default = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

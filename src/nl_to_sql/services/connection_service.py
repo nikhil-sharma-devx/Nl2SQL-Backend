@@ -48,7 +48,12 @@ from nl_to_sql.core.exceptions import (
 from nl_to_sql.infrastructure.database.models import Base, UserDatabaseConnection
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
-from nl_to_sql.services.api_key_service import _make_fernet, _to_async_url
+from nl_to_sql.services.api_key_service import (
+    CURRENT_KDF_VERSION,
+    _make_fernet_v1,
+    _make_fernet_v2,
+    _to_async_url,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -112,20 +117,30 @@ def _derive_db_type(url: str) -> str:
     return "postgresql"
 
 
+_ClientCacheKey = tuple[str, str]  # (user_id, connection_id)
+
+
 class _LRUClientCache:
-    """Thread-unsafe LRU cache of AsyncDatabaseClient (single event loop — safe)."""
+    """Thread-unsafe LRU cache of AsyncDatabaseClient (single event loop — safe).
+
+    Keyed by ``(user_id, connection_id)`` rather than ``connection_id`` alone
+    so a cache *hit* can never return another user's client — ownership is
+    encoded in the key itself instead of needing a check on every lookup.
+    """
 
     def __init__(self, maxsize: int) -> None:
-        self._cache: OrderedDict[str, AsyncDatabaseClient] = OrderedDict()
+        self._cache: OrderedDict[_ClientCacheKey, AsyncDatabaseClient] = OrderedDict()
         self._maxsize = maxsize
 
-    def get(self, key: str) -> AsyncDatabaseClient | None:
+    def get(self, key: _ClientCacheKey) -> AsyncDatabaseClient | None:
         if key not in self._cache:
             return None
         self._cache.move_to_end(key)
         return self._cache[key]
 
-    def put(self, key: str, value: AsyncDatabaseClient) -> AsyncDatabaseClient | None:
+    def put(
+        self, key: _ClientCacheKey, value: AsyncDatabaseClient
+    ) -> AsyncDatabaseClient | None:
         """Insert/update; return the evicted client if the cache was full."""
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -137,8 +152,13 @@ class _LRUClientCache:
         self._cache[key] = value
         return evicted
 
-    def pop(self, key: str) -> AsyncDatabaseClient | None:
+    def pop(self, key: _ClientCacheKey) -> AsyncDatabaseClient | None:
         return self._cache.pop(key, None)
+
+    def pop_connection(self, connection_id: str) -> list[AsyncDatabaseClient]:
+        """Remove and return every cached client for ``connection_id``, any user."""
+        matches = [k for k in self._cache if k[1] == connection_id]
+        return [self._cache.pop(k) for k in matches]
 
     def drain(self) -> list[AsyncDatabaseClient]:
         clients = list(self._cache.values())
@@ -165,7 +185,8 @@ class ConnectionService:
 
     def __init__(self, database_url: str, secret_key: str) -> None:
         self._database_url = _to_async_url(database_url)
-        self._fernet = _make_fernet(secret_key)
+        self._fernet_v1 = _make_fernet_v1(secret_key)
+        self._fernet_v2 = _make_fernet_v2(secret_key)
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._client_cache = _LRUClientCache(maxsize=_CACHE_MAX_SIZE)
@@ -194,20 +215,21 @@ class ConnectionService:
     # ── Encryption ──────────────────────────────────────────────────────────────
 
     async def _encrypt(self, value: str) -> str:
+        """Encrypt with the current (v2/HKDF) key — every new/updated row upgrades."""
         import asyncio
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, lambda: self._fernet.encrypt(value.encode()).decode()
+            None, lambda: self._fernet_v2.encrypt(value.encode()).decode()
         )
 
-    async def _decrypt(self, value: str) -> str:
+    async def _decrypt(self, value: str, kdf_version: int = 1) -> str:
+        """Decrypt with the Fernet matching ``kdf_version`` (legacy rows default to v1)."""
         import asyncio
 
+        fernet = self._fernet_v2 if kdf_version >= CURRENT_KDF_VERSION else self._fernet_v1
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._fernet.decrypt(value.encode()).decode()
-        )
+        return await loop.run_in_executor(None, lambda: fernet.decrypt(value.encode()).decode())
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -358,7 +380,7 @@ class ConnectionService:
             info = self._to_info(r)
             if r.encrypted_url is not None:
                 try:
-                    info.url_preview = _mask_url(await self._decrypt(r.encrypted_url))
+                    info.url_preview = _mask_url(await self._decrypt(r.encrypted_url, r.kdf_version))
                 except Exception:
                     info.url_preview = None
             infos.append(info)
@@ -416,6 +438,7 @@ class ConnectionService:
                 name=name,
                 db_type=resolved_type,
                 encrypted_url=encrypted,
+                kdf_version=CURRENT_KDF_VERSION,
                 is_default=make_default,
                 created_at=now,
                 updated_at=now,
@@ -462,6 +485,7 @@ class ConnectionService:
                 row.name = cleaned
             if normalised is not None:
                 row.encrypted_url = await self._encrypt(normalised)
+                row.kdf_version = CURRENT_KDF_VERSION
                 row.db_type = _derive_db_type(normalised)
             row.updated_at = datetime.utcnow()
             try:
@@ -474,7 +498,7 @@ class ConnectionService:
             await db.refresh(row)
             info = self._to_info(row)
             if row.encrypted_url is not None:
-                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url))
+                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url, row.kdf_version))
 
         # A changed DSN invalidates the cached client.
         if normalised is not None:
@@ -523,7 +547,7 @@ class ConnectionService:
             await db.refresh(row)
             info = self._to_info(row)
             if row.encrypted_url is not None:
-                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url))
+                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url, row.kdf_version))
         logger.info("Connection selected", user_id=user_id, connection_id=connection_id)
         return info
 
@@ -533,10 +557,11 @@ class ConnectionService:
         async with factory() as db:
             row = await self._get_owned(db, user_id, connection_id)
             encrypted = row.encrypted_url
+            kdf_version = row.kdf_version
         if encrypted is None:
             # Server Default — reachability is the platform's responsibility.
             return
-        normalised = await self._decrypt(encrypted)
+        normalised = await self._decrypt(encrypted, kdf_version)
         await self._test_client(normalised)
 
     # ── Active-connection resolution ──────────────────────────────────────────────
@@ -561,7 +586,7 @@ class ConnectionService:
             ).scalar_one()
             info = self._to_info(row)
             if row.encrypted_url is not None:
-                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url))
+                info.url_preview = _mask_url(await self._decrypt(row.encrypted_url, row.kdf_version))
         return info
 
     async def upsert_default_dsn(self, user_id: str, raw_url: str) -> ConnectionInfo:
@@ -581,42 +606,50 @@ class ConnectionService:
         await self._evict(active)
         logger.info("Connection DSN cleared (reverted to server default)", user_id=user_id)
 
-    async def get_client(self, connection_id: str) -> AsyncDatabaseClient | None:
-        """Return a live client for a connection, or ``None`` for Server Default.
+    async def get_client(self, user_id: str, connection_id: str) -> AsyncDatabaseClient | None:
+        """Return a live client for ``user_id``'s connection, or ``None`` for Server Default.
 
-        ``None`` signals the caller to fall back to the platform database client.
+        ``None`` signals the caller to fall back to the platform database
+        client — for an unknown connection, a Server Default (no DSN), *or*
+        a ``connection_id`` not owned by ``user_id``. Ownership is enforced
+        by scoping the lookup query, and the cache key includes ``user_id``
+        so a cache hit can never return another user's client.
         """
-        cached = self._client_cache.get(connection_id)
+        cache_key = (user_id, connection_id)
+        cached = self._client_cache.get(cache_key)
         if cached is not None:
             return cached
         factory = self._require_factory()
         async with factory() as db:
             row = (
                 await db.execute(
-                    select(UserDatabaseConnection.encrypted_url).where(
-                        UserDatabaseConnection.connection_id == connection_id
+                    select(
+                        UserDatabaseConnection.encrypted_url, UserDatabaseConnection.kdf_version
+                    ).where(
+                        UserDatabaseConnection.connection_id == connection_id,
+                        UserDatabaseConnection.user_id == user_id,
                     )
                 )
-            ).scalar_one_or_none()
+            ).one_or_none()
         if row is None:
-            return None  # unknown → caller uses server default
-        encrypted = row
+            return None  # unknown, or not owned by user_id → caller uses server default
+        encrypted, kdf_version = row
         if encrypted is None:
             return None  # Server Default connection
         try:
-            raw_url = await self._decrypt(encrypted)
+            raw_url = await self._decrypt(encrypted, kdf_version)
         except Exception as exc:
             logger.warning(
                 "Failed to decrypt connection DSN", connection_id=connection_id, error=str(exc)
             )
             return None
         client = AsyncDatabaseClient(database_url=raw_url)
-        evicted = self._client_cache.put(connection_id, client)
+        evicted = self._client_cache.put(cache_key, client)
         if evicted is not None:
             await evicted.dispose()
         return client
 
     async def _evict(self, connection_id: str) -> None:
-        client = self._client_cache.pop(connection_id)
-        if client:
+        """Drop any cached client for ``connection_id``, regardless of the owning user."""
+        for client in self._client_cache.pop_connection(connection_id):
             await client.dispose()
