@@ -7,6 +7,7 @@ one of the primary sources of hallucination (referencing non-existent tables).
 
 This is part of the retrieval pipeline and belongs in rag/retrieval/.
 """
+
 from __future__ import annotations
 
 import json
@@ -113,7 +114,14 @@ class TableSelectorService:
                 selected=selected,
                 tokens=response.total_tokens,
             )
-            return selected or (fallback_tables or available_tables)
+            if selected is None:
+                # Genuine parse failure (no JSON array / invalid JSON) — fall back.
+                return fallback_tables or available_tables
+            # H2: an empty list here is the LLM's deliberate "no table can
+            # answer this" — `selected or fallback` used to treat that
+            # falsy-but-valid `[]` the same as a failure and dump the whole
+            # schema into context. Honor it.
+            return selected
 
         except Exception as exc:
             log.warning(
@@ -125,7 +133,7 @@ class TableSelectorService:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_table_list(raw: str, available_tables: list[str]) -> list[str]:
+    def _parse_table_list(raw: str, available_tables: list[str]) -> list[str] | None:
         """Extract and validate a JSON table list from the LLM response.
 
         Args:
@@ -133,23 +141,27 @@ class TableSelectorService:
             available_tables: The ground-truth list of known tables.
 
         Returns:
-            Validated list of table names that exist in *available_tables*.
-            Hallucinated / misspelled names are silently dropped.
+            Validated list of table names that exist in *available_tables*
+            (may be legitimately empty — the LLM's deliberate "no table can
+            answer this"). Hallucinated / misspelled names are silently
+            dropped. Returns ``None`` only when the response couldn't be
+            parsed as a JSON array at all — a genuine failure distinct from a
+            valid empty selection (H2).
         """
         # Find the JSON array in the response
         match = _JSON_ARRAY_RE.search(raw)
         if not match:
             logger.warning("Table selector: no JSON array found in response", raw=raw[:200])
-            return []
+            return None
 
         try:
             parsed = json.loads(match.group())
         except json.JSONDecodeError:
             logger.warning("Table selector: JSON parse failed", raw=raw[:200])
-            return []
+            return None
 
         if not isinstance(parsed, list):
-            return []
+            return None
 
         known = set(available_tables)
         validated: list[str] = []

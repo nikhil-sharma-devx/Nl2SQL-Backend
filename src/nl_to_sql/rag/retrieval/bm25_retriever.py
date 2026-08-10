@@ -3,6 +3,7 @@
 Handles exact column and table name matches that dense retrieval sometimes
 misses. Loads the persisted BM25 index from the BM25Store.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -10,17 +11,12 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nl_to_sql.core.models.schema import SchemaChunk
+from nl_to_sql.infrastructure.bm25_store import tokenize_for_bm25
 
 if TYPE_CHECKING:
     from nl_to_sql.infrastructure.bm25_store import BM25Store
 
 logger = structlog.get_logger(__name__)
-
-
-def _tokenise(text: str) -> list[str]:
-    """Simple whitespace + lowercase tokeniser (must match ingestion)."""
-    import re
-    return re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", text.lower())
 
 
 class BM25Retriever:
@@ -57,7 +53,7 @@ class BM25Retriever:
         bm25, _corpus, chunk_metadata = index_data
 
         # Tokenise the query using the same tokeniser as ingestion
-        query_tokens = _tokenise(question)
+        query_tokens = tokenize_for_bm25(question)
         if not query_tokens:
             return []
 
@@ -69,7 +65,7 @@ class BM25Retriever:
             range(len(scores)),
             key=lambda i: scores[i],
             reverse=True,
-        )[:self._top_k]
+        )[: self._top_k]
 
         chunks: list[SchemaChunk] = []
         for idx in scored_indices:

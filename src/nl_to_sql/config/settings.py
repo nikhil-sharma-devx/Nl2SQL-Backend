@@ -1,4 +1,5 @@
 """Application settings — loaded from environment variables or .env file."""
+
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = structlog.get_logger(__name__)
 
+
 def find_project_root() -> Path:
     """Find the project root by looking for pyproject.toml or .env up the tree."""
     current = Path(__file__).resolve().parent
@@ -19,6 +21,7 @@ def find_project_root() -> Path:
             return current
         current = current.parent
     return Path.cwd()
+
 
 PROJECT_ROOT = find_project_root()
 
@@ -96,7 +99,9 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", description="Required when llm_provider=openai")
     anthropic_api_key: str = Field(default="", description="Required when llm_provider=anthropic")
     gemini_api_key: str = Field(default="", description="Required when llm_provider=gemini")
-    together_api_key: str = Field(default="", description="Required when fine_tuning_provider=together")
+    together_api_key: str = Field(
+        default="", description="Required when fine_tuning_provider=together"
+    )
 
     # ── Embeddings ───────────────────────────────────────────────────────────
     embedding_provider: Literal["huggingface", "gemini"] = "huggingface"
@@ -105,7 +110,9 @@ class Settings(BaseSettings):
     huggingface_model: str = "all-MiniLM-L6-v2"
     gemini_embedding_model: str = "models/text-embedding-004"
     # Separate key for embeddings — falls back to gemini_api_key if not set
-    gemini_embedding_api_key: str = Field(default="", description="Gemini API key for embeddings; falls back to gemini_api_key")
+    gemini_embedding_api_key: str = Field(
+        default="", description="Gemini API key for embeddings; falls back to gemini_api_key"
+    )
 
     @property
     def resolved_gemini_embedding_api_key(self) -> str:
@@ -145,15 +152,29 @@ class Settings(BaseSettings):
     def parsed_available_databases(self) -> dict[str, str]:
         """Parse available_databases JSON string into a dict, fallback to default local db."""
         import json
+
         default_db = {"Default DB": self.database_url}
         if not self.available_databases:
             return default_db
         try:
             parsed = json.loads(self.available_databases)
             if not isinstance(parsed, dict):
+                logger.warning(
+                    "AVAILABLE_DATABASES is valid JSON but not an object — "
+                    "ignoring and falling back to the default database",
+                    value=self.available_databases[:200],
+                )
                 return default_db
             return parsed
-        except Exception:
+        except Exception as exc:
+            # A config typo here used to silently disable multi-DB support
+            # with no trace of why — log it so it's diagnosable.
+            logger.warning(
+                "AVAILABLE_DATABASES could not be parsed as JSON — "
+                "falling back to the default database",
+                value=self.available_databases[:200],
+                error=str(exc),
+            )
             return default_db
 
     # ── Cache ────────────────────────────────────────────────────────────────
@@ -181,9 +202,6 @@ class Settings(BaseSettings):
     # ── Query Intelligence ───────────────────────────────────────────────────
     query_rewriting_enabled: bool = True
     query_expansion_enabled: bool = True
-    parallel_retrieval_enabled: bool = True
-    max_context_tokens: int = 8000
-    intent_classification_enabled: bool = True
 
     hybrid_search_alpha: float = 0.5  # weight for vector vs BM25 in hybrid retrieval
 
@@ -213,10 +231,6 @@ class Settings(BaseSettings):
     # Load the embedding + reranker models at boot so the first user query
     # doesn't pay the one-time ~1-3 s SentenceTransformer/CrossEncoder cost.
     warm_models_on_startup: bool = True
-
-    # ── Lazy Loading ─────────────────────────────────────────────────────────
-    lazy_loading_enabled: bool = True
-    chunk_cache_size: int = 100
 
     # ── Embedding ────────────────────────────────────────────────────────────
     embedding_batch_size: int = 32
@@ -313,7 +327,9 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     # ── Admin ─────────────────────────────────────────────────────────────────
-    admin_emails: str = Field(default="", description="Comma-separated email addresses granted admin access")
+    admin_emails: str = Field(
+        default="", description="Comma-separated email addresses granted admin access"
+    )
 
     @property
     def admin_email_list(self) -> list[str]:
@@ -344,10 +360,12 @@ class Settings(BaseSettings):
             logger.warning("gemini_api_key is empty while llm_provider is gemini")
         return v
 
-    _WEAK_SECRET_DEFAULTS: frozenset[str] = frozenset({
-        "change-me-in-production",
-        "change-me-jwt-secret-32-chars-min",
-    })
+    _WEAK_SECRET_DEFAULTS: frozenset[str] = frozenset(
+        {
+            "change-me-in-production",
+            "change-me-jwt-secret-32-chars-min",
+        }
+    )
 
     @model_validator(mode="after")
     def _align_settings(self) -> "Settings":

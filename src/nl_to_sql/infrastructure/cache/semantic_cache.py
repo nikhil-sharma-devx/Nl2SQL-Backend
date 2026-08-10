@@ -1,4 +1,5 @@
 """Semantic cache â€” caches semantically similar queries using vector similarity."""
+
 import asyncio
 import hashlib
 import time
@@ -89,26 +90,28 @@ class SemanticCache(ICache):  # type: ignore[misc]
             # Embed the question
             query_embedding = await self._embedder.embed(question)
 
-            # Retrieve more candidates so we can filter by connection_id when needed
-            top_k = 10 if connection_id else 1
+            # Retrieve more candidates than needed so filtering by connection_id
+            # below still leaves a usable pool to score.
             similar_chunks = await self._vector_store.similarity_search(
                 query_embedding=query_embedding,
-                top_k=top_k,
+                top_k=10,
             )
 
             if not similar_chunks:
                 log.debug("No semantically similar queries found")
                 return None
 
-            # Filter by connection_id before scoring â€” prevents cross-user cache leakage
-            if connection_id:
-                similar_chunks = [
-                    c for c in similar_chunks
-                    if c.metadata.get("connection_id") == connection_id
-                ]
-                if not similar_chunks:
-                    log.debug("No semantic cache entries for this user")
-                    return None
+            # C7 fail-closed: always filter by connection_id, including when it's
+            # None — an unscoped caller must only ever match other unscoped
+            # (shared) entries, never every tenant's cached answers. Skipping
+            # this filter when connection_id was falsy is exactly the bug that
+            # let a connection-resolution failure leak another tenant's cache hit.
+            similar_chunks = [
+                c for c in similar_chunks if c.metadata.get("connection_id") == connection_id
+            ]
+            if not similar_chunks:
+                log.debug("No semantic cache entries for this scope")
+                return None
 
             best_match = similar_chunks[0]
             similarity_score = 1.0 - best_match.metadata.get("distance", 1.0)
@@ -142,7 +145,12 @@ class SemanticCache(ICache):  # type: ignore[misc]
             if cached_response_str:
                 try:
                     import json
-                    cached_response = json.loads(cached_response_str) if isinstance(cached_response_str, str) else cached_response_str
+
+                    cached_response = (
+                        json.loads(cached_response_str)
+                        if isinstance(cached_response_str, str)
+                        else cached_response_str
+                    )
                 except Exception:
                     cached_response = cached_response_str
 
@@ -186,6 +194,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
             id_namespace = f"{connection_id}:" if connection_id else ""
             chunk_id = f"semantic:{id_namespace}{hashlib.sha256(question.encode()).hexdigest()}"
             import json
+
             chunk = SchemaChunk(
                 chunk_id=chunk_id,
                 table_name="_semantic_cache",

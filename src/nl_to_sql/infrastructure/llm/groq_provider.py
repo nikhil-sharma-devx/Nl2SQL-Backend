@@ -1,4 +1,5 @@
 """Groq LLM provider — implements ILLMProvider."""
+
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -29,8 +30,13 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
         self,
         api_key: str,
         model: str = "llama3-70b-8192",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
-        self._client = AsyncGroq(api_key=api_key)
+        # Medium: no timeout/max_retries set — a hung upstream could tie up
+        # request capacity indefinitely (matches the SDK's own defaults for
+        # max_retries, but the SDK's default timeout is much longer).
+        self._client = AsyncGroq(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self._model = model
 
     async def complete(
@@ -76,7 +82,7 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
             if "rate_limit" in error_str.lower() or "rate limit" in error_str.lower():
                 # Extract retry_after time from error message if available
                 retry_after = None
-                match = re.search(r'try again in\s+([\d.]+)', error_str)
+                match = re.search(r"try again in\s+([\d.]+)", error_str)
                 if match:
                     retry_after = int(float(match.group(1))) + 5  # Add 5 second buffer
 
@@ -86,9 +92,7 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
                     retry_after=retry_after,
                 ) from exc
 
-            raise LLMProviderError(
-                f"Groq request failed: {exc}", detail=str(exc)
-            ) from exc
+            raise LLMProviderError(f"Groq request failed: {exc}", detail=str(exc)) from exc
 
     async def health_check(self) -> bool:
         """Ping Groq by listing models."""
@@ -96,6 +100,12 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
             await self._client.models.list()
             return True
         except GroqAPIError:
+            return False
+        except Exception:
+            # Low: only catching GroqAPIError left network errors/timeouts
+            # propagating instead of returning False like the other 3
+            # providers — inconsistent Liskov substitutability for callers
+            # expecting health_check() to never raise.
             return False
 
     async def stream_complete(
@@ -133,7 +143,7 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
             error_str = str(exc)
             if "rate_limit" in error_str.lower() or "rate limit" in error_str.lower():
                 retry_after = None
-                match = re.search(r'try again in\s+([\d.]+)', error_str)
+                match = re.search(r"try again in\s+([\d.]+)", error_str)
                 if match:
                     retry_after = int(float(match.group(1))) + 5
 

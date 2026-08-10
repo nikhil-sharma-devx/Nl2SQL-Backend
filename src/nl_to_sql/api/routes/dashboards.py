@@ -10,6 +10,7 @@ Every owner action is scoped to ``current_user.id`` — a cross-user id returns
 404 (never 403, so existence is not confirmed). Mutating and refresh endpoints
 are rate-limited.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -26,10 +27,12 @@ from nl_to_sql.api.dependencies import (
     get_starter_content_service,
 )
 from nl_to_sql.api.middleware.rate_limiter import limiter
+from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import Dashboard, DashboardWidget
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.services.dashboard_service import DashboardService
+from nl_to_sql.services.sql_validator import SQLValidatorService
 from nl_to_sql.services.starter_content_service import StarterContentService
 
 logger = structlog.get_logger(__name__)
@@ -318,11 +321,27 @@ async def refresh_dashboard(
     if dashboard is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
 
+    # Defense-in-depth (C5): re-validate every widget's SQL immediately before
+    # execution, independent of the validation already enforced when the
+    # widget was stored — catches anything stored before this check existed.
+    validator = SQLValidatorService(dialect=get_settings().sql_dialect)
+
     results: list[WidgetRefreshResult] = []
     for widget in dashboard.widgets:
         rows: list[dict[str, Any]] = []
         error: str | None = None
-        if widget.sql.strip():
+        sql = widget.sql.strip()
+        if not sql:
+            error = "Widget has no SQL to run."
+        elif not validator.validate(sql).is_valid:
+            error = "Widget SQL rejected by validation."
+            logger.warning(
+                "dashboard widget refresh blocked by SQL validation",
+                user_id=current_user.id,
+                dashboard_id=dashboard_id,
+                widget_id=widget.id,
+            )
+        else:
             try:
                 rows = await db_client.execute_sql(widget.sql)
             except Exception as exc:
@@ -334,8 +353,6 @@ async def refresh_dashboard(
                     widget_id=widget.id,
                     error=error,
                 )
-        else:
-            error = "Widget has no SQL to run."
         results.append(
             WidgetRefreshResult(
                 widget_id=widget.id,

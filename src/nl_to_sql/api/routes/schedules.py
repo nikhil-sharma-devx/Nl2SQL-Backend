@@ -4,6 +4,7 @@ Every endpoint is authenticated and scoped to the current user; a schedule
 owned by another user is reported as *not found* (404) so cross-user
 existence cannot be probed (mirrors ``api/routes/connections.py``).
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -54,6 +55,9 @@ class ScheduleOut(BaseModel):
 
 class ScheduleListResponse(BaseModel):
     items: list[ScheduleOut]
+    total: int
+    limit: int
+    offset: int
 
 
 class ScheduleCreate(BaseModel):
@@ -125,14 +129,20 @@ def _to_out(info: ScheduleInfo) -> ScheduleOut:
 @router.get("", response_model=ScheduleListResponse, summary="List the user's scheduled queries")
 async def list_schedules(
     connection_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
     svc: ScheduledQueryService = Depends(get_scheduled_query_service),
     active_connection_id: str = Depends(get_active_connection_id),
     starter_content: StarterContentService = Depends(get_starter_content_service),
 ) -> ScheduleListResponse:
     await starter_content.ensure_schedules_seeded(current_user.id, active_connection_id)
-    infos = await svc.list_schedules(current_user.id, connection_id=connection_id)
-    return ScheduleListResponse(items=[_to_out(i) for i in infos])
+    infos, total = await svc.list_schedules(
+        current_user.id, connection_id=connection_id, limit=limit, offset=offset
+    )
+    return ScheduleListResponse(
+        items=[_to_out(i) for i in infos], total=total, limit=limit, offset=offset
+    )
 
 
 @router.post("", response_model=ScheduleOut, summary="Create a scheduled query")
@@ -208,7 +218,9 @@ async def pause_schedule(
     return _to_out(info)
 
 
-@router.post("/{schedule_id}/resume", response_model=ScheduleOut, summary="Resume a scheduled query")
+@router.post(
+    "/{schedule_id}/resume", response_model=ScheduleOut, summary="Resume a scheduled query"
+)
 async def resume_schedule(
     schedule_id: str,
     current_user: UserPublic = Depends(get_current_user),

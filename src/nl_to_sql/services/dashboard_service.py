@@ -13,6 +13,7 @@ result set to the best visualization. It is a pure ``@staticmethod`` so it can
 be unit-tested in isolation and reused by the route's ``recommend-chart``
 endpoint.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -24,7 +25,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from nl_to_sql.core.exceptions import SQLValidationError
 from nl_to_sql.infrastructure.database.models import Dashboard, DashboardWidget
+from nl_to_sql.services.sql_validator import SQLValidatorService
 
 logger = structlog.get_logger(__name__)
 
@@ -116,9 +119,30 @@ def _is_geo(col: dict[str, Any]) -> bool:
 class DashboardService:
     """Per-user dashboards CRUD + widget management + chart recommendation."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        sql_validator: SQLValidatorService,
+    ) -> None:
         self._session_factory = session_factory
+        self._sql_validator = sql_validator
         self._log = logger.bind(service="Dashboard")
+
+    def _validate_widget_sql(self, sql: str | None) -> None:
+        """Reject widget SQL that fails :class:`SQLValidatorService` (C5).
+
+        Empty SQL is allowed through — a widget with no SQL yet is a valid
+        draft state; ``refresh`` already reports that as a per-widget error.
+        """
+        sql = (sql or "").strip()
+        if not sql:
+            return
+        result = self._sql_validator.validate(sql)
+        if not result.is_valid:
+            raise SQLValidationError(
+                "Widget SQL rejected by validation.",
+                detail="; ".join(result.errors),
+            )
 
     # ── Chart recommendation (pure, LLM-free) ──────────────────────────────────
 
@@ -151,9 +175,7 @@ class DashboardService:
         numeric = [c for c in cols if _is_numeric(c, rows)]
         temporal = [c for c in cols if _is_temporal(c)]
         geo = [c for c in cols if _is_geo(c)]
-        categorical = [
-            c for c in cols if c not in numeric and c not in temporal and c not in geo
-        ]
+        categorical = [c for c in cols if c not in numeric and c not in temporal and c not in geo]
 
         # 1. Geography → map
         if geo:
@@ -270,6 +292,9 @@ class DashboardService:
         is_builtin: bool = False,
     ) -> Dashboard:
         """Create a dashboard, optionally seeding it with widgets."""
+        for widget_data in widgets or []:
+            self._validate_widget_sql(widget_data.get("sql"))
+
         dashboard_id = str(uuid4())
         async with self._session_factory() as db:
             dashboard = Dashboard(
@@ -307,9 +332,7 @@ class DashboardService:
         conditions = [Dashboard.user_id == user_id]
         async with self._session_factory() as db:
             total = (
-                await db.execute(
-                    select(func.count()).select_from(Dashboard).where(*conditions)
-                )
+                await db.execute(select(func.count()).select_from(Dashboard).where(*conditions))
             ).scalar_one()
 
             result = await db.execute(
@@ -389,6 +412,7 @@ class DashboardService:
         self, user_id: str, dashboard_id: str, data: dict[str, Any]
     ) -> Dashboard | None:
         """Append a widget to a dashboard; ``None`` if dashboard not found."""
+        self._validate_widget_sql(data.get("sql"))
         async with self._session_factory() as db:
             dashboard = await self._load_owned(db, user_id, dashboard_id)
             if dashboard is None:
@@ -408,6 +432,8 @@ class DashboardService:
     ) -> Dashboard | None:
         """Patch a widget's editable fields; ``None`` if dashboard/widget absent."""
         allowed = {"title", "nl_prompt", "sql", "chart_type", "chart_config", "layout", "position"}
+        if "sql" in updates and updates["sql"] is not None:
+            self._validate_widget_sql(updates["sql"])
         async with self._session_factory() as db:
             dashboard = await self._load_owned(db, user_id, dashboard_id)
             if dashboard is None:

@@ -1,4 +1,5 @@
 """Auth routes — register, login, Google sign-in, and current user."""
+
 from __future__ import annotations
 
 from datetime import UTC
@@ -97,6 +98,7 @@ async def _record_login(
     Returns the new UserLoginSession.id on success, None otherwise.
     """
     from datetime import datetime
+
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
     device, browser = _parse_ua(ua)
@@ -192,15 +194,13 @@ async def register(
     )
     try:
         from nl_to_sql.infrastructure.database.models import PasswordHistory
+
         async with session_service._session_factory() as db_sess:
             db_sess.add(new_user)
             await db_sess.flush()  # to get new_user.id
 
             # Record initial password history
-            pw_history = PasswordHistory(
-                user_id=new_user.id,
-                hashed_password=hashed
-            )
+            pw_history = PasswordHistory(user_id=new_user.id, hashed_password=hashed)
             db_sess.add(pw_history)
 
             await db_sess.commit()
@@ -213,6 +213,7 @@ async def register(
 
     # Send OTP asynchronously
     import asyncio
+
     _bg = asyncio.create_task(send_otp_email(new_user.email, otp))
     _bg.add_done_callback(lambda t: None)  # prevent GC
 
@@ -233,14 +234,18 @@ async def login(
 ) -> TokenResponse:
     """Validate credentials and return a JWT."""
     async with session_service._session_factory() as db_sess:
-        result = await db_sess.execute(
-            select(User).where(User.email == body.email.lower().strip())
-        )
+        result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
-    if user is None or not user.hashed_password or not verify_password(body.password, user.hashed_password):
+    if (
+        user is None
+        or not user.hashed_password
+        or not verify_password(body.password, user.hashed_password)
+    ):
         if user:
-            await _record_login(user.id, session_service._session_factory, request, outcome="failed")
+            await _record_login(
+                user.id, session_service._session_factory, request, outcome="failed"
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -258,9 +263,13 @@ async def login(
             detail="Unverified email. Please verify your OTP.",
         )
 
-    session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
+    session_id = await _record_login(
+        user.id, session_service._session_factory, request, outcome="success"
+    )
     logger.info("User logged in", email=user.email, provider="email")
-    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
+    return await _issue_token_response(
+        user, session_service._session_factory, session_id=session_id
+    )
 
 
 @router.post(
@@ -274,14 +283,12 @@ async def google_auth(
     body: GoogleAuthRequest,
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> TokenResponse:
-    """Verify a Google ID token and login/register the user."""
-    try:
-        claims = await verify_google_token(body.credential)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
-        ) from exc
+    """Verify a Google ID token and login/register the user.
+
+    ``verify_google_token`` raises ``AuthenticationError`` on failure, which
+    the global error handler maps to 401 — no local try/except needed.
+    """
+    claims = await verify_google_token(body.credential)
 
     if not claims.get("email_verified"):
         raise HTTPException(
@@ -295,16 +302,12 @@ async def google_auth(
 
     async with session_service._session_factory() as db_sess:
         # Try to find by Google sub first (most stable identifier)
-        result = await db_sess.execute(
-            select(User).where(User.google_sub == google_sub)
-        )
+        result = await db_sess.execute(select(User).where(User.google_sub == google_sub))
         user = result.scalar_one_or_none()
 
         if user is None:
             # Try by email (user may have registered by email first)
-            result = await db_sess.execute(
-                select(User).where(User.email == email)
-            )
+            result = await db_sess.execute(select(User).where(User.email == email))
             user = result.scalar_one_or_none()
 
         if user is None:
@@ -327,9 +330,13 @@ async def google_auth(
         await db_sess.commit()
         await db_sess.refresh(user)
 
-    session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
+    session_id = await _record_login(
+        user.id, session_service._session_factory, request, outcome="success"
+    )
     logger.info("User authenticated via Google", email=user.email)
-    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
+    return await _issue_token_response(
+        user, session_service._session_factory, session_id=session_id
+    )
 
 
 @router.get(
@@ -368,9 +375,7 @@ async def refresh(
 
     async with session_service._session_factory() as db_sess:
         row = (
-            await db_sess.execute(
-                select(RefreshToken).where(RefreshToken.token_hash == token_hash)
-            )
+            await db_sess.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
         ).scalar_one_or_none()
 
         if row is None or row.revoked_at is not None or row.expires_at < now:
@@ -427,9 +432,7 @@ async def refresh(
         )
         await db_sess.commit()
 
-        access = create_access_token(
-            user_id=user.id, email=user.email, session_id=session_id
-        )
+        access = create_access_token(user_id=user.id, email=user.email, session_id=session_id)
         return TokenResponse(
             access_token=access,
             refresh_token=raw_refresh,
@@ -455,9 +458,7 @@ async def verify_otp(
     email_key = body.email.lower().strip()
 
     async with session_service._session_factory() as db_sess:
-        result = await db_sess.execute(
-            select(User).where(User.email == email_key)
-        )
+        result = await db_sess.execute(select(User).where(User.email == email_key))
         user = result.scalar_one_or_none()
 
         if not user:
@@ -496,9 +497,13 @@ async def verify_otp(
         await db_sess.commit()
         await db_sess.refresh(user)
 
-    session_id = await _record_login(user.id, session_service._session_factory, request, outcome="success")
+    session_id = await _record_login(
+        user.id, session_service._session_factory, request, outcome="success"
+    )
     logger.info("User verified via OTP", email=user.email)
-    return await _issue_token_response(user, session_service._session_factory, session_id=session_id)
+    return await _issue_token_response(
+        user, session_service._session_factory, session_id=session_id
+    )
 
 
 @router.post(
@@ -519,9 +524,7 @@ async def resend_otp(
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
 
     async with session_service._session_factory() as db_sess:
-        result = await db_sess.execute(
-            select(User).where(User.email == body.email.lower().strip())
-        )
+        result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
         if not user:
@@ -565,9 +568,7 @@ async def forgot_password(
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
 
     async with session_service._session_factory() as db_sess:
-        result = await db_sess.execute(
-            select(User).where(User.email == body.email.lower().strip())
-        )
+        result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
         # Always return success to prevent email enumeration; only send if user exists
@@ -606,20 +607,35 @@ async def reset_password(
     from nl_to_sql.infrastructure.database.models import PasswordHistory
 
     async with session_service._session_factory() as db_sess:
-        result = await db_sess.execute(
-            select(User).where(User.email == body.email.lower().strip())
-        )
+        result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
         if not user or user.auth_provider != "email":
             raise HTTPException(status_code=400, detail="Invalid request")
 
+        email_key = user.email.lower()
+
+        # Enforce the same per-account attempt lockout as /verify-otp before
+        # checking the code — this OTP guards the same otp_code field.
+        attempts = _otp_failures.get(email_key, 0)
+        if attempts >= _OTP_MAX_ATTEMPTS:
+            user.otp_code = None
+            user.otp_expires_at = None
+            await db_sess.commit()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed attempts. Request a new OTP.",
+            )
+
         if not user.otp_code or user.otp_code != body.otp_code:
+            _otp_failures[email_key] = attempts + 1
             raise HTTPException(status_code=400, detail="Invalid OTP code")
 
         now = datetime.now(UTC).replace(tzinfo=None)
         if user.otp_expires_at and now > user.otp_expires_at:
             raise HTTPException(status_code=400, detail="OTP code has expired")
+
+        _otp_failures.pop(email_key, None)
 
         # Check password history (last 3 passwords)
         result = await db_sess.execute(
@@ -633,8 +649,7 @@ async def reset_password(
         for record in history:
             if verify_password(body.new_password, record.hashed_password):
                 raise HTTPException(
-                    status_code=400,
-                    detail="Password must not be one of your last 3 passwords."
+                    status_code=400, detail="Password must not be one of your last 3 passwords."
                 )
 
         # Hash new password
@@ -649,10 +664,7 @@ async def reset_password(
         user.is_verified = True
 
         # Insert new password history
-        new_history = PasswordHistory(
-            user_id=user.id,
-            hashed_password=hashed
-        )
+        new_history = PasswordHistory(user_id=user.id, hashed_password=hashed)
         db_sess.add(new_history)
 
         # Optional: delete history older than last 2 to keep table small (new one makes 3)

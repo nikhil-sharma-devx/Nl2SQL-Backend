@@ -1,4 +1,5 @@
 """Redis cache — implements ICache."""
+
 import json
 from typing import Any
 
@@ -26,9 +27,22 @@ class RedisCache(ICache):  # type: ignore[misc]
       D — Callers depend on ICache, not on this class.
     """
 
-    def __init__(self, redis_url: str, default_ttl: int = 3600, prefix: str = _DEFAULT_PREFIX) -> None:
+    def __init__(
+        self,
+        redis_url: str,
+        default_ttl: int = 3600,
+        prefix: str = _DEFAULT_PREFIX,
+        socket_timeout: float = 5.0,
+        socket_connect_timeout: float = 5.0,
+    ) -> None:
+        # Medium: no socket_timeout/socket_connect_timeout — a hung/unreachable
+        # Redis could block every cache operation indefinitely.
         self._redis: aioredis.Redis[Any] = aioredis.from_url(
-            redis_url, encoding="utf-8", decode_responses=True
+            redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_timeout=socket_timeout,
+            socket_connect_timeout=socket_connect_timeout,
         )
         self._default_ttl = default_ttl
         self._prefix = prefix

@@ -1,4 +1,5 @@
 """Training Data Service — Collects and manages training data from successful queries."""
+
 import json
 from typing import Any
 
@@ -56,6 +57,8 @@ class TrainingDataService:
         schema_context: str,
         intent_type: str | None = None,
         success_score: float = 1.0,
+        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> int:
         """Store successful query as training data.
 
@@ -66,6 +69,9 @@ class TrainingDataService:
             schema_context: Schema context used for generation.
             intent_type: Query intent classification.
             success_score: Quality score (0-1).
+            user_id: Owning user, when known (C8) — ``None`` means shared.
+            connection_id: Owning connection, when known (C8) — ``None``
+                means shared/visible to every connection's few-shot retrieval.
 
         Returns:
             Training data record ID.
@@ -80,6 +86,8 @@ class TrainingDataService:
                     intent_type=intent_type,
                     success_score=success_score,
                     used_for_training=False,
+                    user_id=user_id,
+                    connection_id=connection_id,
                 )
                 session.add(record)
                 await session.commit()
@@ -151,6 +159,7 @@ class TrainingDataService:
         try:
             async with self._session_factory() as session:
                 from sqlalchemy import update
+
                 result = await session.execute(
                     update(TrainingDataRecord)
                     .where(TrainingDataRecord.id.in_(ids))
@@ -253,7 +262,9 @@ class TrainingDataService:
 
                 # Unused records
                 unused_result = await session.execute(
-                    select(func.count()).select_from(TrainingDataRecord).where(
+                    select(func.count())
+                    .select_from(TrainingDataRecord)
+                    .where(
                         TrainingDataRecord.used_for_training == False  # noqa: E712
                     )
                 )
@@ -277,9 +288,7 @@ class TrainingDataService:
                     .where(TrainingDataRecord.intent_type.isnot(None))
                     .group_by(TrainingDataRecord.intent_type)
                 )
-                intent_distribution = {
-                    row[0]: row[1] for row in intent_result.fetchall()
-                }
+                intent_distribution = {row[0]: row[1] for row in intent_result.fetchall()}
 
                 return {
                     "total_records": total,
@@ -299,13 +308,31 @@ class TrainingDataService:
                 "intent_distribution": {},
             }
 
-    async def get_recent_examples(self, limit: int = 2) -> list[dict[str, Any]]:
-        """Fetch recent high-quality Q&A pairs for use as dynamic few-shot prompts."""
+    async def get_recent_examples(
+        self, limit: int = 2, connection_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch recent high-quality Q&A pairs for use as dynamic few-shot prompts.
+
+        C8: scoped to ``connection_id`` — a row is visible if it belongs to
+        this connection or is shared (``connection_id IS NULL``), the same
+        own-or-shared model the Qdrant schema/example stores use. With no
+        ``connection_id`` (C7 fail-closed), only shared rows are visible —
+        never every tenant's examples.
+        """
         try:
             async with self._session_factory() as session:
+                conditions = [TrainingDataRecord.success_score >= 0.9]
+                if connection_id is not None:
+                    conditions.append(
+                        (TrainingDataRecord.connection_id == connection_id)
+                        | (TrainingDataRecord.connection_id.is_(None))
+                    )
+                else:
+                    conditions.append(TrainingDataRecord.connection_id.is_(None))
+
                 result = await session.execute(
                     select(TrainingDataRecord)
-                    .where(TrainingDataRecord.success_score >= 0.9)
+                    .where(*conditions)
                     .order_by(TrainingDataRecord.created_at.desc())
                     .limit(limit)
                 )

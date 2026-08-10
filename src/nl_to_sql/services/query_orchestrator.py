@@ -1,4 +1,5 @@
 """Query orchestrator — the main use-case: NL question → SQL response."""
+
 import asyncio
 import hashlib
 import json
@@ -14,6 +15,7 @@ from nl_to_sql.core.exceptions import DatabaseExecutionError, RateLimitError, SQ
 try:
     from langfuse.decorators import langfuse_context as _lf_ctx
     from langfuse.decorators import observe as _lf_observe
+
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
@@ -29,6 +31,8 @@ except ImportError:
         @staticmethod
         def update_current_trace(**_: Any) -> None:
             pass
+
+
 from nl_to_sql.core.interfaces.i_cache import ICache
 from nl_to_sql.core.interfaces.i_sql_validator import ISQLValidator
 from nl_to_sql.core.models.query import PipelineStageEvent, QueryRequest, QueryResponse
@@ -198,7 +202,14 @@ class QueryOrchestrator:
 
     @_lf_observe(name="nl2sql.pipeline", capture_input=False)
     @trace_function("pipeline.run")
-    async def run(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None, certified_metrics: str | None = None) -> QueryResponse:
+    async def run(
+        self,
+        request: QueryRequest,
+        style_hints: dict[str, Any] | None = None,
+        model_override: str | None = None,
+        custom_instructions: str | None = None,
+        certified_metrics: str | None = None,
+    ) -> QueryResponse:
         """Execute the full pipeline for a single query request.
 
         Args:
@@ -258,9 +269,15 @@ class QueryOrchestrator:
                         question=request.question,
                         response=response,
                     )
-                    log.info("Cached message saved successfully to chat session", session_id=request.session_id)
+                    log.info(
+                        "Cached message saved successfully to chat session",
+                        session_id=request.session_id,
+                    )
                 except Exception as sess_exc:
-                    log.warning("Failed to save cached response to chat session — skipping", error=str(sess_exc))
+                    log.warning(
+                        "Failed to save cached response to chat session — skipping",
+                        error=str(sess_exc),
+                    )
 
             return response
         elif cached and request.execute:
@@ -277,7 +294,10 @@ class QueryOrchestrator:
                 try:
                     log.info("Executing cached SQL", sql=cached_sql[:100])
                     execution_result = await self._db_client.execute_sql(cached_sql)
-                    log.info("Cached SQL execution successful", rows=len(execution_result) if execution_result else 0)
+                    log.info(
+                        "Cached SQL execution successful",
+                        rows=len(execution_result) if execution_result else 0,
+                    )
                 except DatabaseExecutionError as exc:
                     log.warning("Cached SQL execution failed", error=str(exc))
                     execution_error = str(exc)
@@ -313,15 +333,24 @@ class QueryOrchestrator:
             # Save to chat session if session_id provided
             if self._session_service is not None and request.session_id:
                 try:
-                    log.info("Saving cached response with execution to chat session", session_id=request.session_id)
+                    log.info(
+                        "Saving cached response with execution to chat session",
+                        session_id=request.session_id,
+                    )
                     await self._session_service.add_message(
                         session_id=request.session_id,
                         question=request.question,
                         response=response,
                     )
-                    log.info("Cached response with execution saved successfully", session_id=request.session_id)
+                    log.info(
+                        "Cached response with execution saved successfully",
+                        session_id=request.session_id,
+                    )
                 except Exception as sess_exc:
-                    log.warning("Failed to save cached response to chat session — skipping", error=str(sess_exc))
+                    log.warning(
+                        "Failed to save cached response to chat session — skipping",
+                        error=str(sess_exc),
+                    )
 
             return response
 
@@ -365,9 +394,14 @@ class QueryOrchestrator:
                             question=request.question,
                             response=response,
                         )
-                        log.info("Greeting message saved successfully", session_id=request.session_id)
+                        log.info(
+                            "Greeting message saved successfully", session_id=request.session_id
+                        )
                     except Exception as sess_exc:
-                        log.warning("Failed to save greeting to chat session — skipping", error=str(sess_exc))
+                        log.warning(
+                            "Failed to save greeting to chat session — skipping",
+                            error=str(sess_exc),
+                        )
 
                 return response
 
@@ -450,13 +484,13 @@ class QueryOrchestrator:
                 if session_obj and session_obj.messages:
                     sorted_msgs = sorted(session_obj.messages, key=lambda m: m.timestamp)
                     conversation_history = [
-                        {"question": m.question, "sql": m.sql or ""}
-                        for m in sorted_msgs
-                        if m.sql
+                        {"question": m.question, "sql": m.sql or ""} for m in sorted_msgs if m.sql
                     ]
                     log.info("Loaded conversation history", turns=len(conversation_history))
             except Exception as hist_exc:
-                log.warning("Failed to load conversation history — continuing without", error=str(hist_exc))
+                log.warning(
+                    "Failed to load conversation history — continuing without", error=str(hist_exc)
+                )
 
         # ── Conversation pruning + compression (bound prompt growth) ──────────
         conversation_history = self._prune_conversation(conversation_history)
@@ -465,19 +499,12 @@ class QueryOrchestrator:
         clarification_prompt = self._needs_clarification(request, conversation_history)
         if clarification_prompt is not None:
             log.info("Ambiguous follow-up — requesting clarification")
-            return await self._emit_clarification(request, dialect, clarification_prompt, start_time)
+            return await self._emit_clarification(
+                request, dialect, clarification_prompt, start_time
+            )
 
-        # ── Fetch dynamic few-shot examples from training data (#07) ─────────
-        few_shot_examples: list[dict[str, Any]] | None = None
-        if self._training_data_service is not None and self._few_shot_enabled:
-            try:
-                few_shot_examples = await self._training_data_service.get_recent_examples(
-                    limit=self._few_shot_top_k
-                )
-                if few_shot_examples:
-                    log.info("Loaded dynamic few-shot examples", count=len(few_shot_examples))
-            except Exception as shot_exc:
-                log.warning("Failed to load few-shot examples", error=str(shot_exc))
+        # ── Fetch dynamic few-shot examples (#07 / H4) ────────────────────────
+        few_shot_examples = await self._fetch_few_shot_examples(request.question, log)
 
         # ── Context resolution: corrections + follow-ups (#03) ────────────────
         effective_question = await self._build_effective_question(
@@ -526,7 +553,8 @@ class QueryOrchestrator:
                         # Parse column names from chunk content
                         # Format: "- column_name (type)"
                         import re
-                        columns = re.findall(r'- (\w+)\s*\(', chunk.content)
+
+                        columns = re.findall(r"- (\w+)\s*\(", chunk.content)
                         schema_dict[chunk.table_name] = columns
 
                     column_errors = self._column_validator.validate(
@@ -548,11 +576,15 @@ class QueryOrchestrator:
                     # columns/tables that sqlglot syntax checks can't detect.
                     if self._db_client is not None:
                         try:
-                            await self._db_client.execute_sql(f"EXPLAIN {generated_sql.cleaned_sql}")
+                            await self._db_client.execute_sql(
+                                f"EXPLAIN {generated_sql.cleaned_sql}"
+                            )
                             log.info("EXPLAIN validation passed", attempt=attempt)
                         except DatabaseExecutionError as exc:
                             explain_err = str(exc)
-                            log.warning("EXPLAIN validation failed", error=explain_err, attempt=attempt)
+                            log.warning(
+                                "EXPLAIN validation failed", error=explain_err, attempt=attempt
+                            )
                             all_errors.append(f"Query plan error: {explain_err}")
                             validation.is_valid = False
                         except Exception:
@@ -566,23 +598,35 @@ class QueryOrchestrator:
                     if request.execute and self._db_client:
                         _stage_start = time.perf_counter()
                         try:
-                            log.info("Executing generated SQL (Agentic validation)", sql=generated_sql.cleaned_sql[:100])
-                            execution_result = await self._db_client.execute_sql(generated_sql.cleaned_sql)
-                            log.info("SQL execution successful", rows=len(execution_result) if execution_result else 0)
+                            log.info(
+                                "Executing generated SQL (Agentic validation)",
+                                sql=generated_sql.cleaned_sql[:100],
+                            )
+                            execution_result = await self._db_client.execute_sql(
+                                generated_sql.cleaned_sql
+                            )
+                            log.info(
+                                "SQL execution successful",
+                                rows=len(execution_result) if execution_result else 0,
+                            )
                             stage_timings["execution"] = stage_timings.get("execution", 0) + int(
                                 (time.perf_counter() - _stage_start) * 1000
                             )
                             break
                         except DatabaseExecutionError as exc:
                             execution_error = str(exc)
-                            log.warning("Agentic SQL execution failed — retrying", error=execution_error)
+                            log.warning(
+                                "Agentic SQL execution failed — retrying", error=execution_error
+                            )
                             all_errors.append(f"Database execution error: {execution_error}")
                             validation.is_valid = False
                             stage_timings["execution"] = stage_timings.get("execution", 0) + int(
                                 (time.perf_counter() - _stage_start) * 1000
                             )
                     else:
-                        log.info("SQL passed all validation (No execution requested)", attempt=attempt)
+                        log.info(
+                            "SQL passed all validation (No execution requested)", attempt=attempt
+                        )
                         break
 
                 log.warning(
@@ -686,19 +730,25 @@ class QueryOrchestrator:
                     question=request.question,
                     response=response,
                 )
-                log.info("Message saved successfully to chat session", session_id=request.session_id)
+                log.info(
+                    "Message saved successfully to chat session", session_id=request.session_id
+                )
             except Exception as sess_exc:
                 log.warning("Failed to save to chat session — skipping", error=str(sess_exc))
 
         if generated_sql.validation.is_valid:
             try:
                 # Update exact cache
-                cache_key = self._make_cache_key(request.question, dialect, self._connection_id, self.PROMPT_VERSION)
+                cache_key = self._make_cache_key(
+                    request.question, dialect, self._connection_id, self.PROMPT_VERSION
+                )
                 await self._cache.set(cache_key, response.model_dump())
 
                 # Update semantic cache
                 if hasattr(self._cache, "set_semantic"):
-                    await self._cache.set_semantic(request.question, response.model_dump(), connection_id=self._connection_id)
+                    await self._cache.set_semantic(
+                        request.question, response.model_dump(), connection_id=self._connection_id
+                    )
             except Exception as cache_exc:
                 log.warning("Failed to cache response — skipping", error=str(cache_exc))
 
@@ -706,7 +756,9 @@ class QueryOrchestrator:
             if self._training_data_service is not None:
                 try:
                     # Build schema context from retrieved tables
-                    schema_context = f"Tables used: {', '.join(retrieved_tables)}" if retrieved_tables else ""
+                    schema_context = (
+                        f"Tables used: {', '.join(retrieved_tables)}" if retrieved_tables else ""
+                    )
 
                     await self._training_data_service.collect_training_data(
                         question=request.question,
@@ -715,6 +767,8 @@ class QueryOrchestrator:
                         schema_context=schema_context,
                         intent_type=intent_type,
                         success_score=1.0 if not execution_error else 0.8,
+                        user_id=self._user_id,
+                        connection_id=self._connection_id,
                     )
                     log.debug("Training data collected successfully")
                 except Exception as train_exc:
@@ -776,7 +830,10 @@ class QueryOrchestrator:
                 f"{request.question}\n\n"
                 f"[Context — this is a follow-up to the previous query:\n{conversation_history[-1]['sql']}]"
             )
-            log.info("Follow-up detected — injecting previous SQL context", question=request.question[:60])
+            log.info(
+                "Follow-up detected — injecting previous SQL context",
+                question=request.question[:60],
+            )
 
         return effective_question
 
@@ -799,21 +856,94 @@ class QueryOrchestrator:
     # these (no concrete refinement) is too vague to resolve even with context.
     _CLARIFY_NOISE = _FOLLOW_UP_WORDS | frozenset(
         {
-            "do", "the", "a", "an", "one", "ones", "other", "another", "different",
-            "again", "please", "what", "about", "how", "with", "for", "of", "to",
-            "change", "fix", "redo", "make", "update", "modify", "adjust", "tweak",
-            "and", "or", "just", "can", "you", "i", "we", "me", "my", "is", "are",
+            "do",
+            "the",
+            "a",
+            "an",
+            "one",
+            "ones",
+            "other",
+            "another",
+            "different",
+            "again",
+            "please",
+            "what",
+            "about",
+            "how",
+            "with",
+            "for",
+            "of",
+            "to",
+            "change",
+            "fix",
+            "redo",
+            "make",
+            "update",
+            "modify",
+            "adjust",
+            "tweak",
+            "and",
+            "or",
+            "just",
+            "can",
+            "you",
+            "i",
+            "we",
+            "me",
+            "my",
+            "is",
+            "are",
         }
     )
     # Tokens that clearly carry a concrete refinement (sort/filter/limit/…).
     _REFINEMENT_KEYWORDS = frozenset(
         {
-            "sort", "order", "group", "filter", "top", "bottom", "limit", "only",
-            "exclude", "include", "ascending", "descending", "asc", "desc", "where",
-            "by", "per", "month", "year", "day", "week", "quarter", "between",
-            "above", "below", "more", "less", "greater", "fewer", "first", "last",
-            "max", "min", "maximum", "minimum", "average", "avg", "sum", "count",
-            "total", "highest", "lowest", "add", "remove", "region", "date",
+            "sort",
+            "order",
+            "group",
+            "filter",
+            "top",
+            "bottom",
+            "limit",
+            "only",
+            "exclude",
+            "include",
+            "ascending",
+            "descending",
+            "asc",
+            "desc",
+            "where",
+            "by",
+            "per",
+            "month",
+            "year",
+            "day",
+            "week",
+            "quarter",
+            "between",
+            "above",
+            "below",
+            "more",
+            "less",
+            "greater",
+            "fewer",
+            "first",
+            "last",
+            "max",
+            "min",
+            "maximum",
+            "minimum",
+            "average",
+            "avg",
+            "sum",
+            "count",
+            "total",
+            "highest",
+            "lowest",
+            "add",
+            "remove",
+            "region",
+            "date",
         }
     )
 
@@ -838,6 +968,45 @@ class QueryOrchestrator:
         # Any content word (>2 chars, not connective noise) makes it resolvable.
         content = [t for t in tokens if len(t) > 2 and t not in cls._CLARIFY_NOISE]
         return not content
+
+    async def _fetch_few_shot_examples(
+        self, question: str, log: Any
+    ) -> list[dict[str, Any]] | None:
+        """Fetch dynamic few-shot examples (#07), preferring semantic similarity.
+
+        H4: ``self._example_store`` (P2 — indexed on positive feedback) was
+        written to but never read anywhere; every few-shot lookup silently
+        used only the recency-based ``training_data_service`` fallback.
+        Semantic search runs first since a similar past example is a far
+        better generation aid than merely a recent one; recency is the
+        fallback for connections with too few indexed examples yet.
+        """
+        if not self._few_shot_enabled:
+            return None
+
+        examples: list[dict[str, Any]] | None = None
+        if self._example_store is not None:
+            try:
+                examples = await self._example_store.search(
+                    question, top_k=self._few_shot_top_k, connection_id=self._connection_id
+                )
+                if examples:
+                    log.info("Loaded semantic few-shot examples", count=len(examples))
+            except Exception as shot_exc:
+                log.warning("Semantic few-shot search failed", error=str(shot_exc))
+                examples = None
+
+        if not examples and self._training_data_service is not None:
+            try:
+                examples = await self._training_data_service.get_recent_examples(
+                    limit=self._few_shot_top_k, connection_id=self._connection_id
+                )
+                if examples:
+                    log.info("Loaded recency-based few-shot examples", count=len(examples))
+            except Exception as shot_exc:
+                log.warning("Failed to load few-shot examples", error=str(shot_exc))
+
+        return examples
 
     def _needs_clarification(
         self,
@@ -882,9 +1051,7 @@ class QueryOrchestrator:
         budget = PromptBudget(conversation_max_turns=self._conversation_max_turns)
         kept: list[dict[str, Any]]
         truncations: list[str]
-        kept, truncations = budget.fit_conversation(
-            conversation_history, budget.budget_tokens
-        )
+        kept, truncations = budget.fit_conversation(conversation_history, budget.budget_tokens)
         if truncations:
             logger.info(
                 "Pruned conversation history",
@@ -938,9 +1105,7 @@ class QueryOrchestrator:
     # Bump this string whenever the prompt template changes to auto-invalidate old cache entries.
     PROMPT_VERSION = "v1.0"
 
-    async def _cache_lookup(
-        self, question: str, dialect: str
-    ) -> tuple[dict[str, Any] | None, str]:
+    async def _cache_lookup(self, question: str, dialect: str) -> tuple[dict[str, Any] | None, str]:
         """Two-layer cache lookup: L1 exact key → L2 semantic similarity.
 
         Exact hits skip the embedding step entirely, which is why the exact
@@ -950,7 +1115,9 @@ class QueryOrchestrator:
             (cached_payload_or_None, layer) where layer ∈ {exact, semantic, miss}.
         """
         layer: CacheLayer = "miss"
-        cache_key = self._make_cache_key(question, dialect, self._connection_id, self.PROMPT_VERSION)
+        cache_key = self._make_cache_key(
+            question, dialect, self._connection_id, self.PROMPT_VERSION
+        )
         cached = await self._cache.get(cache_key)
         if cached:
             layer = "exact"
@@ -972,12 +1139,14 @@ class QueryOrchestrator:
         cache entries must never be shared across connections. ``prompt_version``
         auto-invalidates old entries whenever the prompt template changes.
         """
-        raw = json.dumps({
-            "q": question.strip().lower(),
-            "d": dialect.lower(),
-            "c": connection_id or "",
-            "pv": prompt_version,
-        })
+        raw = json.dumps(
+            {
+                "q": question.strip().lower(),
+                "d": dialect.lower(),
+                "c": connection_id or "",
+                "pv": prompt_version,
+            }
+        )
         return f"nl2sql:{hashlib.sha256(raw.encode()).hexdigest()}"
 
     @staticmethod
@@ -1016,14 +1185,37 @@ class QueryOrchestrator:
         return min(complexity, 10)
 
     # Keyword sets used by the adaptive top_k heuristic (P7).
-    _JOIN_KEYWORDS = frozenset({
-        "join", "combine", "relate", "across", "between", "with", "compare",
-    })
-    _AGG_KEYWORDS = frozenset({
-        "total", "sum", "average", "avg", "count", "group", "breakdown", "per",
-        "each", "trend", "aggregate", "distribution", "percentage", "ratio",
-        "rank", "pivot",
-    })
+    _JOIN_KEYWORDS = frozenset(
+        {
+            "join",
+            "combine",
+            "relate",
+            "across",
+            "between",
+            "with",
+            "compare",
+        }
+    )
+    _AGG_KEYWORDS = frozenset(
+        {
+            "total",
+            "sum",
+            "average",
+            "avg",
+            "count",
+            "group",
+            "breakdown",
+            "per",
+            "each",
+            "trend",
+            "aggregate",
+            "distribution",
+            "percentage",
+            "ratio",
+            "rank",
+            "pivot",
+        }
+    )
 
     def _compute_top_k(self, question: str) -> int:
         """Estimate how many schema chunks to retrieve for this question.
@@ -1048,13 +1240,18 @@ class QueryOrchestrator:
         """Run a COUNT without the WHERE clause to detect over-filtered queries (#06)."""
         try:
             import re as _re
-            relaxed = _re.sub(
-                r'\bWHERE\b.+?(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)',
-                '',
-                sql,
-                flags=_re.IGNORECASE | _re.DOTALL,
-            ).strip().rstrip(';')
-            if relaxed.lower() == sql.lower().rstrip(';'):
+
+            relaxed = (
+                _re.sub(
+                    r"\bWHERE\b.+?(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)",
+                    "",
+                    sql,
+                    flags=_re.IGNORECASE | _re.DOTALL,
+                )
+                .strip()
+                .rstrip(";")
+            )
+            if relaxed.lower() == sql.lower().rstrip(";"):
                 return None  # No WHERE clause to remove
             count_sql = f"SELECT COUNT(*) AS _cnt FROM ({relaxed}) AS _sub"  # noqa: S608
             result = await self._db_client.execute_sql(count_sql)  # type: ignore[union-attr]
@@ -1068,7 +1265,14 @@ class QueryOrchestrator:
             pass
         return None
 
-    async def run_stream(self, request: QueryRequest, style_hints: dict[str, Any] | None = None, model_override: str | None = None, custom_instructions: str | None = None, certified_metrics: str | None = None) -> AsyncGenerator[dict[str, Any], None]:
+    async def run_stream(
+        self,
+        request: QueryRequest,
+        style_hints: dict[str, Any] | None = None,
+        model_override: str | None = None,
+        custom_instructions: str | None = None,
+        certified_metrics: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming version of run() — yields chunks as they're generated.
 
         Yields:
@@ -1101,8 +1305,13 @@ class QueryOrchestrator:
                             response=cached_response,
                         )
                     except Exception as sess_exc:
-                        log.warning("Failed to save cached response to chat session in stream", error=str(sess_exc))
-                yield PipelineStageEvent(status="complete", cached=True, data=response_data).to_sse()
+                        log.warning(
+                            "Failed to save cached response to chat session in stream",
+                            error=str(sess_exc),
+                        )
+                yield PipelineStageEvent(
+                    status="complete", cached=True, data=response_data
+                ).to_sse()
                 return
 
             # ── Query classification (greeting / off-topic detection) ───────
@@ -1139,7 +1348,9 @@ class QueryOrchestrator:
                                 response=response,
                             )
                         except Exception as sess_exc:
-                            log.warning("Failed to save greeting to chat session", error=str(sess_exc))
+                            log.warning(
+                                "Failed to save greeting to chat session", error=str(sess_exc)
+                            )
 
                     yield PipelineStageEvent(
                         status="complete",
@@ -1162,7 +1373,9 @@ class QueryOrchestrator:
                     self._retriever.get_all_table_names(),
                 )
             else:
-                candidate_chunks = await self._retriever.retrieve(request.question, top_k=_stream_intent_top_k)
+                candidate_chunks = await self._retriever.retrieve(
+                    request.question, top_k=_stream_intent_top_k
+                )
                 all_known_tables = []
             candidate_tables = list({c.table_name for c in candidate_chunks})
             stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
@@ -1179,10 +1392,14 @@ class QueryOrchestrator:
 
                 if self._fk_extractor is not None and final_chunks:
                     try:
+                        # H5: expand_tables only accepts connection_id — passing
+                        # user_id raised TypeError every time, silently
+                        # swallowed by this except, so FK expansion never ran
+                        # in the streaming path.
                         final_chunks = await self._fk_extractor.expand_tables(
                             final_chunks,
                             max_expansion=3,
-                            user_id=self._user_id,
+                            connection_id=self._connection_id,
                         )
                     except Exception as fk_exc:
                         log.warning("FK expansion failed", error=str(fk_exc))
@@ -1213,9 +1430,13 @@ class QueryOrchestrator:
                             for m in sorted_msgs
                             if m.sql
                         ]
-                        log.info("Loaded conversation history (stream)", turns=len(conversation_history))
+                        log.info(
+                            "Loaded conversation history (stream)", turns=len(conversation_history)
+                        )
                 except Exception as hist_exc:
-                    log.warning("Failed to load conversation history in stream", error=str(hist_exc))
+                    log.warning(
+                        "Failed to load conversation history in stream", error=str(hist_exc)
+                    )
 
             # Conversation pruning + compression (bound prompt growth)
             conversation_history = self._prune_conversation(conversation_history)
@@ -1235,17 +1456,8 @@ class QueryOrchestrator:
                 ).to_sse()
                 return
 
-            # Fetch dynamic few-shot examples (#07)
-            _stream_few_shot: list[dict[str, Any]] | None = None
-            if self._training_data_service is not None and self._few_shot_enabled:
-                try:
-                    _stream_few_shot = await self._training_data_service.get_recent_examples(
-                        limit=self._few_shot_top_k
-                    )
-                    if _stream_few_shot:
-                        log.info("Loaded few-shot examples (stream)", count=len(_stream_few_shot))
-                except Exception as _shot_exc:
-                    log.warning("Failed to load few-shot examples in stream", error=str(_shot_exc))
+            # Fetch dynamic few-shot examples (#07 / H4)
+            _stream_few_shot = await self._fetch_few_shot_examples(request.question, log)
 
             # Context resolution: corrections + follow-ups (#03) in stream mode
             _stream_effective_q = await self._build_effective_question(
@@ -1299,9 +1511,12 @@ class QueryOrchestrator:
                         schema_dict: dict[str, list[str]] = {}
                         for chunk in final_chunks:
                             import re
-                            columns = re.findall(r'- (\w+)\s*\(', chunk.content)
+
+                            columns = re.findall(r"- (\w+)\s*\(", chunk.content)
                             schema_dict[chunk.table_name] = columns
-                        column_errors = self._column_validator.validate(generated_sql.cleaned_sql, schema_dict)
+                        column_errors = self._column_validator.validate(
+                            generated_sql.cleaned_sql, schema_dict
+                        )
 
                     all_errors = validation.errors + column_errors
 
@@ -1309,11 +1524,17 @@ class QueryOrchestrator:
                         # EXPLAIN validation — query planner catches runtime errors
                         if self._db_client is not None:
                             try:
-                                await self._db_client.execute_sql(f"EXPLAIN {generated_sql.cleaned_sql}")
+                                await self._db_client.execute_sql(
+                                    f"EXPLAIN {generated_sql.cleaned_sql}"
+                                )
                                 log.info("EXPLAIN validation passed (stream)", attempt=attempt)
                             except DatabaseExecutionError as exc:
                                 explain_err = str(exc)
-                                log.warning("EXPLAIN validation failed (stream)", error=explain_err, attempt=attempt)
+                                log.warning(
+                                    "EXPLAIN validation failed (stream)",
+                                    error=explain_err,
+                                    attempt=attempt,
+                                )
                                 all_errors.append(f"Query plan error: {explain_err}")
                                 validation.is_valid = False
                             except Exception:
@@ -1325,14 +1546,18 @@ class QueryOrchestrator:
 
                     if validation.is_valid and not column_errors:
                         if request.execute and self._db_client:
-                            yield PipelineStageEvent(status="progress", stage="executing_sql").to_sse()
+                            yield PipelineStageEvent(
+                                status="progress", stage="executing_sql"
+                            ).to_sse()
                             _stage_start = time.perf_counter()
                             try:
                                 log.info("Executing generated SQL in stream mode (Agentic)")
-                                execution_result = await self._db_client.execute_sql(generated_sql.cleaned_sql)
-                                stage_timings["execution"] = stage_timings.get("execution", 0) + int(
-                                    (time.perf_counter() - _stage_start) * 1000
+                                execution_result = await self._db_client.execute_sql(
+                                    generated_sql.cleaned_sql
                                 )
+                                stage_timings["execution"] = stage_timings.get(
+                                    "execution", 0
+                                ) + int((time.perf_counter() - _stage_start) * 1000)
                                 break
                             except DatabaseExecutionError as exc:
                                 execution_error = str(exc)
@@ -1343,9 +1568,9 @@ class QueryOrchestrator:
                                 all_errors.append(execution_error)
                                 validation.is_valid = False
                             if "execution" not in stage_timings or not validation.is_valid:
-                                stage_timings["execution"] = stage_timings.get("execution", 0) + int(
-                                    (time.perf_counter() - _stage_start) * 1000
-                                )
+                                stage_timings["execution"] = stage_timings.get(
+                                    "execution", 0
+                                ) + int((time.perf_counter() - _stage_start) * 1000)
                         else:
                             break
 
@@ -1404,7 +1629,10 @@ class QueryOrchestrator:
                 follow_up_questions=generated_sql.follow_up_questions,
                 message=_stream_empty_warning,
             )
-            log.info("Pipeline stage timings (stream)", **{f"{k}_ms": v for k, v in stage_timings.items()})
+            log.info(
+                "Pipeline stage timings (stream)",
+                **{f"{k}_ms": v for k, v in stage_timings.items()},
+            )
             get_stage_metrics().record(stage_timings)
 
             # Save to chat session if session_id provided
@@ -1421,10 +1649,16 @@ class QueryOrchestrator:
             # Cache if valid
             if validation.is_valid:
                 try:
-                    cache_key = self._make_cache_key(request.question, dialect, self._connection_id, self.PROMPT_VERSION)
+                    cache_key = self._make_cache_key(
+                        request.question, dialect, self._connection_id, self.PROMPT_VERSION
+                    )
                     await self._cache.set(cache_key, response.model_dump())
                     if hasattr(self._cache, "set_semantic"):
-                        await self._cache.set_semantic(request.question, response.model_dump(), connection_id=self._connection_id)
+                        await self._cache.set_semantic(
+                            request.question,
+                            response.model_dump(),
+                            connection_id=self._connection_id,
+                        )
                 except Exception as cache_exc:
                     log.warning("Failed to cache response", error=str(cache_exc))
 
@@ -1437,4 +1671,6 @@ class QueryOrchestrator:
 
         except Exception as exc:
             log.error("Streaming query failed", error=str(exc))
-            yield PipelineStageEvent(status="error", error=str(exc), type=type(exc).__name__).to_sse()
+            yield PipelineStageEvent(
+                status="error", error=str(exc), type=type(exc).__name__
+            ).to_sse()

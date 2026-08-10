@@ -1,4 +1,5 @@
 """Authentication service — password hashing, JWT generation, Google token verification."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,12 +12,14 @@ import structlog
 from jose import JWTError, jwt
 
 from nl_to_sql.config.settings import get_settings
+from nl_to_sql.core.exceptions import AuthenticationError
 from nl_to_sql.core.models.auth import TokenData
 
 logger = structlog.get_logger(__name__)
 
 
 # ── Password Utilities ────────────────────────────────────────────────────────
+
 
 def hash_password(plain_password: str) -> str:
     """Return a bcrypt hash of the given plain-text password."""
@@ -36,6 +39,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 # ── JWT Utilities ─────────────────────────────────────────────────────────────
+
 
 def create_access_token(user_id: str, email: str, session_id: str | None = None) -> str:
     """Create a signed JWT for the given user.
@@ -84,6 +88,7 @@ def decode_access_token(token: str) -> TokenData:
 
 # ── Refresh Token Utilities ────────────────────────────────────────────────────
 
+
 def generate_refresh_token() -> str:
     """Return a new opaque, URL-safe refresh token (returned to the client once)."""
     return secrets.token_urlsafe(48)
@@ -108,6 +113,7 @@ def refresh_token_expiry() -> datetime:
 
 # ── Google Token Verification ─────────────────────────────────────────────────
 
+
 async def verify_google_token(credential: str) -> dict[str, Any]:
     """Verify a Google ID token and return the decoded claims.
 
@@ -118,14 +124,14 @@ async def verify_google_token(credential: str) -> dict[str, Any]:
         Decoded token claims dict with keys: sub, email, name, picture.
 
     Raises:
-        ValueError: If the token is invalid or the audience doesn't match.
+        AuthenticationError: If the token is invalid or the audience doesn't match.
     """
     from google.auth.transport import requests as google_requests
     from google.oauth2 import id_token as google_id_token
 
     settings = get_settings()
     if not settings.google_client_id:
-        raise ValueError("GOOGLE_CLIENT_ID is not configured on the server")
+        raise AuthenticationError("GOOGLE_CLIENT_ID is not configured on the server")
 
     try:
         idinfo = google_id_token.verify_oauth2_token(
@@ -142,14 +148,16 @@ async def verify_google_token(credential: str) -> dict[str, Any]:
         }
     except Exception as exc:
         logger.warning("Google token verification failed", error=str(exc))
-        raise ValueError(f"Invalid Google token: {exc}") from exc
+        raise AuthenticationError(f"Invalid Google token: {exc}") from exc
 
 
 # ── OTP Utilities ─────────────────────────────────────────────────────────────
 
+
 def generate_otp() -> str:
     """Generate a random 6-digit OTP string."""
     import secrets
+
     return "".join(str(secrets.randbelow(10)) for _ in range(6))
 
 

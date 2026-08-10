@@ -1,4 +1,5 @@
 """Google Gemini LLM provider — implements ILLMProvider using google-genai SDK."""
+
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -24,6 +25,7 @@ class GeminiProvider(ILLMProvider):  # type: ignore[misc]
         self,
         api_key: str,
         model: str = "gemini-2.0-flash",
+        timeout_ms: int = 30_000,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -31,11 +33,17 @@ class GeminiProvider(ILLMProvider):  # type: ignore[misc]
         if api_key:
             try:
                 from google import genai
-                self._client = genai.Client(api_key=api_key)
-            except ImportError:
-                logger.warning(
-                    "google-genai package not installed — run: pip install google-genai"
+                from google.genai import types as genai_types
+
+                # Medium: no timeout set — a hung upstream could tie up
+                # request capacity indefinitely. google-genai has no
+                # separate max_retries knob at the client level.
+                self._client = genai.Client(
+                    api_key=api_key,
+                    http_options=genai_types.HttpOptions(timeout=timeout_ms),
                 )
+            except ImportError:
+                logger.warning("google-genai package not installed — run: pip install google-genai")
 
     def _check_key(self) -> None:
         if not self._api_key:
@@ -109,9 +117,7 @@ class GeminiProvider(ILLMProvider):  # type: ignore[misc]
                     detail=error_str,
                     retry_after=retry_after,
                 ) from exc
-            raise LLMProviderError(
-                f"Gemini request failed: {exc}", detail=error_str
-            ) from exc
+            raise LLMProviderError(f"Gemini request failed: {exc}", detail=error_str) from exc
 
     async def health_check(self) -> bool:
         """Ping Gemini with a minimal request."""
@@ -119,6 +125,7 @@ class GeminiProvider(ILLMProvider):  # type: ignore[misc]
             return False
         try:
             from google.genai import types as genai_types
+
             await self._client.aio.models.generate_content(
                 model=self._model,
                 contents="hi",

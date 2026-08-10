@@ -1,4 +1,5 @@
 """Anthropic LLM provider — implements ILLMProvider."""
+
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -24,6 +25,8 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
         self,
         api_key: str,
         model: str = "claude-sonnet-4-6",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -31,7 +34,12 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
         if api_key:
             try:
                 import anthropic
-                self._client = anthropic.AsyncAnthropic(api_key=api_key)
+
+                # Medium: no timeout/max_retries set — a hung upstream could
+                # tie up request capacity indefinitely.
+                self._client = anthropic.AsyncAnthropic(
+                    api_key=api_key, timeout=timeout, max_retries=max_retries
+                )
             except ImportError:
                 logger.warning("anthropic package not installed — run: pip install anthropic")
 
@@ -76,6 +84,7 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
             # Concatenate every text block, skipping thinking / tool-use / other
             # block types that newer Anthropic SDKs may return alongside text.
             from anthropic.types import TextBlock
+
             content = "".join(
                 block.text for block in response.content if isinstance(block, TextBlock)
             )
@@ -99,9 +108,7 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
             ) from exc
         except anthropic.APIError as exc:
             log.error("Anthropic API error", error=str(exc))
-            raise LLMProviderError(
-                f"Anthropic request failed: {exc}", detail=str(exc)
-            ) from exc
+            raise LLMProviderError(f"Anthropic request failed: {exc}", detail=str(exc)) from exc
 
     async def health_check(self) -> bool:
         """Ping Anthropic with a minimal message."""
@@ -109,6 +116,7 @@ class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
             return False
         try:
             import anthropic
+
             await self._client.messages.create(
                 model=self._model,
                 max_tokens=1,

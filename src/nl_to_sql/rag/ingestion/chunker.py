@@ -4,6 +4,7 @@ The chunking strategy is controlled here and can be changed without touching
 anything else in the pipeline. Supports table-level (one chunk per table),
 fixed-size with overlap, sentence-aware, and parent-child strategies.
 """
+
 import re
 
 import structlog
@@ -70,6 +71,19 @@ class Chunker:
         """
         self._strategy = strategy
         self._chunk_size = chunk_size
+        if chunk_overlap >= chunk_size:
+            # H1: _chunk_fixed_size advances by chunk_size - chunk_overlap each
+            # iteration; if that's <= 0 the while loop never terminates,
+            # freezing the whole asyncio event loop (not just one task).
+            # Clamp instead of raising — this is only reachable via env vars,
+            # not any runtime input, so fail safe rather than fail the process.
+            logger.warning(
+                "chunk_overlap >= chunk_size would never advance and freeze "
+                "fixed-size chunking in an infinite loop — clamping",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+            chunk_overlap = max(0, chunk_size - 1)
         self._chunk_overlap = chunk_overlap
 
     def chunk(self, documents: list[SchemaChunk]) -> list[SchemaChunk]:

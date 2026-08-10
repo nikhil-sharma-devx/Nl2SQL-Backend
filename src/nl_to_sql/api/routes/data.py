@@ -1,16 +1,18 @@
 """F7 - Data export routes (async Download My Data)."""
+
 import asyncio
 import os
 import tempfile
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import DataExportJob
 from nl_to_sql.services.chat_session_service import ChatSessionService
@@ -36,7 +38,9 @@ class ExportJobResponse(BaseModel):
 
 
 @router.post("/export", status_code=202, summary="Request a full data export (async)")
+@limiter.limit("5/minute")
 async def request_export(
+    request: Request,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> ExportJobResponse:
@@ -49,7 +53,9 @@ async def request_export(
         job_id = job.id
 
     # Launch background export
-    _task = asyncio.create_task(_run_export(job_id, current_user.id, session_service._session_factory))
+    _task = asyncio.create_task(
+        _run_export(job_id, current_user.id, session_service._session_factory)
+    )
     _task.add_done_callback(lambda t: None)  # prevent GC
     logger.info("export job queued", job_id=job_id, user_id=current_user.id)
 
@@ -106,13 +112,18 @@ async def download_export(
     if job.status != "done" or not job.artifact_path:
         raise HTTPException(status_code=400, detail="Export not ready yet")
     if not os.path.exists(job.artifact_path):
-        raise HTTPException(status_code=410, detail="Export file has expired. Please request a new export.")
+        raise HTTPException(
+            status_code=410, detail="Export file has expired. Please request a new export."
+        )
 
     from pathlib import Path
+
     export_dir = Path(_EXPORT_DIR).resolve()
     artifact = Path(job.artifact_path).resolve()
     if artifact.parent != export_dir:
-        logger.error("Export path traversal detected", artifact_path=job.artifact_path, job_id=job_id)
+        logger.error(
+            "Export path traversal detected", artifact_path=job.artifact_path, job_id=job_id
+        )
         raise HTTPException(status_code=500, detail="Export file unavailable.")
 
     return FileResponse(
@@ -157,7 +168,9 @@ async def _run_export(job_id: str, user_id: str, session_factory: Any) -> None:
                 "data_retention": s.data_retention if s else "forever",
             }
 
-            r = await db.execute(select(UserInstructions).where(UserInstructions.user_id == user_id))
+            r = await db.execute(
+                select(UserInstructions).where(UserInstructions.user_id == user_id)
+            )
             instr = r.scalar_one_or_none()
             export_data["custom_instructions"] = {
                 "content": instr.content if instr else "",
@@ -178,8 +191,14 @@ async def _run_export(job_id: str, user_id: str, session_factory: Any) -> None:
             ]
 
             r = await db.execute(
-                select(ChatSession.id, ChatSession.title, ChatMessage.timestamp,
-                       ChatMessage.question, ChatMessage.sql, ChatMessage.dialect)
+                select(
+                    ChatSession.id,
+                    ChatSession.title,
+                    ChatMessage.timestamp,
+                    ChatMessage.question,
+                    ChatMessage.sql,
+                    ChatMessage.dialect,
+                )
                 .join(ChatMessage, ChatMessage.session_id == ChatSession.id)
                 .where(ChatSession.user_id == user_id)
                 .order_by(ChatSession.id, ChatMessage.timestamp)

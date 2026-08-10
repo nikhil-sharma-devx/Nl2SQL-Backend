@@ -3,13 +3,32 @@
 The ingestion pipeline writes here; the retrieval pipeline reads from here
 on startup. Uses pickle serialisation for the BM25 model.
 """
+
 import os
 import pickle
+import re
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Medium: this regex used to be independently defined in both
+# rag/ingestion/bm25_indexer.py and rag/retrieval/bm25_retriever.py, linked
+# only by a comment ("must match ingestion") — a future edit to one without
+# the other would silently desync dense/sparse chunk IDs. Both now import
+# this single definition.
+_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    """Simple whitespace + lowercase tokeniser for BM25.
+
+    Strips punctuation and converts to lowercase for better matching of
+    table/column names. Shared by ingestion (indexing) and retrieval
+    (querying) — they must always tokenise identically.
+    """
+    return _TOKEN_RE.findall(text.lower())
 
 
 class BM25Store:

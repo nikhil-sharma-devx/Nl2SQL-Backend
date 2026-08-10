@@ -19,6 +19,7 @@ first access) so the pre-multi-connection experience is preserved.
 
 DSNs are never returned by any method — only a masked ``url_preview``.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -69,26 +70,26 @@ _PRIVATE_NETS = [
 
 
 def _validate_db_url(url: str) -> None:
-    """Raise ValueError if the scheme is not allowed or the host is a private IP (SSRF)."""
+    """Raise ConnectionValidationError if the scheme is disallowed or the host is a private IP (SSRF)."""
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
-        raise ValueError(f"Database URL scheme '{scheme}' is not allowed.")
+        raise ConnectionValidationError(f"Database URL scheme '{scheme}' is not allowed.")
     # sqlite is file-based — no host to validate (must be checked before the
     # host requirement below, which only applies to networked databases).
     if scheme == "sqlite+aiosqlite":
         return
     host = parsed.hostname
     if not host:
-        raise ValueError("Database URL must include a host.")
+        raise ConnectionValidationError("Database URL must include a host.")
     try:
         results = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
-        raise ValueError(f"Cannot resolve database host '{host}': {exc}") from exc
+        raise ConnectionValidationError(f"Cannot resolve database host '{host}': {exc}") from exc
     for *_, sockaddr in results:
         addr = ipaddress.ip_address(sockaddr[0])
         if any(addr in net for net in _PRIVATE_NETS):
-            raise ValueError(
+            raise ConnectionValidationError(
                 f"Database host '{host}' resolves to a private/internal IP address "
                 "and is not allowed."
             )
@@ -260,10 +261,7 @@ class ConnectionService:
 
     def _normalise_and_validate(self, raw_url: str) -> str:
         normalised = to_async_database_url(raw_url.strip())
-        try:
-            _validate_db_url(normalised)
-        except ValueError as exc:
-            raise ConnectionValidationError(str(exc)) from exc
+        _validate_db_url(normalised)
         return normalised
 
     @staticmethod
@@ -295,12 +293,16 @@ class ConnectionService:
         factory = self._require_factory()
         async with factory() as db:
             rows = (
-                await db.execute(
-                    select(UserDatabaseConnection)
-                    .where(UserDatabaseConnection.user_id == user_id)
-                    .order_by(UserDatabaseConnection.id)
+                (
+                    await db.execute(
+                        select(UserDatabaseConnection)
+                        .where(UserDatabaseConnection.user_id == user_id)
+                        .order_by(UserDatabaseConnection.id)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
             # Backfill any legacy row missing a connection_id (dev/backstop DBs).
             for r in rows:
@@ -341,12 +343,16 @@ class ConnectionService:
         conditions = [UserDatabaseConnection.user_id == user_id]
         async with factory() as db:
             rows = (
-                await db.execute(
-                    select(UserDatabaseConnection)
-                    .where(*conditions)
-                    .order_by(UserDatabaseConnection.created_at)
+                (
+                    await db.execute(
+                        select(UserDatabaseConnection)
+                        .where(*conditions)
+                        .order_by(UserDatabaseConnection.created_at)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         infos: list[ConnectionInfo] = []
         for r in rows:
             info = self._to_info(r)
@@ -380,12 +386,16 @@ class ConnectionService:
         factory = self._require_factory()
         async with factory() as db:
             count = (
-                await db.execute(
-                    select(UserDatabaseConnection).where(
-                        UserDatabaseConnection.user_id == user_id
+                (
+                    await db.execute(
+                        select(UserDatabaseConnection).where(
+                            UserDatabaseConnection.user_id == user_id
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             if len(count) >= _MAX_CONNECTIONS_PER_USER:
                 raise ConnectionValidationError(
                     f"Connection limit reached (max {_MAX_CONNECTIONS_PER_USER})."
@@ -420,7 +430,10 @@ class ConnectionService:
                 ) from exc
             await db.refresh(row)
         logger.info(
-            "Connection created", user_id=user_id, connection_id=row.connection_id, db_type=resolved_type
+            "Connection created",
+            user_id=user_id,
+            connection_id=row.connection_id,
+            db_type=resolved_type,
         )
         info = self._to_info(row)
         info.url_preview = _mask_url(normalised)
@@ -479,12 +492,16 @@ class ConnectionService:
             await db.flush()
             if was_default:
                 nxt = (
-                    await db.execute(
-                        select(UserDatabaseConnection)
-                        .where(UserDatabaseConnection.user_id == user_id)
-                        .order_by(UserDatabaseConnection.created_at)
+                    (
+                        await db.execute(
+                            select(UserDatabaseConnection)
+                            .where(UserDatabaseConnection.user_id == user_id)
+                            .order_by(UserDatabaseConnection.created_at)
+                        )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if nxt is not None:
                     nxt.is_default = True
             await db.commit()
@@ -589,7 +606,9 @@ class ConnectionService:
         try:
             raw_url = await self._decrypt(encrypted)
         except Exception as exc:
-            logger.warning("Failed to decrypt connection DSN", connection_id=connection_id, error=str(exc))
+            logger.warning(
+                "Failed to decrypt connection DSN", connection_id=connection_id, error=str(exc)
+            )
             return None
         client = AsyncDatabaseClient(database_url=raw_url)
         evicted = self._client_cache.put(connection_id, client)

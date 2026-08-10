@@ -16,6 +16,7 @@ execution time, via the same ``ConnectionService``).
 (``services.scheduled_query_worker.execute_schedule``) so manual and
 scheduled runs can never behave differently.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -100,9 +101,7 @@ class ScheduledQueryService:
             ScheduledQuery.id == schedule_id,
             ScheduledQuery.user_id == user_id,
         ]
-        row = (
-            await db.execute(select(ScheduledQuery).where(*conditions))
-        ).scalar_one_or_none()
+        row = (await db.execute(select(ScheduledQuery).where(*conditions))).scalar_one_or_none()
         if row is None:
             raise ScheduleNotFoundError("Schedule not found.")
         return row
@@ -150,13 +149,39 @@ class ScheduledQueryService:
         self,
         user_id: str,
         connection_id: str | None = None,
-    ) -> list[ScheduleInfo]:
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[ScheduleInfo], int]:
+        """Return ``(schedules, total)`` for a user, oldest first.
+
+        Medium: this endpoint had no limit/offset at all (unbounded list),
+        unlike every sibling list endpoint (dashboards, connections, ...).
+        """
         async with self._session_factory() as db:
-            stmt = select(ScheduledQuery).where(ScheduledQuery.user_id == user_id)
+            conditions = [ScheduledQuery.user_id == user_id]
             if connection_id is not None:
-                stmt = stmt.where(ScheduledQuery.connection_id == connection_id)
-            rows = (await db.execute(stmt.order_by(ScheduledQuery.created_at))).scalars().all()
-        return [self._to_info(r) for r in rows]
+                conditions.append(ScheduledQuery.connection_id == connection_id)
+
+            total = (
+                await db.execute(
+                    select(func.count()).select_from(ScheduledQuery).where(*conditions)
+                )
+            ).scalar_one()
+
+            rows = (
+                (
+                    await db.execute(
+                        select(ScheduledQuery)
+                        .where(*conditions)
+                        .order_by(ScheduledQuery.created_at)
+                        .limit(limit)
+                        .offset(offset)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [self._to_info(r) for r in rows], int(total)
 
     async def get(self, user_id: str, schedule_id: str) -> ScheduleInfo:
         async with self._session_factory() as db:
@@ -320,14 +345,18 @@ class ScheduledQueryService:
                 )
             ).scalar_one()
             rows = (
-                await db.execute(
-                    select(ScheduledQueryRun)
-                    .where(ScheduledQueryRun.schedule_id == schedule_id)
-                    .order_by(ScheduledQueryRun.started_at.desc())
-                    .limit(limit)
-                    .offset(offset)
+                (
+                    await db.execute(
+                        select(ScheduledQueryRun)
+                        .where(ScheduledQueryRun.schedule_id == schedule_id)
+                        .order_by(ScheduledQueryRun.started_at.desc())
+                        .limit(limit)
+                        .offset(offset)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return list(rows), int(total)
 
     async def record_run(
@@ -365,18 +394,20 @@ class ScheduledQueryService:
             await db.refresh(run)
 
             stale_ids = (
-                await db.execute(
-                    select(ScheduledQueryRun.id)
-                    .where(ScheduledQueryRun.schedule_id == schedule_id)
-                    .order_by(ScheduledQueryRun.started_at.desc())
-                    .offset(_MAX_HISTORY_PER_SCHEDULE)
+                (
+                    await db.execute(
+                        select(ScheduledQueryRun.id)
+                        .where(ScheduledQueryRun.schedule_id == schedule_id)
+                        .order_by(ScheduledQueryRun.started_at.desc())
+                        .offset(_MAX_HISTORY_PER_SCHEDULE)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             if stale_ids:
                 await db.execute(
-                    ScheduledQueryRun.__table__.delete().where(
-                        ScheduledQueryRun.id.in_(stale_ids)
-                    )
+                    ScheduledQueryRun.__table__.delete().where(ScheduledQueryRun.id.in_(stale_ids))
                 )
                 await db.commit()
         return run
@@ -402,9 +433,7 @@ class ScheduledQueryService:
         """Update the parent schedule's rollup fields after an execution attempt."""
         async with self._session_factory() as db:
             row = (
-                await db.execute(
-                    select(ScheduledQuery).where(ScheduledQuery.id == schedule_id)
-                )
+                await db.execute(select(ScheduledQuery).where(ScheduledQuery.id == schedule_id))
             ).scalar_one_or_none()
             if row is None:
                 return
@@ -430,14 +459,18 @@ class ScheduledQueryService:
         """
         async with self._session_factory() as db:
             rows = (
-                await db.execute(
-                    select(ScheduledQuery)
-                    .options(selectinload(ScheduledQuery.runs))
-                    .where(
-                        ScheduledQuery.is_paused.is_(False),
-                        ScheduledQuery.next_run_at.is_not(None),
-                        ScheduledQuery.next_run_at <= before,
+                (
+                    await db.execute(
+                        select(ScheduledQuery)
+                        .options(selectinload(ScheduledQuery.runs))
+                        .where(
+                            ScheduledQuery.is_paused.is_(False),
+                            ScheduledQuery.next_run_at.is_not(None),
+                            ScheduledQuery.next_run_at <= before,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return list(rows)

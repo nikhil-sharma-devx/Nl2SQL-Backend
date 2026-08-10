@@ -7,6 +7,7 @@ SOLID:
   S — Only handles feedback learning and pattern injection
   D — Depends on feedback service and database
 """
+
 from datetime import datetime
 from typing import Any
 
@@ -52,6 +53,8 @@ class FeedbackLearner:
         error_type: str | None = None,
         user_correction: str | None = None,
         user_notes: str | None = None,
+        user_id: str | None = None,
+        connection_id: str | None = None,
     ) -> None:
         """Record user feedback and learn from it.
 
@@ -62,6 +65,9 @@ class FeedbackLearner:
             error_type: Type of error (for negative feedback).
             user_correction: User's corrected SQL (if provided).
             user_notes: Additional notes from user.
+            user_id: Submitting user, when known (C8) — scopes the resulting
+                training-data row so few-shot retrieval stays tenant-isolated.
+            connection_id: Active connection, when known (C8).
         """
         if feedback_type == "positive":
             self._logger.info("Positive feedback received", question=question[:50])
@@ -75,10 +81,14 @@ class FeedbackLearner:
                         schema_context="",
                         intent_type="user_approved",
                         success_score=1.0,
+                        user_id=user_id,
+                        connection_id=connection_id,
                     )
                     self._logger.info("Positive feedback saved to training data")
                 except Exception as exc:
-                    self._logger.warning("Failed to save positive feedback to training data", error=str(exc))
+                    self._logger.warning(
+                        "Failed to save positive feedback to training data", error=str(exc)
+                    )
             return
 
         # Negative feedback — learn from mistake
@@ -118,12 +128,20 @@ class FeedbackLearner:
                         schema_context="",
                         intent_type="user_corrected",
                         success_score=1.0,
+                        user_id=user_id,
+                        connection_id=connection_id,
                     )
                     self._logger.info("User correction saved to training data")
                 except Exception as exc:
-                    self._logger.warning("Failed to save correction to training data", error=str(exc))
+                    self._logger.warning(
+                        "Failed to save correction to training data", error=str(exc)
+                    )
 
-            self._logger.info("Learned from negative feedback", error_type=error_type, pattern_id=pattern.pattern_id)
+            self._logger.info(
+                "Learned from negative feedback",
+                error_type=error_type,
+                pattern_id=pattern.pattern_id,
+            )
 
     def _create_pattern(
         self,
@@ -168,7 +186,7 @@ class FeedbackLearner:
         import re
 
         # Simple extraction - could be enhanced with sqlglot
-        match = re.search(r'FROM\s+(\w+)', sql, re.IGNORECASE)
+        match = re.search(r"FROM\s+(\w+)", sql, re.IGNORECASE)
         if match:
             return match.group(1)
         return None
@@ -194,9 +212,7 @@ class FeedbackLearner:
         parts = []
 
         if table_name and column_name:
-            parts.append(
-                f"Table '{table_name}' does not have column '{column_name}'"
-            )
+            parts.append(f"Table '{table_name}' does not have column '{column_name}'")
         elif table_name:
             parts.append(f"Issue with table '{table_name}': {error_type}")
         else:
@@ -208,17 +224,28 @@ class FeedbackLearner:
         return ". ".join(parts)
 
     async def get_relevant_patterns(self, question: str) -> list[FeedbackPattern]:
-        """Get relevant feedback patterns for a question."""
-        return list(self._patterns.values())
+        """Get feedback patterns relevant to a question.
+
+        Medium finding: this used to return every pattern regardless of
+        ``question`` (the argument was ignored). A pattern tied to a specific
+        table is only "relevant" if that table is actually mentioned in the
+        question; table-less patterns (general mistakes) always apply. This
+        is a coarser, question-only alternative to ``get_learning_prompt``
+        (used on the live SQL-generation path, filtered by the *retrieved*
+        table list, which is more precise once available).
+        """
+        q_lower = question.lower()
+        return [
+            p
+            for p in self._patterns.values()
+            if p.table_name is None or p.table_name.lower() in q_lower
+        ]
 
     def build_pattern_context(self, patterns: list[FeedbackPattern]) -> str:
         """Format patterns into a prompt context string."""
         if not patterns:
             return ""
-        lines = [
-            "\n⚠️ COMMON MISTAKES TO AVOID (learned from user feedback):",
-            ""
-        ]
+        lines = ["\n⚠️ COMMON MISTAKES TO AVOID (learned from user feedback):", ""]
         for pattern in patterns:
             lines.append(f"• {pattern.description}")
             if pattern.correction:
@@ -261,9 +288,7 @@ class FeedbackLearner:
         # Group by error type
         error_counts: dict[str, int] = {}
         for pattern in self._patterns.values():
-            error_counts[pattern.error_type] = (
-                error_counts.get(pattern.error_type, 0) + 1
-            )
+            error_counts[pattern.error_type] = error_counts.get(pattern.error_type, 0) + 1
 
         # Find most common errors
         top_errors = sorted(

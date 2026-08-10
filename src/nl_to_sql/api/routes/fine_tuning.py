@@ -1,10 +1,12 @@
 """Fine-tuning routes — POST/GET /api/v1/fine-tuning/*."""
+
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from nl_to_sql.api.dependencies import get_container, get_current_user
+from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
+from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.fine_tuning_service import FineTuningService
@@ -54,7 +56,9 @@ async def get_fine_tuning_service(
         )
     else:
         effective_key = settings.openai_api_key
-        missing_msg = "OpenAI API key required for fine-tuning. Set OPENAI_API_KEY in your environment."
+        missing_msg = (
+            "OpenAI API key required for fine-tuning. Set OPENAI_API_KEY in your environment."
+        )
 
     if not effective_key:
         raise HTTPException(status_code=400, detail=missing_msg)
@@ -74,7 +78,9 @@ async def get_fine_tuning_service(
 
 
 @router.post("/prepare", response_model=PrepareFileResponse)
+@limiter.limit("5/minute")
 async def prepare_training_file(
+    request: Request,
     format: str = Query(default="jsonl", pattern="^(json|jsonl)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
@@ -96,13 +102,16 @@ async def prepare_training_file(
 
 
 @router.post("/start", response_model=StartJobResponse)
+@limiter.limit("5/minute")
 async def start_fine_tuning(
+    request: Request,
     model: str,
     training_file_path: str,
     hyperparameters: dict[str, Any] | None = None,
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
+    _admin: UserPublic = Depends(require_admin),
 ) -> dict[str, str]:
-    """Start a fine-tuning job.
+    """Start a fine-tuning job. Admin-only: consumes platform-wide fine-tuning budget/quota.
 
     Args:
         model: Base model to fine-tune.
@@ -163,14 +172,18 @@ async def list_jobs(
 
 
 @router.post("/deploy", response_model=DeployResponse)
+@limiter.limit("5/minute")
 async def deploy_fine_tuned_model(
+    request: Request,
     model_id: str,
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
+    _admin: UserPublic = Depends(require_admin),
 ) -> dict[str, Any]:
     """Deploy a fine-tuned model and hot-swap the running LLM provider.
 
     Validates the model exists, then switches the application to use it
-    immediately without a server restart.
+    immediately without a server restart. Admin-only: this hot-swaps the
+    model for every user on the platform.
 
     Args:
         model_id: The fine-tuned model ID returned by Together AI (e.g. "ft-abc123-llama-3-1").

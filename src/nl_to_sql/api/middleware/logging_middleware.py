@@ -1,4 +1,6 @@
 """Structured request logging middleware."""
+
+import re
 import time
 import uuid
 
@@ -9,6 +11,12 @@ from starlette.responses import Response
 
 logger = structlog.get_logger(__name__)
 
+# Low: a client-supplied X-Request-ID was echoed into logs and the response
+# header with no validation — a value containing control characters (log
+# injection / correlation-ID spoofing) or an unbounded length was accepted
+# verbatim. Restrict to a conservative, log/header-safe charset and length.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Log every incoming request with timing and correlation ID.
@@ -17,7 +25,12 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next: object) -> Response:
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        client_request_id = request.headers.get("X-Request-ID")
+        request_id = (
+            client_request_id
+            if client_request_id and _REQUEST_ID_RE.match(client_request_id)
+            else str(uuid.uuid4())
+        )
         start = time.perf_counter()
 
         # Expose the ID to exception handlers and bind it to the structlog

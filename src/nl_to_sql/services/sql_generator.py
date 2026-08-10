@@ -1,4 +1,5 @@
 """SQL generator — builds prompts and calls the LLM to produce SQL."""
+
 import re
 from typing import Any
 
@@ -14,6 +15,7 @@ from nl_to_sql.services.feedback_learner import FeedbackLearner
 try:
     from langfuse.decorators import langfuse_context as _lf_ctx
     from langfuse.decorators import observe as _lf_observe
+
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
@@ -30,10 +32,22 @@ except ImportError:
         def update_current_trace(**_: Any) -> None:
             pass
 
+
 logger = structlog.get_logger(__name__)
 
 # Regex to strip markdown SQL fences: ```sql ... ``` or ``` ... ```
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+# Medium: telemetry used to hardcode gen_ai.system="groq" regardless of which
+# of the 4 providers actually served the request, corrupting cost/latency-by-
+# provider tracing. None of the provider classes expose a "name" attribute,
+# so derive it from the concrete class.
+_PROVIDER_CLASS_TO_NAME: dict[str, str] = {
+    "GroqProvider": "groq",
+    "OpenAIProvider": "openai",
+    "AnthropicProvider": "anthropic",
+    "GeminiProvider": "gemini",
+}
 
 
 _SYSTEM_PROMPT_TEMPLATE = """You are an expert {dialect} SQL generator.
@@ -193,6 +207,7 @@ A: {
 }
 """
 
+
 def _build_style_instructions(style_hints: dict[str, Any] | None) -> str:
     """Translate user SQL style preferences into prompt instructions."""
     if not style_hints:
@@ -210,7 +225,9 @@ def _build_style_instructions(style_hints: dict[str, Any] | None) -> str:
         parts.append("- Write all SQL keywords in lowercase (select, from, where, join, etc.).")
     alias = style_hints.get("alias_style")
     if alias == "implicit":
-        parts.append("- Use implicit aliases — omit the AS keyword: write `table_name t` not `table_name AS t`.")
+        parts.append(
+            "- Use implicit aliases — omit the AS keyword: write `table_name t` not `table_name AS t`."
+        )
     elif alias == "as":
         parts.append("- Always use the explicit AS keyword for aliases: `table_name AS t`.")
     indent = style_hints.get("indent")
@@ -247,7 +264,9 @@ class SQLGeneratorService:
         self._max_tokens = max_tokens
         self._feedback_learner = feedback_learner
 
-    @_lf_observe(name="sql_generation", as_type="generation", capture_input=False, capture_output=False)
+    @_lf_observe(
+        name="sql_generation", as_type="generation", capture_input=False, capture_output=False
+    )
     @trace_function("llm.generate")
     async def generate(
         self,
@@ -288,13 +307,15 @@ class SQLGeneratorService:
         if self._feedback_learner:
             # Extract table names from schema_context to filter relevant patterns
             import re
-            tables = re.findall(r'Table[:\s]+(\w+)', schema_context, re.IGNORECASE)
+
+            tables = re.findall(r"Table[:\s]+(\w+)", schema_context, re.IGNORECASE)
             learning_patterns = self._feedback_learner.get_learning_prompt(tables)
 
         # Apply token budget to custom instructions before injection
         effective_instructions: str | None = None
         if custom_instructions:
             from nl_to_sql.services.prompt_budget import PromptBudget
+
             budget = PromptBudget(max_completion_tokens=self._max_tokens)
             assembled = budget.assemble(
                 system_preamble=_SYSTEM_PROMPT_TEMPLATE,
@@ -305,9 +326,7 @@ class SQLGeneratorService:
             effective_instructions = assembled["custom_instructions"]
 
         instructions_section = (
-            effective_instructions
-            if effective_instructions
-            else "No custom instructions set."
+            effective_instructions if effective_instructions else "No custom instructions set."
         )
 
         # Certified metrics get their own dedicated section — NOT folded into
@@ -319,6 +338,7 @@ class SQLGeneratorService:
         # Build dynamic few-shot section — prefer training data examples over static defaults
         if few_shot_examples:
             import json as _json
+
             shot_parts = []
             for ex in few_shot_examples:
                 q = ex.get("question", "").strip()
@@ -330,11 +350,12 @@ class SQLGeneratorService:
                     # answer "none", which suppressed charts in chat. The output
                     # contract (incl. suggested_chart) is taught by the system
                     # prompt and the static examples.
-                    shot_parts.append(
-                        f'Q: {q}\n'
-                        f'A: {{"sql": {_json.dumps(sql)}}}'
-                    )
-            few_shot_text = ("EXAMPLES (from similar past queries):\n\n" + "\n\n".join(shot_parts)) if shot_parts else _FEW_SHOT_EXAMPLES
+                    shot_parts.append(f'Q: {q}\nA: {{"sql": {_json.dumps(sql)}}}')
+            few_shot_text = (
+                ("EXAMPLES (from similar past queries):\n\n" + "\n\n".join(shot_parts))
+                if shot_parts
+                else _FEW_SHOT_EXAMPLES
+            )
         else:
             few_shot_text = _FEW_SHOT_EXAMPLES
 
@@ -351,7 +372,8 @@ class SQLGeneratorService:
                 recent_turns = "\n\n".join(
                     f"Turn:\nUser: {t.get('question', '').strip()}"
                     f"\nSQL:\n{t.get('sql', '').strip()}"
-                    for t in recent if t.get("question", "").strip()
+                    for t in recent
+                    if t.get("question", "").strip()
                 )
                 history_section = f"{summary}\n\nRecent turns:\n{recent_turns}"
             else:
@@ -372,8 +394,7 @@ class SQLGeneratorService:
         # Using .replace instead of .format to avoid KeyError if schema_context
         # or few_shot_examples contain curly braces (common in SQL/JSON).
         system_prompt = (
-            _SYSTEM_PROMPT_TEMPLATE
-            .replace("{dialect}", dialect.upper())
+            _SYSTEM_PROMPT_TEMPLATE.replace("{dialect}", dialect.upper())
             .replace("{schema_context}", schema_context + learning_patterns)
             .replace("{few_shot_examples}", few_shot_text)
             .replace("{question}", question)
@@ -390,8 +411,11 @@ class SQLGeneratorService:
                 "Please fix the SQL and try again."
             )
 
-        # Lower token budget on first attempt; allow more headroom on retries (#05)
-        effective_max_tokens = 768 if error_feedback else 512
+        # Lower token budget on first attempt; allow more headroom on retries (#05).
+        # H3: both tiers derive from the configured self._max_tokens (was
+        # hardcoded to 512/768, so raising settings.llm_max_tokens had zero
+        # effect on actual generation calls).
+        effective_max_tokens = self._max_tokens if error_feedback else max(1, self._max_tokens // 2)
         actual_model = model_override or getattr(self._llm, "_model", "unknown")
         log.debug("Calling LLM for SQL generation")
         try:
@@ -404,7 +428,10 @@ class SQLGeneratorService:
                 model_override=model_override,
             )
             # Set GenAI semantic conventions for OpenTelemetry spans
-            set_span_attribute("gen_ai.system", "groq")
+            provider_name = _PROVIDER_CLASS_TO_NAME.get(
+                type(self._llm).__name__, type(self._llm).__name__
+            )
+            set_span_attribute("gen_ai.system", provider_name)
             set_span_attribute("gen_ai.response.model", actual_model)
             set_span_attribute("gen_ai.request.temperature", self._temperature)
             set_span_attribute("gen_ai.usage.input_tokens", response.prompt_tokens)
@@ -432,11 +459,10 @@ class SQLGeneratorService:
             # Re-raise rate limit errors to preserve the correct error type
             raise
         except Exception as exc:
-            raise SQLGenerationError(
-                f"LLM call failed: {exc}", detail=str(exc)
-            ) from exc
+            raise SQLGenerationError(f"LLM call failed: {exc}", detail=str(exc)) from exc
 
         import json
+
         try:
             payload = json.loads(response.content)
             raw_sql = payload.get("sql", "")
@@ -487,23 +513,17 @@ class SQLGeneratorService:
 
         # Pattern 1: FROM table_name or FROM table_name alias
         # Matches: FROM customers, FROM customers c, FROM customers AS c
-        from_pattern = re.compile(
-            r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-            re.IGNORECASE
-        )
+        from_pattern = re.compile(r"\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE)
 
         # Pattern 2: JOIN table_name or JOIN table_name alias
         # Matches: JOIN orders, JOIN orders o, JOIN orders AS o, LEFT JOIN orders, etc.
-        join_pattern = re.compile(
-            r'\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-            re.IGNORECASE
-        )
+        join_pattern = re.compile(r"\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE)
 
         # Extract tables from FROM clauses
         for match in from_pattern.finditer(sql):
             table_name = match.group(1).lower()
             # Filter out SQL keywords that might be mistakenly matched
-            if table_name not in ('select', 'where', 'group', 'order', 'having', 'limit', 'offset'):
+            if table_name not in ("select", "where", "group", "order", "having", "limit", "offset"):
                 tables.add(table_name)
 
         # Extract tables from JOIN clauses

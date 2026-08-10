@@ -8,6 +8,7 @@ posture); writes (update/delete/certify/uncertify) are further scoped to the
 metric's creator — cross-user/cross-connection access is reported as *not
 found* (404) so existence cannot be probed.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -22,8 +23,10 @@ from nl_to_sql.api.dependencies import (
     get_starter_content_service,
 )
 from nl_to_sql.api.middleware.rate_limiter import limiter
+from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.metrics_service import MetricInfo, MetricsService
+from nl_to_sql.services.sql_validator import SQLValidatorService
 from nl_to_sql.services.starter_content_service import StarterContentService
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["Metrics"])
@@ -197,9 +200,7 @@ async def delete_metric(
     return MetricDeleteResponse(message="Metric deleted.")
 
 
-@router.post(
-    "/{metric_id}/certify", response_model=MetricOut, summary="Certify a metric"
-)
+@router.post("/{metric_id}/certify", response_model=MetricOut, summary="Certify a metric")
 async def certify_metric(
     metric_id: str,
     current_user: UserPublic = Depends(get_current_user),
@@ -210,9 +211,7 @@ async def certify_metric(
     return _to_out(info)
 
 
-@router.post(
-    "/{metric_id}/uncertify", response_model=MetricOut, summary="Uncertify a metric"
-)
+@router.post("/{metric_id}/uncertify", response_model=MetricOut, summary="Uncertify a metric")
 async def uncertify_metric(
     metric_id: str,
     current_user: UserPublic = Depends(get_current_user),
@@ -232,7 +231,9 @@ async def uncertify_metric(
 async def preview_metric(
     request: Request,
     metric_id: str,
-    execute: bool = Query(default=False, description="If true, run a capped 50-row sample instead of EXPLAIN"),
+    execute: bool = Query(
+        default=False, description="If true, run a capped 50-row sample instead of EXPLAIN"
+    ),
     current_user: UserPublic = Depends(get_current_user),
     connection_id: str = Depends(get_active_connection_id),
     svc: MetricsService = Depends(get_metrics_service),
@@ -247,6 +248,17 @@ async def preview_metric(
     from nl_to_sql.api.dependencies import _get_container
 
     info = await svc.get(current_user.id, connection_id, metric_id)
+
+    # Defense-in-depth (C6): re-validate immediately before execution,
+    # independent of the hard block already enforced when the metric's SQL
+    # was written — catches anything persisted before that check existed.
+    validator = SQLValidatorService(dialect=get_settings().sql_dialect)
+    validation = validator.validate(info.sql_definition)
+    if not validation.is_valid:
+        return MetricPreviewResponse(
+            ok=False, error=f"Metric SQL rejected by validation: {'; '.join(validation.errors)}"
+        )
+
     container = _get_container()
     conn_svc = container.connection_service()
     db_client = await conn_svc.get_client(connection_id)
@@ -255,7 +267,9 @@ async def preview_metric(
 
     try:
         if execute:
-            wrapped = f"SELECT * FROM ({info.sql_definition.rstrip(';')}) AS _metric_preview LIMIT 50"  # noqa: S608
+            wrapped = (
+                f"SELECT * FROM ({info.sql_definition.rstrip(';')}) AS _metric_preview LIMIT 50"  # noqa: S608
+            )
             rows = await db_client.execute_sql(wrapped)
             return MetricPreviewResponse(ok=True, row_count=len(rows), rows=rows)
         plan = await db_client.explain(info.sql_definition)

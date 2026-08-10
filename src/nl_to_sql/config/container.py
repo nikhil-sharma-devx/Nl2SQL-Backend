@@ -3,6 +3,7 @@
 Object construction logic lives in `config/factories/`; this module is the
 thin wiring layer that composes those factories into providers.
 """
+
 from typing import Any
 
 from dependency_injector import containers, providers
@@ -15,7 +16,7 @@ from nl_to_sql.config.factories import (
     build_vector_store,
     create_llm_provider,
 )
-from nl_to_sql.config.settings import Settings
+from nl_to_sql.config.settings import Settings, get_settings
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.cache.semantic_cache import SemanticCache
@@ -117,7 +118,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
         **{
             "True": semantic_cache,
             "False": cache,
-        }
+        },
     )
 
     db_client = providers.Singleton(
@@ -291,6 +292,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
     dashboard_service = providers.Singleton(
         DashboardService,
         session_factory=session_service.provided._session_factory,
+        sql_validator=sql_validator,
     )
 
     # ── Scheduled Query Service (Scheduled Queries & Alerts) ─────────────────
@@ -377,6 +379,7 @@ class ApplicationContainer(containers.DeclarativeContainer):
         session_factory=session_service.provided._session_factory,
         column_validator=column_validator,
         schema_catalog_service=schema_catalog_service,
+        sql_validator=sql_validator,
     )
 
     # ── Starter Content Service (seeds built-in Templates/Metrics/Schedules/Dashboards) ─
@@ -476,6 +479,19 @@ class ApplicationContainer(containers.DeclarativeContainer):
         # Update runtime state tracking
         container._current_llm_provider.override(providers.Object(provider))
         container._current_llm_model.override(providers.Object(model))
+
+        # H9: mutate BOTH Settings singletons — get_current_llm_config() already
+        # reflects a switch via the override tracking above, but any consumer
+        # reading settings.llm_provider/llm_model *directly* (e.g. GET /profile)
+        # used to see the pre-switch value forever, since neither
+        # container.config() nor the get_settings() lru_cache instance was
+        # ever actually updated.
+        settings.llm_provider = provider  # type: ignore[assignment]
+        settings.llm_model = model
+        live_settings = get_settings()
+        if live_settings is not settings:
+            live_settings.llm_provider = provider  # type: ignore[assignment]
+            live_settings.llm_model = model
 
         return new_provider
 

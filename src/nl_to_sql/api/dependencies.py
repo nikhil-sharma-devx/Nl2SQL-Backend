@@ -1,10 +1,12 @@
 """FastAPI dependency providers — bridge between DI container and route handlers."""
+
 from __future__ import annotations
 
 import time
 from functools import lru_cache
 from typing import Annotated
 
+import structlog
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -27,6 +29,8 @@ from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.schema_doc_service import SchemaDocService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 from nl_to_sql.services.starter_content_service import StarterContentService
+
+logger = structlog.get_logger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -124,28 +128,49 @@ async def resolve_active_connection(
     The active connection is the user's persisted default. A connection with no
     stored DSN (the built-in "Server Default") resolves the client to the
     platform database. Never raises — falls back to the server default client.
+
+    ``(None, None, db_client)`` means "no active connection" and is returned
+    for two different reasons: genuinely no/invalid credentials, or an
+    authenticated user whose connection lookup itself failed (C7 — e.g. a
+    transient DB error). Both cases fail CLOSED to the same shared-only scope;
+    the latter is additionally logged, since it's a real failure worth seeing
+    rather than a normal anonymous request. Every downstream per-tenant filter
+    (vector store, example store, semantic cache) must treat a ``None``
+    ``connection_id`` as "shared-only", never as "unrestricted" — that
+    invariant, not this function, is what actually prevents a resolution
+    failure from turning into a cross-tenant read.
     """
     container = _get_container()
     db_client = container.db_client()
     if credentials is None:
         return None, None, db_client
-    try:
-        from nl_to_sql.services.auth_service import decode_access_token
 
+    from nl_to_sql.services.auth_service import decode_access_token
+
+    try:
         token_data = decode_access_token(credentials.credentials)
+    except Exception:
+        # Invalid/expired token — equivalent to no credentials: anonymous, shared-only.
+        return None, None, db_client
+
+    try:
         conn_svc = container.connection_service()
         connection_id = await conn_svc.get_active_connection_id(token_data.user_id)
         user_client = await conn_svc.get_client(connection_id)
         if user_client is not None:
             db_client = user_client
         return token_data.user_id, connection_id, db_client
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "resolve_active_connection: connection lookup failed for an "
+            "authenticated user — failing closed to shared-only scope",
+            user_id=token_data.user_id,
+            error=str(exc),
+        )
         return None, None, db_client
 
 
-async def _maybe_self_heal_vectors(
-    user_id: str | None, connection_id: str | None
-) -> None:
+async def _maybe_self_heal_vectors(user_id: str | None, connection_id: str | None) -> None:
     """One-time lazy re-embed of a connection whose vector store is empty."""
     if not user_id or not connection_id or connection_id in _vectors_checked:
         return
@@ -153,9 +178,7 @@ async def _maybe_self_heal_vectors(
     try:
         container = _get_container()
         count = await container.vector_store().count(connection_id=connection_id)
-        await container.schema_catalog_service().ensure_embedded(
-            user_id, connection_id, count
-        )
+        await container.schema_catalog_service().ensure_embedded(user_id, connection_id, count)
     except Exception:
         pass  # non-fatal — retrieval will surface an empty-schema error if truly empty
 
@@ -366,9 +389,7 @@ async def get_active_connection_id(
     Ensures the user always has at least one connection (a Server Default is
     created on demand), so routes can rely on a non-null connection id.
     """
-    return await _get_container().connection_service().get_active_connection_id(
-        current_user.id
-    )
+    return await _get_container().connection_service().get_active_connection_id(current_user.id)
 
 
 async def require_admin(
@@ -380,6 +401,7 @@ async def require_admin(
     Returns the user on success; raises HTTP 403 otherwise.
     """
     from nl_to_sql.config.settings import get_settings
+
     settings = get_settings()
     if current_user.email.lower() not in settings.admin_email_list:
         raise HTTPException(

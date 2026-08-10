@@ -13,6 +13,7 @@ re-instantiated) and ``SchemaCatalogService`` are also injected, used by
 ``validate_sql_definition`` to catch hallucinated columns in a metric's SQL
 before it can be certified.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from nl_to_sql.core.exceptions import MetricNotFoundError, MetricValidationError
 from nl_to_sql.infrastructure.database.models import Metric
 from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.sql_column_validator import SQLColumnValidator
+from nl_to_sql.services.sql_validator import SQLValidatorService
 
 logger = structlog.get_logger(__name__)
 
@@ -61,11 +63,31 @@ class MetricsService:
         session_factory: async_sessionmaker[AsyncSession],
         column_validator: SQLColumnValidator,
         schema_catalog_service: SchemaCatalogService,
+        sql_validator: SQLValidatorService,
     ) -> None:
         self._session_factory = session_factory
         self._column_validator = column_validator
         self._schema_catalog_service = schema_catalog_service
+        self._sql_validator = sql_validator
         self._log = logger.bind(service="Metrics")
+
+    def _enforce_sql_safety(self, sql: str) -> None:
+        """Hard-block dangerous/non-SELECT SQL at write time (C6).
+
+        Unlike :meth:`validate_sql_definition` (a soft, hallucinated-column
+        check only enforced at certify time), this runs
+        :class:`SQLValidatorService` — the same dangerous-function/SELECT-only
+        guard the live query path uses — and blocks the write outright. It
+        must run at write time because ``preview_metric`` lets any user on
+        the connection preview/execute a metric's SQL even before it's
+        certified.
+        """
+        result = self._sql_validator.validate(sql)
+        if not result.is_valid:
+            raise MetricValidationError(
+                "Metric SQL definition rejected by validation.",
+                detail="; ".join(result.errors),
+            )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -97,15 +119,20 @@ class MetricsService:
             Metric.connection_id == connection_id,
             Metric.user_id == user_id,
         ]
-        row = (
-            await db.execute(select(Metric).where(*conditions))
-        ).scalar_one_or_none()
+        row = (await db.execute(select(Metric).where(*conditions))).scalar_one_or_none()
         if row is None:
             raise MetricNotFoundError("Metric not found.")
         return row
 
-    async def _to_info(self, row: Metric) -> MetricInfo:
-        errors = await self.validate_sql_definition(row.user_id, row.connection_id, row.sql_definition)
+    async def _to_info(
+        self, row: Metric, schema_context: dict[str, list[str]] | None = None
+    ) -> MetricInfo:
+        """Build a :class:`MetricInfo`, reusing a pre-fetched ``schema_context``
+        when the caller already has one (avoids re-fetching the catalog per
+        row — see ``list_metrics``)."""
+        if schema_context is None:
+            schema_context = await self._schema_context(row.user_id, row.connection_id)
+        errors = self._column_validator.validate(row.sql_definition, schema_context)
         return MetricInfo(
             metric_id=row.metric_id,
             connection_id=row.connection_id,
@@ -124,6 +151,23 @@ class MetricsService:
 
     # ── SQL validation ───────────────────────────────────────────────────────────
 
+    async def _schema_context(self, user_id: str, connection_id: str) -> dict[str, list[str]]:
+        """Fetch the connection's catalog and shape it for column validation.
+
+        The catalog is scoped by ``connection_id`` alone (``user_id`` only
+        affects the ``pinned`` flag, unused here) — safe to fetch once and
+        reuse across every metric in a connection (see ``list_metrics``).
+        """
+        try:
+            catalog = await self._schema_catalog_service.get_catalog(user_id, connection_id)
+        except Exception as exc:
+            self._log.warning("metrics: schema catalog unavailable for validation", error=str(exc))
+            return {}
+        return {
+            t["table_name"]: [c["name"] for c in (t.get("columns") or [])]
+            for t in catalog.get("tables", [])
+        }
+
     async def validate_sql_definition(
         self, user_id: str, connection_id: str, sql: str
     ) -> list[str]:
@@ -132,15 +176,7 @@ class MetricsService:
         Does **not** execute the SQL — that's the separate ``preview`` flow.
         Returns an empty list when the definition is clean.
         """
-        try:
-            catalog = await self._schema_catalog_service.get_catalog(user_id, connection_id)
-        except Exception as exc:
-            self._log.warning("metrics: schema catalog unavailable for validation", error=str(exc))
-            return []
-        schema_context: dict[str, list[str]] = {
-            t["table_name"]: [c["name"] for c in (t.get("columns") or [])]
-            for t in catalog.get("tables", [])
-        }
+        schema_context = await self._schema_context(user_id, connection_id)
         return self._column_validator.validate(sql, schema_context)
 
     # ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -158,8 +194,10 @@ class MetricsService:
     ) -> tuple[list[MetricInfo], int]:
         async with self._session_factory() as db:
             stmt = select(Metric).where(Metric.connection_id == connection_id)
-            count_stmt = select(func.count()).select_from(Metric).where(
-                Metric.connection_id == connection_id
+            count_stmt = (
+                select(func.count())
+                .select_from(Metric)
+                .where(Metric.connection_id == connection_id)
             )
             if search:
                 like = f"%{search.strip()}%"
@@ -173,13 +211,20 @@ class MetricsService:
 
             total = (await db.execute(count_stmt)).scalar_one()
             rows = (
-                await db.execute(stmt.order_by(Metric.name).limit(limit).offset(offset))
-            ).scalars().all()
+                (await db.execute(stmt.order_by(Metric.name).limit(limit).offset(offset)))
+                .scalars()
+                .all()
+            )
 
         if tag:
             rows = [r for r in rows if tag in (r.tags or [])]
 
-        infos = [await self._to_info(r) for r in rows]
+        # Medium: fetch the catalog once for the whole page instead of once
+        # per row (~200 redundant identical queries near the metrics cap) —
+        # every row shares the same connection_id, and the catalog is
+        # connection-scoped, not row-scoped.
+        schema_context = await self._schema_context(user_id, connection_id)
+        infos = [await self._to_info(r, schema_context) for r in rows]
         return infos, int(total)
 
     async def get(self, user_id: str, connection_id: str, metric_id: str) -> MetricInfo:
@@ -205,6 +250,7 @@ class MetricsService:
             raise MetricValidationError("Metric name cannot be empty.")
         if not sql_definition:
             raise MetricValidationError("Metric SQL definition cannot be empty.")
+        self._enforce_sql_safety(sql_definition)
 
         async with self._session_factory() as db:
             count = (
@@ -240,7 +286,9 @@ class MetricsService:
                 ) from exc
             await db.refresh(row)
 
-        self._log.info("metric created", user_id=user_id, connection_id=connection_id, metric_id=row.metric_id)
+        self._log.info(
+            "metric created", user_id=user_id, connection_id=connection_id, metric_id=row.metric_id
+        )
         return await self._to_info(row)
 
     async def update(
@@ -270,6 +318,7 @@ class MetricsService:
                 sql_definition = sql_definition.strip()
                 if not sql_definition:
                     raise MetricValidationError("Metric SQL definition cannot be empty.")
+                self._enforce_sql_safety(sql_definition)
                 row.sql_definition = sql_definition
             if dimensions is not None:
                 row.dimensions = list(dimensions)
@@ -311,6 +360,9 @@ class MetricsService:
         """
         async with self._session_factory() as db:
             row = await self._get_owned(db, user_id, connection_id, metric_id)
+            # Belt-and-braces: re-run the hard safety check even though create/update
+            # already enforce it — covers metrics persisted before this check existed.
+            self._enforce_sql_safety(row.sql_definition)
             errors = await self.validate_sql_definition(user_id, connection_id, row.sql_definition)
             if errors:
                 raise MetricValidationError(
@@ -347,13 +399,17 @@ class MetricsService:
         """
         async with self._session_factory() as db:
             rows = (
-                await db.execute(
-                    select(Metric)
-                    .where(Metric.connection_id == connection_id, Metric.certified.is_(True))
-                    .order_by(Metric.name)
-                    .limit(limit)
+                (
+                    await db.execute(
+                        select(Metric)
+                        .where(Metric.connection_id == connection_id, Metric.certified.is_(True))
+                        .order_by(Metric.name)
+                        .limit(limit)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return [
             {
                 "name": r.name,

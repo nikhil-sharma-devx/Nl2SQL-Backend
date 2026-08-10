@@ -1,4 +1,5 @@
 """OpenAI LLM provider — implements ILLMProvider."""
+
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -27,9 +28,17 @@ class OpenAIProvider(ILLMProvider):  # type: ignore[misc]
         self,
         api_key: str,
         model: str = "gpt-4o-mini",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         self._api_key = api_key
-        self._client = AsyncOpenAI(api_key=api_key) if api_key else None
+        # Medium: no timeout/max_retries set — a hung upstream could tie up
+        # request capacity indefinitely.
+        self._client = (
+            AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
+            if api_key
+            else None
+        )
         self._model = model
 
     def _check_key(self) -> None:
@@ -91,9 +100,7 @@ class OpenAIProvider(ILLMProvider):  # type: ignore[misc]
             ) from exc
         except OpenAIAPIError as exc:
             log.error("OpenAI API error", error=str(exc))
-            raise LLMProviderError(
-                f"OpenAI request failed: {exc}", detail=str(exc)
-            ) from exc
+            raise LLMProviderError(f"OpenAI request failed: {exc}", detail=str(exc)) from exc
 
     async def health_check(self) -> bool:
         """Ping OpenAI by listing models."""
@@ -103,6 +110,10 @@ class OpenAIProvider(ILLMProvider):  # type: ignore[misc]
             await self._client.models.list()
             return True
         except OpenAIAPIError:
+            return False
+        except Exception:
+            # Low: matches anthropic/gemini's defensive catch-all so
+            # health_check() never raises regardless of provider.
             return False
 
     async def stream_complete(

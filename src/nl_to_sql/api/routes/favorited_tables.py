@@ -1,8 +1,9 @@
 """P2 - Favorite/Pinned Tables: user-pinned tables that get retrieval priority."""
+
 from datetime import datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -50,6 +51,8 @@ def _to_out(f: FavoritedTable) -> FavoritedTableOut:
 
 @router.get("", response_model=list[FavoritedTableOut], summary="List favorited tables")
 async def list_favorited_tables(
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> list[FavoritedTableOut]:
@@ -58,12 +61,16 @@ async def list_favorited_tables(
             select(FavoritedTable)
             .where(FavoritedTable.user_id == current_user.id)
             .order_by(FavoritedTable.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
         items = result.scalars().all()
     return [_to_out(f) for f in items]
 
 
-@router.post("", response_model=FavoritedTableOut, status_code=status.HTTP_201_CREATED, summary="Pin a table")
+@router.post(
+    "", response_model=FavoritedTableOut, status_code=status.HTTP_201_CREATED, summary="Pin a table"
+)
 async def pin_table(
     body: FavoritedTableCreate,
     current_user: UserPublic = Depends(get_current_user),
@@ -90,7 +97,9 @@ async def pin_table(
     return _to_out(f)
 
 
-@router.patch("/{table_id}", response_model=FavoritedTableOut, summary="Update note on a pinned table")
+@router.patch(
+    "/{table_id}", response_model=FavoritedTableOut, summary="Update note on a pinned table"
+)
 async def patch_favorited_table(
     table_id: int,
     body: FavoritedTablePatch,

@@ -3,6 +3,7 @@
 The index is persisted via the BM25Store in infrastructure/ so it can be
 loaded by the retrieval pipeline at query time.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -10,23 +11,12 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nl_to_sql.core.models.schema import SchemaChunk
+from nl_to_sql.infrastructure.bm25_store import tokenize_for_bm25
 
 if TYPE_CHECKING:
     from nl_to_sql.infrastructure.bm25_store import BM25Store
 
 logger = structlog.get_logger(__name__)
-
-
-def _tokenise(text: str) -> list[str]:
-    """Simple whitespace + lowercase tokeniser for BM25.
-
-    Strips punctuation and converts to lowercase for better matching
-    of table/column names.
-    """
-    import re
-    # Split on non-alphanumeric characters, keep underscores (common in SQL names)
-    tokens = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", text.lower())
-    return tokens
 
 
 class BM25Indexer:
@@ -53,11 +43,12 @@ class BM25Indexer:
         log.info("Building BM25 index")
 
         # Tokenise all chunks
-        corpus = [_tokenise(chunk.content) for chunk in chunks]
+        corpus = [tokenize_for_bm25(chunk.content) for chunk in chunks]
 
         # Build the BM25 index
         try:
             from rank_bm25 import BM25Okapi
+
             bm25 = BM25Okapi(corpus)
         except ImportError:
             logger.warning(

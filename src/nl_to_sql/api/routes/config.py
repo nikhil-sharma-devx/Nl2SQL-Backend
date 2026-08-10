@@ -1,4 +1,5 @@
 """Configuration routes — GET/PUT /api/v1/config/llm, GET /api/v1/config/models, GET/PUT /api/v1/config/database."""
+
 import ipaddress
 import re
 import socket
@@ -6,12 +7,13 @@ import socket
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from nl_to_sql.api.dependencies import get_container, get_current_user
+from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import Settings, get_settings
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.config import (
+    AVAILABLE_LLM_PROVIDERS,
     AvailableModelsResponse,
     DatabaseConfigResponse,
     DatabaseConfigUpdate,
@@ -45,9 +47,13 @@ def _reject_ssrf_host(url: str) -> None:
     """Resolve URL hostname and raise HTTP 400 if it targets a private/internal IP."""
     try:
         from urllib.parse import urlparse
+
         host = urlparse(url).hostname or ""
         if not host:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid database URL: missing host.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid database URL: missing host.",
+            )
         addrs = socket.getaddrinfo(host, None)
         for addr_info in addrs:
             ip = ipaddress.ip_address(addr_info[4][0])
@@ -73,11 +79,16 @@ def _mask_url(url: str) -> str:
 AVAILABLE_MODELS = {
     "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-    "anthropic": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022"],
+    "anthropic": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001",
+        "claude-3-5-sonnet-20241022",
+    ],
     "gemini": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"],
 }
 
-_AVAILABLE_PROVIDERS = ["groq", "openai", "anthropic", "gemini"]
+_AVAILABLE_PROVIDERS = list(AVAILABLE_LLM_PROVIDERS)
 
 
 @router.get(
@@ -109,7 +120,7 @@ async def update_llm_config(
     request: Request,  # required by SlowAPI for IP extraction
     body: LLMConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
-    _user: UserPublic = Depends(get_current_user),
+    _user: UserPublic = Depends(require_admin),
 ) -> LLMConfigUpdateResponse:
     """Update the LLM provider and model at runtime.
 
@@ -147,6 +158,7 @@ async def update_llm_config(
     has_user_key = False
     try:
         from nl_to_sql.api.dependencies import _get_container as _dep_get_container
+
         api_key_svc = _dep_get_container().api_key_service()
         has_user_key = await api_key_svc.has_key(_user.id, provider)
     except Exception:
@@ -200,8 +212,7 @@ async def get_database_config(
     return DatabaseConfigResponse(
         database_url=_mask_url(settings.database_url),
         available_databases={
-            name: _mask_url(url)
-            for name, url in settings.parsed_available_databases.items()
+            name: _mask_url(url) for name, url in settings.parsed_available_databases.items()
         },
     )
 
@@ -217,7 +228,7 @@ async def update_database_config(
     request: Request,
     body: DatabaseConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
-    _user: UserPublic = Depends(get_current_user),
+    _user: UserPublic = Depends(require_admin),
 ) -> DatabaseConfigUpdateResponse:
     """Update the target database connection string at runtime.
 
@@ -246,6 +257,7 @@ async def update_database_config(
     try:
         temp_client = AsyncDatabaseClient(database_url=new_url)
         from sqlalchemy import text
+
         async with temp_client.session() as sess:
             await sess.execute(text("SELECT 1"))
         await temp_client.dispose()
@@ -336,7 +348,7 @@ async def update_rag_config(
     request: Request,  # required by SlowAPI for IP extraction
     body: RagConfigUpdate,
     container: ApplicationContainer = Depends(get_container),
-    _user: UserPublic = Depends(get_current_user),
+    _user: UserPublic = Depends(require_admin),
 ) -> RagConfigResponse:
     """Partially update the RAG configuration on both live settings singletons."""
     updates = body.model_dump(exclude_none=True)

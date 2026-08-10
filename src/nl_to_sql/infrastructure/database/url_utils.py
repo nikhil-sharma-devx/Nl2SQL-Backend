@@ -4,6 +4,7 @@ Ensures URLs handed to ``create_async_engine`` use an async-capable driver.
 Also parses ADO.NET / key-value connection strings into standard URIs and
 URL-encodes special characters in passwords.
 """
+
 from __future__ import annotations
 
 import re
@@ -14,19 +15,19 @@ _ASYNC_DRIVERS = ("+asyncpg", "+aiomysql", "+asyncmy")
 
 # Keys recognised in ADO.NET / libpq key=value connection strings.
 _KV_ALIASES: dict[str, str] = {
-    "host":                 "host",
-    "server":               "host",
-    "data source":          "host",
-    "port":                 "port",
-    "database":             "database",
-    "initial catalog":      "database",
-    "dbname":               "database",
-    "user":                 "user",
-    "user id":              "user",
-    "uid":                  "user",
-    "username":             "user",
-    "password":             "password",
-    "pwd":                  "password",
+    "host": "host",
+    "server": "host",
+    "data source": "host",
+    "port": "port",
+    "database": "database",
+    "initial catalog": "database",
+    "dbname": "database",
+    "user": "user",
+    "user id": "user",
+    "uid": "user",
+    "username": "user",
+    "password": "password",
+    "pwd": "password",
 }
 
 
@@ -81,9 +82,9 @@ def _encode_password_in_uri(url: str) -> str:
     # Find the scheme+authority part: scheme://[user:pass@]host/...
     match = re.match(
         r"^((?:postgresql|postgres|mysql|sqlite)(?:\+\w+)?://)"  # scheme
-        r"([^:@/]+)"                                              # user (no colon, @, /)
-        r"(?::([^@]*))?@"                                         # :password (optional)
-        r"(.+)$",                                                  # rest
+        r"([^:@/]+)"  # user (no colon, @, /)
+        r"(?::([^@]*))?@"  # :password (optional)
+        r"(.+)$",  # rest
         url,
         re.IGNORECASE,
     )
@@ -144,3 +145,20 @@ def to_async_database_url(url: str) -> str:
             normalized = normalized.replace("sslmode=", "ssl=")
 
     return normalized
+
+
+def sanitize_url_for_logging(url: str) -> str:
+    """Strip userinfo (credentials) from a URL so it's safe to log.
+
+    A URL embedding basic-auth credentials (``scheme://user:pass@host``)
+    logged verbatim leaks them to log aggregators; this keeps only the
+    scheme/host/path.
+    """
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(url)
+        sanitised = parsed._replace(netloc=parsed.hostname or "")
+        return urlunparse(sanitised)
+    except Exception:
+        return "<url>"

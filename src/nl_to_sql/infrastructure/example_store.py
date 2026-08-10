@@ -9,6 +9,7 @@ The store is defensive: every operation is wrapped so a Qdrant outage (or a dev
 environment without Qdrant) degrades gracefully to "no examples" rather than
 breaking the query pipeline.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -32,13 +33,20 @@ from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 logger = structlog.get_logger(__name__)
 
 
-def _example_scope_should(connection_id: str | None) -> list[Any] | None:
-    """OR-conditions scoping reads to a user's own examples plus shared ones."""
+def _example_scope_should(connection_id: str | None) -> list[Any]:
+    """OR-conditions scoping reads to a user's own examples plus shared ones.
+
+    C7 fail-closed: with no ``connection_id`` this returns a single
+    "untagged/shared only" condition rather than an empty/``None`` should
+    clause — an empty ``should`` applies no restriction at all, which would
+    let an unscoped caller read every tenant's examples.
+    """
+    shared_only = IsEmptyCondition(is_empty=PayloadField(key="connection_id"))
     if connection_id is None:
-        return None
+        return [shared_only]
     return [
         FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
-        IsEmptyCondition(is_empty=PayloadField(key="connection_id")),
+        shared_only,
     ]
 
 
@@ -75,9 +83,7 @@ class ExampleStore:
             try:
                 await self._client.create_collection(
                     collection_name=self._collection_name,
-                    vectors_config=VectorParams(
-                        size=self._dimensions, distance=Distance.COSINE
-                    ),
+                    vectors_config=VectorParams(size=self._dimensions, distance=Distance.COSINE),
                 )
                 logger.info("Example collection created", collection=self._collection_name)
             except Exception as exc:
@@ -98,7 +104,9 @@ class ExampleStore:
             await self._ensure_initialized()
             embedding = await self._embedder.embed(question)
             # Deterministic id so re-submitting the same pair updates in place.
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{connection_id or ''}:{question}:{sql}"))
+            point_id = str(
+                uuid.uuid5(uuid.NAMESPACE_DNS, f"{connection_id or ''}:{question}:{sql}")
+            )
             payload: dict[str, Any] = {"question": question, "sql": sql}
             if connection_id is not None:
                 payload["connection_id"] = connection_id

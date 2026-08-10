@@ -1,4 +1,6 @@
 """HuggingFace Sentence-Transformers embedding provider — implements IEmbedder."""
+
+import asyncio
 from typing import TYPE_CHECKING
 
 import structlog
@@ -35,6 +37,7 @@ class HuggingFaceEmbedder(IEmbedder):  # type: ignore[misc]
     def _get_model(self) -> "SentenceTransformer":
         """Lazy-load the sentence-transformer model."""
         from sentence_transformers import SentenceTransformer
+
         if self._model is None:
             log = logger.bind(model=self._model_name)
             try:
@@ -67,10 +70,15 @@ class HuggingFaceEmbedder(IEmbedder):  # type: ignore[misc]
         try:
             log.debug("Computing embeddings")
             model = self._get_model()
-            embeddings = model.encode(cleaned, convert_to_numpy=True, show_progress_bar=False)
+            # H7: model.encode() is a synchronous, CPU-bound call — running it
+            # directly inside this `async def` blocks the event loop for every
+            # concurrent request. gemini_embedder.py already offloads its
+            # (network-bound) call via asyncio.to_thread; mirror that here so
+            # both IEmbedder implementations are actually substitutable under load.
+            embeddings = await asyncio.to_thread(
+                model.encode, cleaned, convert_to_numpy=True, show_progress_bar=False
+            )
             return [emb.tolist() for emb in embeddings]
         except Exception as exc:
             log.error("Embedding error", error=str(exc))
-            raise EmbeddingError(
-                f"HuggingFace embedding failed: {exc}", detail=str(exc)
-            ) from exc
+            raise EmbeddingError(f"HuggingFace embedding failed: {exc}", detail=str(exc)) from exc

@@ -1,4 +1,5 @@
 """Session routes — manage chat sessions (scoped to authenticated user)."""
+
 import asyncio
 from typing import Any
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.core.exceptions import SessionNotFoundError
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.services.chat_session_service import ChatSessionService, make_json_serializable
@@ -175,7 +177,7 @@ async def get_session(
 
         # Security: ensure session belongs to current user (or is legacy/unowned)
         if session.user_id and session.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+            raise HTTPException(status_code=404, detail="Session not found")
 
         return {
             "id": session.id,
@@ -241,7 +243,7 @@ async def add_session_message(
             raise HTTPException(status_code=404, detail="Session not found")
 
         if session.user_id and session.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+            raise HTTPException(status_code=404, detail="Session not found")
 
         # Map request body to a QueryResponse
         response_data = QueryResponse(
@@ -292,6 +294,12 @@ async def add_session_message(
         }
     except HTTPException:
         raise
+    except SessionNotFoundError as exc:
+        # Low: a rare race (session deleted between the ownership check above
+        # and add_message) used to fall through to the generic 500 below —
+        # the global handler maps this to 404, but only if it isn't first
+        # swallowed by the broad except right here.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.error(
             "Failed to add message to session",
@@ -320,7 +328,7 @@ async def delete_session(
     # Verify ownership before deletion
     session = await session_service.get_session(session_id)
     if session and session.user_id and session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=404, detail="Session not found")
     await session_service.delete_session(session_id)
     return {"message": "Session deleted successfully"}
 

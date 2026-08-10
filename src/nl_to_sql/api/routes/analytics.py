@@ -1,4 +1,5 @@
 """Analytics routes â€” GET /api/v1/analytics/*."""
+
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -101,7 +102,9 @@ async def get_popular_queries(
     """Get most frequently asked queries, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_popular_queries(user_id=current_user.id, limit=limit, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_popular_queries(
+        user_id=current_user.id, limit=limit, days=days
+    )  # type: ignore[no-any-return]
 
 
 @router.get("/failure-patterns", response_model=list[FailurePattern])
@@ -154,7 +157,9 @@ async def get_prompt_version_performance(
     """Get performance metrics for each prompt version, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_prompt_version_performance(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_prompt_version_performance(
+        user_id=current_user.id, days=days
+    )  # type: ignore[no-any-return]
 
 
 @router.get("/cache-stats", response_model=CacheStats)
@@ -164,6 +169,7 @@ async def get_cache_stats(
 ) -> dict[str, Any]:
     """Per-layer cache hit rates (L1 exact vs L2 semantic) since process start."""
     from nl_to_sql.infrastructure.cache.cache_metrics import get_cache_metrics
+
     if response:
         response.headers["Cache-Control"] = "private, max-age=30"
     stats: dict[str, Any] = get_cache_metrics().snapshot()
@@ -177,6 +183,7 @@ async def get_latency_breakdown(
 ) -> dict[str, Any]:
     """Rolling average per-stage pipeline latency (ms) since process start."""
     from nl_to_sql.infrastructure.cache.cache_metrics import get_stage_metrics
+
     if response:
         response.headers["Cache-Control"] = "private, max-age=30"
     breakdown: dict[str, Any] = get_stage_metrics().snapshot()
@@ -199,13 +206,15 @@ async def reset_analytics(
 @router.get("/debug")
 async def debug_analytics(
     days: int = Query(default=30, ge=1, le=365),
-    current_user: UserPublic = Depends(get_current_user),
+    _admin: UserPublic = Depends(require_admin),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
 ) -> dict[str, Any]:
-    """Debug endpoint to check analytics database status. Non-production only."""
+    """Debug endpoint to check analytics database status. Admin-only, non-production only."""
     from nl_to_sql.config.settings import get_settings as _gs
+
     if _gs().app_env == "production":
         from fastapi import HTTPException as _H
+
         raise _H(status_code=404)
     from datetime import datetime, timedelta
 
@@ -228,11 +237,17 @@ async def debug_analytics(
             history_count = (await session.execute(stmt2)).scalar() or 0
 
             # Check date range from chat_messages
-            stmt3 = select(func.min(ChatMessage.timestamp), func.max(ChatMessage.timestamp)).where(ChatMessage.sql != "")
+            stmt3 = select(func.min(ChatMessage.timestamp), func.max(ChatMessage.timestamp)).where(
+                ChatMessage.sql != ""
+            )
             min_date, max_date = (await session.execute(stmt3)).first() or (None, None)
 
             # Recent count
-            stmt4 = select(func.count()).select_from(ChatMessage).where(ChatMessage.timestamp >= cutoff, ChatMessage.sql != "")
+            stmt4 = (
+                select(func.count())
+                .select_from(ChatMessage)
+                .where(ChatMessage.timestamp >= cutoff, ChatMessage.sql != "")
+            )
             recent_count = (await session.execute(stmt4)).scalar() or 0
 
             # Sample data from chat_messages

@@ -5,6 +5,7 @@ owned by another user is reported as *not found* (404) so cross-user existence
 cannot be probed. Responses never contain a decrypted DSN — only a masked
 ``url_preview``.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -77,7 +78,9 @@ def _to_out(info: ConnectionInfo) -> ConnectionOut:
 
 
 @router.get("", response_model=list[ConnectionOut], summary="List the user's database connections")
+@limiter.limit("30/minute")
 async def list_connections(
+    request: Request,
     current_user: UserPublic = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
 ) -> list[ConnectionOut]:
@@ -97,8 +100,12 @@ async def create_connection(
     return _to_out(info)
 
 
-@router.put("/{connection_id}", response_model=ConnectionOut, summary="Rename or update a connection")
+@router.put(
+    "/{connection_id}", response_model=ConnectionOut, summary="Rename or update a connection"
+)
+@limiter.limit("10/minute")
 async def update_connection(
+    request: Request,
     connection_id: str,
     body: ConnectionUpdate,
     current_user: UserPublic = Depends(get_current_user),
@@ -116,7 +123,9 @@ async def update_connection(
 @router.delete(
     "/{connection_id}", response_model=ConnectionDeleteResponse, summary="Delete a connection"
 )
+@limiter.limit("10/minute")
 async def delete_connection(
+    request: Request,
     connection_id: str,
     current_user: UserPublic = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
@@ -157,7 +166,9 @@ async def test_connection(
     response_model=ConnectionOut,
     summary="Set a connection as the active/default connection",
 )
+@limiter.limit("10/minute")
 async def select_connection(
+    request: Request,
     connection_id: str,
     current_user: UserPublic = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),

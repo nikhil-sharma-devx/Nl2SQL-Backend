@@ -1,10 +1,16 @@
 """Feedback route — POST /api/v1/feedback."""
+
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_active_connection_id,
+    get_current_user,
+    get_session_service,
+    require_admin,
+)
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.models.auth import UserPublic
@@ -48,6 +54,7 @@ async def submit_feedback(
     request: Request,
     body: FeedbackRequest,
     current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
 ) -> FeedbackResponse:
     """Submit feedback on query results."""
     import structlog
@@ -69,6 +76,8 @@ async def submit_feedback(
             error_type=body.error_type,
             user_correction=body.user_correction,
             user_notes=body.user_notes,
+            user_id=current_user.id,
+            connection_id=connection_id,
         )
 
         logger.info(
@@ -84,7 +93,7 @@ async def submit_feedback(
                 await container.example_store().index_example(
                     question=body.question,
                     sql=body.generated_sql,
-                    user_id=current_user.id,
+                    connection_id=connection_id,
                 )
             except Exception as ex_exc:
                 logger.warning("Failed to index positive feedback example", error=str(ex_exc))
@@ -110,14 +119,14 @@ async def submit_feedback(
 @router.get(
     "/feedback",
     summary="List feedback records",
-    description="Retrieve a list of user feedback submissions.",
+    description="Retrieve a list of user feedback submissions. Admin-only: feedback records are not attributed to a user, so this is a platform-wide view.",
 )
 async def list_feedback(
     limit: int = Query(default=10, ge=1, le=100),
-    current_user: UserPublic = Depends(get_current_user),
+    _admin: UserPublic = Depends(require_admin),
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> list[dict[str, Any]]:
-    """Retrieve a list of user feedback submissions."""
+    """Retrieve a list of user feedback submissions. Admin-only (see route description)."""
     from sqlalchemy import select
 
     from nl_to_sql.infrastructure.database.models import FeedbackRecord

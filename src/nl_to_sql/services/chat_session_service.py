@@ -1,4 +1,5 @@
 """Chat session service — manages chat sessions and messages."""
+
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -10,6 +11,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
+from nl_to_sql.core.exceptions import SessionNotFoundError
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
@@ -35,7 +37,10 @@ def make_json_serializable(obj: Any) -> Any:
 
 class SessionInfo:
     """Lightweight session info for listing."""
-    def __init__(self, id: str, title: str, created_at: datetime, updated_at: datetime, message_count: int) -> None:
+
+    def __init__(
+        self, id: str, title: str, created_at: datetime, updated_at: datetime, message_count: int
+    ) -> None:
         self.id = id
         self.title = title
         self.created_at = created_at
@@ -78,7 +83,9 @@ class ChatSessionService:
         # Schema is initialized once globally via query_history.initialize() on startup
         self._logger.info("Chat session database initialized (schema checked globally)")
 
-    async def create_session(self, title: str = "New Chat", user_id: str | None = None) -> ChatSession:
+    async def create_session(
+        self, title: str = "New Chat", user_id: str | None = None
+    ) -> ChatSession:
         """Create a new chat session.
 
         Args:
@@ -103,7 +110,9 @@ class ChatSessionService:
             await session.commit()
             await session.refresh(chat_session)
 
-        self._logger.info("Chat session created", session_id=session_id, title=title, user_id=user_id)
+        self._logger.info(
+            "Chat session created", session_id=session_id, title=title, user_id=user_id
+        )
         return chat_session
 
     async def get_session(self, session_id: str) -> ChatSession | None:
@@ -123,7 +132,9 @@ class ChatSessionService:
             )
             return result.scalar_one_or_none()
 
-    async def list_sessions(self, limit: int = 50, offset: int = 0, user_id: str | None = None) -> list[SessionInfo]:
+    async def list_sessions(
+        self, limit: int = 50, offset: int = 0, user_id: str | None = None
+    ) -> list[SessionInfo]:
         """List chat sessions ordered by most recently updated.
 
         Args:
@@ -214,7 +225,9 @@ class ChatSessionService:
             result = await session.execute(query)
             return result.scalar() or 0
 
-    async def add_message(self, session_id: str, question: str, response: QueryResponse) -> ChatMessage:
+    async def add_message(
+        self, session_id: str, question: str, response: QueryResponse
+    ) -> ChatMessage:
         """Add a message to an existing chat session.
 
         Args:
@@ -238,7 +251,7 @@ class ChatSessionService:
             chat_session = session_result.scalar_one_or_none()
             if not chat_session:
                 self._logger.error("Session not found when adding message", session_id=session_id)
-                raise ValueError(f"Session {session_id} not found")
+                raise SessionNotFoundError(f"Session {session_id} not found")
 
             self._logger.info("Session found, updating and adding message", session_id=session_id)
             chat_session.updated_at = datetime.utcnow()
@@ -263,14 +276,18 @@ class ChatSessionService:
                 message=response.message,
                 # Premium response fields
                 used_tables=list(response.used_tables) if response.used_tables else [],
-                suggested_chart=make_json_serializable(response.suggested_chart) if response.suggested_chart else None,
-                follow_up_questions=list(response.follow_up_questions) if response.follow_up_questions else [],
+                suggested_chart=make_json_serializable(response.suggested_chart)
+                if response.suggested_chart
+                else None,
+                follow_up_questions=list(response.follow_up_questions)
+                if response.follow_up_questions
+                else [],
                 # Analytics fields
-                intent_type=getattr(response, 'intent_type', None),
-                query_complexity=getattr(response, 'query_complexity', None),
-                prompt_version=getattr(response, 'prompt_version', None),
-                retrieval_method=getattr(response, 'retrieval_method', None),
-                response_time_ms=getattr(response, 'response_time_ms', None),
+                intent_type=getattr(response, "intent_type", None),
+                query_complexity=getattr(response, "query_complexity", None),
+                prompt_version=getattr(response, "prompt_version", None),
+                retrieval_method=getattr(response, "retrieval_method", None),
+                response_time_ms=getattr(response, "response_time_ms", None),
             )
             session.add(message)
             await session.commit()
@@ -290,9 +307,7 @@ class ChatSessionService:
             session_id: The session UUID to delete.
         """
         async with self._session_factory() as session:
-            await session.execute(
-                delete(ChatSession).where(ChatSession.id == session_id)
-            )
+            await session.execute(delete(ChatSession).where(ChatSession.id == session_id))
             await session.commit()
 
         self._logger.info("Chat session deleted", session_id=session_id)

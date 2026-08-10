@@ -1,4 +1,5 @@
 """Qdrant vector store — native hybrid search (dense + sparse BM42)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,7 @@ from qdrant_client.models import (
 from nl_to_sql.core.exceptions import VectorStoreError
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaChunk
+from nl_to_sql.infrastructure.database.url_utils import sanitize_url_for_logging
 
 logger = structlog.get_logger(__name__)
 
@@ -52,20 +54,27 @@ def _to_uuid(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id))
 
 
-def _user_scope_should(connection_id: str | None) -> list[Any] | None:
+def _user_scope_should(connection_id: str | None) -> list[Any]:
     """OR-conditions scoping reads to a user's own chunks *plus* shared ones.
 
     When per-user isolation is active the caller passes the authenticated
     ``connection_id``; a point is then visible if it is tagged with that user
     (``connection_id == X``) **or** is un-tagged/shared (the ``connection_id`` payload is
     missing — e.g. the default database schema ingested globally at startup).
-    Returns ``None`` when no user scoping is requested (shared-only behaviour).
+
+    With no ``connection_id`` (C7: fail-closed) the returned condition list
+    has exactly one entry — "untagged/shared only" — so an unscoped caller
+    can never see another tenant's points. This must never be ``None``/empty:
+    an empty ``should`` list applied no restriction at all, which is what let
+    a resolution failure silently degrade into an unrestricted cross-tenant
+    read.
     """
+    shared_only = IsEmptyCondition(is_empty=PayloadField(key="connection_id"))
     if connection_id is None:
-        return None
+        return [shared_only]
     return [
         FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
-        IsEmptyCondition(is_empty=PayloadField(key="connection_id")),
+        shared_only,
     ]
 
 
@@ -191,7 +200,11 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         self._sparse_model: Any = None
         self._schema_hash: str | None = None
         self._initialized = False
-        logger.info("QdrantVectorStore created", url=url, collection=collection_name)
+        logger.info(
+            "QdrantVectorStore created",
+            url=sanitize_url_for_logging(url),
+            collection=collection_name,
+        )
 
     # ── Sparse model ──────────────────────────────────────────────────────────
 
@@ -434,7 +447,9 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
             await self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=Filter(
-                    must=[FieldCondition(key="connection_id", match=MatchValue(value=connection_id))]
+                    must=[
+                        FieldCondition(key="connection_id", match=MatchValue(value=connection_id))
+                    ]
                 ),
             )
             logger.info("Qdrant deleted user chunks", connection_id=connection_id)
@@ -456,9 +471,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
                 collection_name=self._collection_name,
                 points_selector=Filter(
                     must=[IsEmptyCondition(is_empty=PayloadField(key="connection_id"))],
-                    must_not=[
-                        FieldCondition(key="type", match=MatchValue(value="schema_hash"))
-                    ],
+                    must_not=[FieldCondition(key="type", match=MatchValue(value="schema_hash"))],
                 ),
             )
             logger.info("Qdrant deleted shared (un-tagged) chunks")
@@ -479,9 +492,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         if not table_names:
             return []
         match = (
-            MatchAny(any=table_names)
-            if len(table_names) > 1
-            else MatchValue(value=table_names[0])
+            MatchAny(any=table_names) if len(table_names) > 1 else MatchValue(value=table_names[0])
         )
         f = Filter(
             must=[FieldCondition(key="table_name", match=match)],

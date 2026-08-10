@@ -1,4 +1,5 @@
 """SQLAlchemy ORM models for application data storage."""
+
 from datetime import datetime
 from uuid import uuid4
 
@@ -48,13 +49,21 @@ class User(Base):
 
     # Relationships
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
-    password_history = relationship("PasswordHistory", back_populates="user", cascade="all, delete-orphan", order_by="desc(PasswordHistory.created_at)")
+    password_history = relationship(
+        "PasswordHistory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        order_by="desc(PasswordHistory.created_at)",
+    )
     api_keys = relationship("UserAPIKey", back_populates="user", cascade="all, delete-orphan")
-    database_connections = relationship("UserDatabaseConnection", back_populates="user", cascade="all, delete-orphan")
+    database_connections = relationship(
+        "UserDatabaseConnection", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class PasswordHistory(Base):
     """Tracks a user's password history to prevent recent reuse."""
+
     __tablename__ = "password_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -127,19 +136,26 @@ class ChatSession(Base):
     """
 
     __tablename__ = "chat_sessions"
-    __table_args__ = (
-        Index("ix_chat_sessions_user_updated", "user_id", "updated_at"),
-    )
+    __table_args__ = (Index("ix_chat_sessions_user_updated", "user_id", "updated_at"),)
 
     id = Column(String(36), primary_key=True)  # UUID
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)  # Nullable for legacy sessions
+    user_id = Column(
+        String(36), ForeignKey("users.id"), nullable=True, index=True
+    )  # Nullable for legacy sessions
     title = Column(String(200), nullable=False, default="New Chat")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True
+    )
 
     # Relationships
     user = relationship("User", back_populates="sessions")
-    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.timestamp")
+    messages = relationship(
+        "ChatMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.timestamp",
+    )
 
 
 class ChatMessage(Base):
@@ -149,9 +165,7 @@ class ChatMessage(Base):
     """
 
     __tablename__ = "chat_messages"
-    __table_args__ = (
-        Index("ix_chat_messages_session_ts", "session_id", "timestamp"),
-    )
+    __table_args__ = (Index("ix_chat_messages_session_ts", "session_id", "timestamp"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(36), ForeignKey("chat_sessions.id"), nullable=False, index=True)
@@ -231,14 +245,14 @@ class FeedbackRecord(Base):
     """ORM model for storing user feedback on query results."""
 
     __tablename__ = "feedback"
-    __table_args__ = (
-        Index("ix_feedback_ts_type", "timestamp", "feedback_type"),
-    )
+    __table_args__ = (Index("ix_feedback_ts_type", "timestamp", "feedback_type"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     query_id = Column(Integer, ForeignKey("query_history.id"), nullable=True, index=True)
     session_id = Column(String(36), nullable=True, index=True)
-    feedback_type = Column(String(20), nullable=False)  # correct_tables, incorrect_tables, sql_correction, general
+    feedback_type = Column(
+        String(20), nullable=False
+    )  # correct_tables, incorrect_tables, sql_correction, general
     feedback_data = Column(JSON, nullable=True)  # Flexible feedback data
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
 
@@ -264,11 +278,18 @@ class SqlVersion(Base):
 
 
 class TrainingDataRecord(Base):
-    """ORM model for storing successful queries for fine-tuning."""
+    """ORM model for storing successful queries for fine-tuning.
+
+    ``user_id``/``connection_id`` (C8) scope few-shot retrieval
+    (``get_recent_examples``) to the requesting tenant — nullable because
+    rows collected before this column existed, and rows collected outside an
+    authenticated request, have no owner and are treated as shared.
+    """
 
     __tablename__ = "training_data"
     __table_args__ = (
         Index("ix_training_data_used_created", "used_for_training", "created_at"),
+        Index("ix_training_data_connection", "connection_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -280,6 +301,8 @@ class TrainingDataRecord(Base):
     intent_type = Column(String(50), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     used_for_training = Column(Boolean, default=False, index=True)  # Track if used in fine-tuning
+    user_id = Column(String(36), nullable=True, index=True)
+    connection_id = Column(String(36), nullable=True)
 
 
 # ── Phase 1 Feature Models ─────────────────────────────────────────────────────
@@ -352,9 +375,7 @@ class QueryMetrics(Base):
     """F6 - Per-query token and cost metrics for usage reporting."""
 
     __tablename__ = "query_metrics"
-    __table_args__ = (
-        Index("ix_query_metrics_user_created", "user_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_query_metrics_user_created", "user_id", "created_at"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
@@ -370,9 +391,7 @@ class DataExportJob(Base):
     """F7 - Async data export job tracking (Download My Data)."""
 
     __tablename__ = "data_export_jobs"
-    __table_args__ = (
-        Index("ix_data_export_jobs_user_status", "user_id", "status"),
-    )
+    __table_args__ = (Index("ix_data_export_jobs_user_status", "user_id", "status"),)
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -441,15 +460,11 @@ class RefreshToken(Base):
     """
 
     __tablename__ = "refresh_tokens"
-    __table_args__ = (
-        Index("ix_refresh_tokens_user", "user_id"),
-    )
+    __table_args__ = (Index("ix_refresh_tokens_user", "user_id"),)
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
-    session_id = Column(
-        String(36), ForeignKey("user_login_sessions.id"), nullable=True, index=True
-    )
+    session_id = Column(String(36), ForeignKey("user_login_sessions.id"), nullable=True, index=True)
     token_hash = Column(String(64), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
@@ -481,9 +496,7 @@ class FavoritedTable(Base):
     """P2 - User-pinned tables that get retrieval priority during query generation."""
 
     __tablename__ = "favorited_tables"
-    __table_args__ = (
-        UniqueConstraint("user_id", "table_name", name="uq_user_favorited_table"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "table_name", name="uq_user_favorited_table"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -497,9 +510,7 @@ class GlossaryEntry(Base):
     """P2 - Business dictionary entries injected into the generation prompt."""
 
     __tablename__ = "glossary_entries"
-    __table_args__ = (
-        UniqueConstraint("user_id", "term", name="uq_user_glossary_term"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "term", name="uq_user_glossary_term"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -649,9 +660,7 @@ class UserSchemaTable(Base):
 
     __tablename__ = "user_schema_tables"
     __table_args__ = (
-        UniqueConstraint(
-            "connection_id", "schema_name", "table_name", name="uq_conn_schema_table"
-        ),
+        UniqueConstraint("connection_id", "schema_name", "table_name", name="uq_conn_schema_table"),
         Index("ix_user_schema_tables_user", "user_id"),
         Index("ix_user_schema_tables_connection", "connection_id"),
     )
@@ -684,9 +693,7 @@ class Dashboard(Base):
     """
 
     __tablename__ = "dashboards"
-    __table_args__ = (
-        Index("ix_dashboards_user_updated", "user_id", "updated_at"),
-    )
+    __table_args__ = (Index("ix_dashboards_user_updated", "user_id", "updated_at"),)
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -713,9 +720,7 @@ class DashboardWidget(Base):
     """
 
     __tablename__ = "dashboard_widgets"
-    __table_args__ = (
-        Index("ix_dashboard_widgets_dashboard", "dashboard_id"),
-    )
+    __table_args__ = (Index("ix_dashboard_widgets_dashboard", "dashboard_id"),)
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     dashboard_id = Column(String(36), ForeignKey("dashboards.id"), nullable=False, index=True)

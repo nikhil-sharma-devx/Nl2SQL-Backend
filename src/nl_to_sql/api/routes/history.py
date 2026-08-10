@@ -1,4 +1,5 @@
 """History routes — GET /api/v1/history, DELETE /api/v1/history."""
+
 import asyncio
 import csv
 import io
@@ -11,7 +12,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from starlette.responses import StreamingResponse
 
-from nl_to_sql.api.dependencies import get_current_user, get_query_history, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_query_history,
+    get_session_service,
+    require_admin,
+)
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
@@ -78,15 +84,15 @@ async def get_history(
                     is_valid=msg.is_valid,
                     validation_errors=msg.validation_errors or [],
                     retrieved_tables=msg.retrieved_tables or [],
-                    used_tables=getattr(msg, 'used_tables', None) or [],
+                    used_tables=getattr(msg, "used_tables", None) or [],
                     execution_result=msg.execution_result,
                     execution_error=msg.execution_error,
                     tokens_used=msg.tokens_used or 0,
                     cached=msg.cached or False,
                     message=msg.message,
                     intent_type=msg.intent_type,
-                    suggested_chart=getattr(msg, 'suggested_chart', None),
-                    follow_up_questions=getattr(msg, 'follow_up_questions', None) or [],
+                    suggested_chart=getattr(msg, "suggested_chart", None),
+                    follow_up_questions=getattr(msg, "follow_up_questions", None) or [],
                 ),
             )
             for msg in messages
@@ -111,13 +117,17 @@ async def _gather_history(
     "/history",
     response_model=ClearHistoryResponse,
     summary="Clear query history (deprecated table)",
-    description="Removes all entries from the legacy query_history table. Chat sessions and messages are preserved.",
+    description=(
+        "Removes all entries from the legacy query_history table. Chat sessions and "
+        "messages are preserved. Admin-only: the legacy table has no per-user column, "
+        "so clearing it affects every user. Regular users should use POST /history/clear."
+    ),
 )
 async def clear_history(
-    current_user: UserPublic = Depends(get_current_user),
+    _admin: UserPublic = Depends(require_admin),
     history_service: QueryHistoryService = Depends(get_query_history),
 ) -> ClearHistoryResponse:
-    """Clear legacy query_history records. Use DELETE /sessions to clear chat data."""
+    """Clear legacy query_history records (admin-only). Use DELETE /sessions to clear chat data."""
     previous_count = await history_service.count()
     await history_service.clear()
 
@@ -171,14 +181,16 @@ async def export_history(
         writer = csv.writer(buffer)
         writer.writerow(["timestamp", "question", "sql", "dialect", "is_valid", "tokens_used"])
         for msg in rows:
-            writer.writerow([
-                msg.timestamp.isoformat(),
-                msg.question,
-                msg.sql or "",
-                msg.dialect,
-                msg.is_valid,
-                msg.tokens_used or 0,
-            ])
+            writer.writerow(
+                [
+                    msg.timestamp.isoformat(),
+                    msg.question,
+                    msg.sql or "",
+                    msg.dialect,
+                    msg.is_valid,
+                    msg.tokens_used or 0,
+                ]
+            )
         content = buffer.getvalue()
         media_type = "text/csv"
         filename = "history.csv"

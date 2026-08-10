@@ -1,5 +1,11 @@
 """Pydantic models for configuration API request/response contracts."""
+
 from pydantic import BaseModel, Field
+
+# Canonical provider list — reused by api/routes/config.py's validation check
+# and by config/factories/llm_factory.py's fallback guard, so they can't
+# silently drift apart.
+AVAILABLE_LLM_PROVIDERS: tuple[str, ...] = ("groq", "openai", "anthropic", "gemini")
 
 
 class LLMConfigResponse(BaseModel):
@@ -14,7 +20,15 @@ class LLMConfigResponse(BaseModel):
 
 
 class LLMConfigUpdate(BaseModel):
-    """Request body for updating LLM configuration."""
+    """Request body for updating LLM configuration.
+
+    ``provider`` stays a plain ``str`` (not a stricter type) so the route's
+    existing case-insensitive validation keeps returning its documented 400
+    with the available-providers list, rather than a generic 422. The actual
+    safety net against an unrecognized provider slipping through to a
+    running LLM client lives in ``llm_factory.create_llm_provider``, which
+    now raises instead of silently defaulting to Groq.
+    """
 
     provider: str = Field(
         ...,
@@ -23,6 +37,8 @@ class LLMConfigUpdate(BaseModel):
     )
     model: str = Field(
         ...,
+        min_length=1,
+        max_length=200,
         description="Model name to use with the provider.",
         examples=["llama3-70b-8192"],
     )
@@ -41,7 +57,9 @@ class AvailableModelsResponse(BaseModel):
 
     groq: list[str] = Field(default_factory=list, description="Available Groq models.")
     openai: list[str] = Field(default_factory=list, description="Available OpenAI models.")
-    anthropic: list[str] = Field(default_factory=list, description="Available Anthropic Claude models.")
+    anthropic: list[str] = Field(
+        default_factory=list, description="Available Anthropic Claude models."
+    )
     gemini: list[str] = Field(default_factory=list, description="Available Google Gemini models.")
 
 
@@ -49,7 +67,9 @@ class DatabaseConfigResponse(BaseModel):
     """Current database configuration response."""
 
     database_url: str = Field(..., description="Active database connection string.")
-    available_databases: dict[str, str] = Field(default_factory=dict, description="Pre-defined databases from config")
+    available_databases: dict[str, str] = Field(
+        default_factory=dict, description="Pre-defined databases from config"
+    )
 
 
 class DatabaseConfigUpdate(BaseModel):
@@ -73,7 +93,8 @@ class RagConfigResponse(BaseModel):
     """Current Phase-3 RAG quality configuration (runtime-adjustable)."""
 
     schema_descriptions_enabled: bool = Field(
-        ..., description="P1 — embed LLM-generated NL table descriptions at ingest (needs re-ingest)."
+        ...,
+        description="P1 — embed LLM-generated NL table descriptions at ingest (needs re-ingest).",
     )
     multi_query_enabled: bool = Field(..., description="P3 — multi-query retrieval.")
     multi_query_max: int = Field(..., description="Max extra query variants for multi-query.")

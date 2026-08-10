@@ -20,7 +20,9 @@ class LLMProviderError(NLToSQLBaseError):
 class RateLimitError(NLToSQLBaseError):
     """Raised when the LLM provider rate limit is exceeded."""
 
-    def __init__(self, message: str, detail: str | None = None, retry_after: int | None = None) -> None:
+    def __init__(
+        self, message: str, detail: str | None = None, retry_after: int | None = None
+    ) -> None:
         super().__init__(message, detail)
         self.retry_after = retry_after  # seconds to wait before retrying
 
@@ -78,6 +80,20 @@ class VectorStoreError(NLToSQLBaseError):
 
 class CacheError(NLToSQLBaseError):
     """Raised when a cache read/write operation fails."""
+
+
+# ── Authentication Errors ──────────────────────────────────────────────────────
+
+
+class AuthenticationError(NLToSQLBaseError):
+    """Raised when a credential (e.g. an external OAuth token) fails verification."""
+
+
+# ── Chat Session Errors ─────────────────────────────────────────────────────────
+
+
+class SessionNotFoundError(NLToSQLBaseError):
+    """Raised when a chat session does not exist (e.g. deleted mid-request)."""
 
 
 # ── Configuration Errors ──────────────────────────────────────────────────────

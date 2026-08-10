@@ -1,4 +1,6 @@
 """Async SQLAlchemy client — manages the target database connection."""
+
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -7,10 +9,28 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nl_to_sql.core.exceptions import DatabaseExecutionError
-from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
+from nl_to_sql.infrastructure.database.url_utils import (
+    sanitize_url_for_logging,
+    to_async_database_url,
+)
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 
 logger = structlog.get_logger(__name__)
+
+# Medium: the db.statement tracing span recorded the full raw SQL text,
+# including any literal values the LLM copied straight from the user's
+# question (names, emails, etc.), with no redaction before export to the
+# tracing backend. Replace string/numeric literals with placeholders —
+# structure (which tables/columns/clauses were used) stays visible for
+# debugging, values don't.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_NUMERIC_LITERAL_RE = re.compile(r"(?<!\w)-?\d+(?:\.\d+)?(?!\w)")
+
+
+def _redact_sql_for_tracing(sql: str) -> str:
+    """Replace string/numeric literals in ``sql`` with placeholders for tracing spans."""
+    redacted = _STRING_LITERAL_RE.sub("'?'", sql)
+    return _NUMERIC_LITERAL_RE.sub("?", redacted)
 
 
 class AsyncDatabaseClient:
@@ -44,6 +64,7 @@ class AsyncDatabaseClient:
 
         # Sanitize asyncpg unsupported parameters
         import re
+
         if "asyncpg" in database_url:
             # asyncpg doesn't support channel_binding, which some providers like Supabase append
             database_url = re.sub(r"([?&])channel_binding=[^&]*", r"\1", database_url)
@@ -87,9 +108,7 @@ class AsyncDatabaseClient:
 
         if self._engine.dialect.name != "postgresql":
             return
-        await sess.execute(
-            text(f"SET LOCAL statement_timeout = {self._statement_timeout_ms}")
-        )
+        await sess.execute(text(f"SET LOCAL statement_timeout = {self._statement_timeout_ms}"))
         if self._readonly:
             await sess.execute(text("SET TRANSACTION READ ONLY"))
 
@@ -104,6 +123,10 @@ class AsyncDatabaseClient:
                 await sess.rollback()
                 raise
 
+    # Batch size for the server-side cursor in execute_sql — small enough to
+    # bound memory, large enough to keep round trips reasonable.
+    _EXECUTE_BATCH_SIZE = 1_000
+
     @trace_function("database.execute_sql")
     async def execute_sql(self, sql: str) -> list[dict[str, Any]]:
         """Execute a raw SQL string and return rows as a list of dicts.
@@ -112,31 +135,39 @@ class AsyncDatabaseClient:
             sql: The SQL string to run against the target database.
 
         Returns:
-            A list of row dictionaries.
+            A list of row dictionaries, capped at ``MAX_ROWS``.
 
         Raises:
             DatabaseExecutionError: On any DB error.
         """
         from sqlalchemy import text
 
-        set_span_attribute("db.statement", sql)
+        set_span_attribute("db.statement", _redact_sql_for_tracing(sql))
 
         try:
             async with self.session() as sess:
                 await self._apply_session_guards(sess)
-                result = await sess.execute(text(sql))
-                columns = list(result.keys())
-                all_rows = result.fetchall()
-                truncated = len(all_rows) > self.MAX_ROWS
-                rows = [dict(zip(columns, row, strict=True)) for row in all_rows[: self.MAX_ROWS]]
+                # H6: stream via a server-side cursor instead of
+                # result.fetchall(), which pulled an unbounded LLM-generated
+                # result set (no LIMIT) fully into memory before truncating.
+                stream_result = await sess.stream(text(sql))
+                columns = list(stream_result.keys())
+                rows: list[dict[str, Any]] = []
+                truncated = False
+                async for partition in stream_result.partitions(self._EXECUTE_BATCH_SIZE):
+                    for row in partition:
+                        if len(rows) >= self.MAX_ROWS:
+                            truncated = True
+                            break
+                        rows.append(dict(zip(columns, row, strict=True)))
+                    if truncated:
+                        break
                 set_span_attribute("db.rows_returned", len(rows))
                 set_span_attribute("db.truncated", truncated)
                 return rows
         except Exception as exc:
             logger.error("SQL execution failed", error=str(exc))
-            raise DatabaseExecutionError(
-                f"Failed to execute SQL: {exc}", detail=str(exc)
-            ) from exc
+            raise DatabaseExecutionError(f"Failed to execute SQL: {exc}", detail=str(exc)) from exc
 
     @trace_function("database.explain")
     async def explain(self, sql: str, *, analyze: bool = False) -> dict[str, Any]:
@@ -189,7 +220,7 @@ class AsyncDatabaseClient:
 
         options = "ANALYZE, FORMAT JSON" if analyze else "FORMAT JSON"
         explain_sql = f"EXPLAIN ({options}) {sql}"
-        set_span_attribute("db.statement", explain_sql)
+        set_span_attribute("db.statement", _redact_sql_for_tracing(explain_sql))
 
         try:
             async with self.session() as sess:
@@ -242,7 +273,9 @@ class AsyncDatabaseClient:
         )
         return parsed
 
-    async def execute_sql_stream(self, sql: str, batch_size: int = 100) -> AsyncGenerator[list[dict[str, Any]], None]:
+    async def execute_sql_stream(
+        self, sql: str, batch_size: int = 100
+    ) -> AsyncGenerator[list[dict[str, Any]], None]:
         """Execute SQL and yield result rows in batches for large result sets.
 
         Streams rows in batches instead of buffering everything in memory,
@@ -257,7 +290,7 @@ class AsyncDatabaseClient:
         """
         from sqlalchemy import text
 
-        set_span_attribute("db.statement", sql)
+        set_span_attribute("db.statement", _redact_sql_for_tracing(sql))
 
         try:
             async with self._session_factory() as sess:
@@ -268,9 +301,7 @@ class AsyncDatabaseClient:
                     yield [dict(zip(columns, row, strict=True)) for row in partition]
         except Exception as exc:
             logger.error("SQL stream execution failed", error=str(exc))
-            raise DatabaseExecutionError(
-                f"Failed to stream SQL: {exc}", detail=str(exc)
-            ) from exc
+            raise DatabaseExecutionError(f"Failed to stream SQL: {exc}", detail=str(exc)) from exc
 
     async def health_check(self) -> bool:
         """Run a trivial query to verify the connection."""
@@ -371,15 +402,15 @@ class AsyncDatabaseClient:
         tables_dict: dict[str, dict[str, Any]] = {}
 
         for row in rows:
-            table_name    = row[0]
-            column_name   = row[1]
-            data_type     = row[2]
-            is_nullable   = row[3]
-            is_pk         = row[6]
-            fk_ref_table  = row[7]
+            table_name = row[0]
+            column_name = row[1]
+            data_type = row[2]
+            is_nullable = row[3]
+            is_pk = row[6]
+            fk_ref_table = row[7]
             fk_ref_column = row[8]
             table_comment = row[9]
-            col_comment   = row[10]
+            col_comment = row[10]
 
             if table_name not in tables_dict:
                 tables_dict[table_name] = {
@@ -455,6 +486,7 @@ class AsyncDatabaseClient:
 
         # Sanitize asyncpg parameters
         import re
+
         if "asyncpg" in new_url:
             new_url = re.sub(r"([?&])channel_binding=[^&]*", r"\1", new_url)
             new_url = new_url.rstrip("?&")
@@ -494,10 +526,4 @@ class AsyncDatabaseClient:
     @staticmethod
     def _sanitise_url(url: str) -> str:
         """Remove credentials from the URL for safe logging."""
-        try:
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(url)
-            sanitised = parsed._replace(netloc=parsed.hostname or "")
-            return urlunparse(sanitised)
-        except Exception:
-            return "<url>"
+        return sanitize_url_for_logging(url)

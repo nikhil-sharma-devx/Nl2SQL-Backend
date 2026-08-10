@@ -1,4 +1,6 @@
 """ChromaDB vector store — implements IVectorStore."""
+
+import asyncio
 from typing import Any
 
 import chromadb
@@ -70,7 +72,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
             self._collection.upsert(
                 ids=["_schema_hash"],
                 documents=["Schema metadata hash"],
-                metadatas=[{"hash": schema_hash, "type": "schema_hash"}]
+                metadatas=[{"hash": schema_hash, "type": "schema_hash"}],
             )
             logger.info("Stored schema hash in collection")
         except Exception as exc:
@@ -88,15 +90,18 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         documents = [c.content for c in chunks]
         embeddings = [c.embedding for c in chunks if c.embedding is not None]
         metadatas = [
-            {"table_name": c.table_name, "schema_name": c.schema_name, **c.metadata}
-            for c in chunks
+            {"table_name": c.table_name, "schema_name": c.schema_name, **c.metadata} for c in chunks
         ]
         try:
             # Retry up to 3 times in case of transient collection issues
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    self._collection.upsert(
+                    # H8: chromadb's client is synchronous — every call here
+                    # is offloaded via asyncio.to_thread so it doesn't block
+                    # the event loop for every other concurrent request.
+                    await asyncio.to_thread(
+                        self._collection.upsert,
                         ids=ids,
                         documents=documents,
                         embeddings=embeddings,
@@ -110,7 +115,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                         logger.warning(
                             "Collection not found during upsert, recreating...",
                             attempt=attempt + 1,
-                            collection=self._collection_name
+                            collection=self._collection_name,
                         )
                         await self.delete_collection()
                         continue  # Retry
@@ -128,9 +133,11 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
     ) -> list[SchemaChunk]:
         """Return top-k most similar schema chunks."""
         try:
-            results = self._collection.query(
+            count = await asyncio.to_thread(self._collection.count)
+            results = await asyncio.to_thread(
+                self._collection.query,
                 query_embeddings=[query_embedding],  # type: ignore[arg-type]
-                n_results=min(top_k, self._collection.count()),
+                n_results=min(top_k, count),
                 include=["documents", "metadatas", "distances"],
             )
         except Exception as exc:
@@ -138,14 +145,17 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                 # Collection might not exist, try to recreate it
                 logger.warning(
                     "Collection not found during query, attempting to recreate",
-                    collection=self._collection_name
+                    collection=self._collection_name,
                 )
                 try:
-                    self._collection = self._client.get_or_create_collection(
+                    self._collection = await asyncio.to_thread(
+                        self._client.get_or_create_collection,
                         name=self._collection_name,
                         metadata={"hnsw:space": "cosine"},
                     )
-                    logger.info("Collection recreated during query", collection=self._collection_name)
+                    logger.info(
+                        "Collection recreated during query", collection=self._collection_name
+                    )
                     # Return empty results since collection is empty
                     return []
                 except Exception as recreate_exc:
@@ -166,8 +176,9 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                     table_name=meta.get("table_name", ""),
                     schema_name=meta.get("schema_name", "public"),
                     content=doc,
-                    metadata={k: v for k, v in meta.items()
-                               if k not in ("table_name", "schema_name")},
+                    metadata={
+                        k: v for k, v in meta.items() if k not in ("table_name", "schema_name")
+                    },
                 )
             )
         return chunks
@@ -176,28 +187,25 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
         """Clear all data from the collection without deleting it (preserves UUID)."""
         try:
             # Get all IDs in the collection
-            all_data = self._collection.get()
+            all_data = await asyncio.to_thread(self._collection.get)
 
             if all_data and all_data.get("ids"):
                 # Delete all entries by their IDs
-                self._collection.delete(ids=all_data["ids"])
+                await asyncio.to_thread(self._collection.delete, ids=all_data["ids"])
                 logger.info(
                     "Cleared all entries from collection",
                     collection=self._collection_name,
-                    deleted_count=len(all_data["ids"])
+                    deleted_count=len(all_data["ids"]),
                 )
             else:
-                logger.info(
-                    "Collection is already empty",
-                    collection=self._collection_name
-                )
+                logger.info("Collection is already empty", collection=self._collection_name)
 
             # Verify collection is empty
-            count = self._collection.count()
+            count = await asyncio.to_thread(self._collection.count)
             logger.info(
                 "Collection cleared successfully",
                 collection=self._collection_name,
-                remaining_count=count
+                remaining_count=count,
             )
         except Exception as exc:
             raise VectorStoreError(f"Failed to clear collection: {exc}") from exc
@@ -205,25 +213,23 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
     async def count(self, connection_id: str | None = None) -> int:
         """Return the number of stored chunks."""
         try:
-            return self._collection.count()
+            return await asyncio.to_thread(self._collection.count)
         except Exception as exc:
             # Collection might not exist or be corrupted
             logger.warning(
                 "Collection count failed, attempting to recreate collection",
                 collection=self._collection_name,
-                error=str(exc)
+                error=str(exc),
             )
             # Try to recreate the collection
             try:
-                self._collection = self._client.get_or_create_collection(
+                self._collection = await asyncio.to_thread(
+                    self._client.get_or_create_collection,
                     name=self._collection_name,
                     metadata={"hnsw:space": "cosine"},
                 )
-                logger.info(
-                    "Collection recreated successfully",
-                    collection=self._collection_name
-                )
-                return self._collection.count()
+                logger.info("Collection recreated successfully", collection=self._collection_name)
+                return await asyncio.to_thread(self._collection.count)
             except Exception as recreate_exc:
                 raise VectorStoreError(
                     f"ChromaDB collection '{self._collection_name}' does not exist and cannot be created. "
@@ -234,7 +240,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
     async def health_check(self) -> bool:
         """Verify ChromaDB is functional."""
         try:
-            self._collection.count()
+            await asyncio.to_thread(self._collection.count)
             return True
         except Exception:
             return False
@@ -290,14 +296,13 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                 if len(table_names) > 1
                 else {"table_name": table_names[0]}
             )
-            result = self._collection.get(
+            result = await asyncio.to_thread(
+                self._collection.get,
                 where=where_filter,
                 include=["documents", "metadatas"],
             )
         except Exception as exc:
-            raise VectorStoreError(
-                f"ChromaDB get_chunks_by_table_names failed: {exc}"
-            ) from exc
+            raise VectorStoreError(f"ChromaDB get_chunks_by_table_names failed: {exc}") from exc
 
         chunks: list[SchemaChunk] = []
         documents = result.get("documents") or []
@@ -315,9 +320,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                     schema_name=meta.get("schema_name", "public"),
                     content=doc,
                     metadata={
-                        k: v
-                        for k, v in meta.items()
-                        if k not in ("table_name", "schema_name")
+                        k: v for k, v in meta.items() if k not in ("table_name", "schema_name")
                     },
                 )
             )
@@ -333,11 +336,9 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
             Sorted list of unique table name strings.
         """
         try:
-            result = self._collection.get(include=["metadatas"])
+            result = await asyncio.to_thread(self._collection.get, include=["metadatas"])
         except Exception as exc:
-            raise VectorStoreError(
-                f"ChromaDB get_all_table_names failed: {exc}"
-            ) from exc
+            raise VectorStoreError(f"ChromaDB get_all_table_names failed: {exc}") from exc
 
         table_names: set[str] = set()
         for meta in result.get("metadatas") or []:

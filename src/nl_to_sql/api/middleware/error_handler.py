@@ -13,6 +13,7 @@ returned in one canonical envelope so the frontend can map errors uniformly
       "retry_after": <optional seconds, rate-limit only>
     }
 """
+
 from typing import Any, cast
 
 from fastapi import Request
@@ -21,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nl_to_sql.core.exceptions import (
+    AuthenticationError,
     ConnectionNotFoundError,
     ConnectionTestError,
     ConnectionValidationError,
@@ -35,6 +37,7 @@ from nl_to_sql.core.exceptions import (
     ScheduleNotFoundError,
     ScheduleValidationError,
     SchemaRetrievalError,
+    SessionNotFoundError,
     SQLGenerationError,
     SQLValidationError,
     TableNotFoundError,
@@ -43,6 +46,7 @@ from nl_to_sql.core.exceptions import (
 # NOTE: ordering matters — the handler iterates and stops at the first match, so
 # specific subclasses must precede NLToSQLBaseError (the catch-all base).
 _ERROR_STATUS_MAP: dict[type, int] = {
+    AuthenticationError: 401,
     ConnectionNotFoundError: 404,
     ConnectionValidationError: 400,
     ConnectionTestError: 400,
@@ -59,10 +63,19 @@ _ERROR_STATUS_MAP: dict[type, int] = {
     ScheduleExecutionError: 424,
     MetricNotFoundError: 404,
     MetricValidationError: 400,
+    SessionNotFoundError: 404,
     NLToSQLBaseError: 500,
 }
 
+# Medium: these two exception types' `.detail` is raw driver/SDK exception
+# text (e.g. asyncpg/OpenAI SDK internals) — the same string is already
+# folded into `message` for legitimate cases (a user's own SQL syntax
+# error), so echoing it again via `details.detail` only doubles the
+# unsanitized-internals surface with no benefit to the client.
+_DETAIL_SUPPRESSED_TYPES: tuple[type, ...] = (DatabaseExecutionError, LLMProviderError)
+
 _ERROR_CODE_MAP: dict[type, str] = {
+    AuthenticationError: "AUTHENTICATION_FAILED",
     ConnectionNotFoundError: "CONNECTION_NOT_FOUND",
     ConnectionValidationError: "CONNECTION_INVALID",
     ConnectionTestError: "CONNECTION_TEST_FAILED",
@@ -79,6 +92,7 @@ _ERROR_CODE_MAP: dict[type, str] = {
     ScheduleExecutionError: "SCHEDULE_EXECUTION_FAILED",
     MetricNotFoundError: "METRIC_NOT_FOUND",
     MetricValidationError: "METRIC_INVALID",
+    SessionNotFoundError: "SESSION_NOT_FOUND",
     NLToSQLBaseError: "INTERNAL_ERROR",
 }
 
@@ -108,7 +122,11 @@ async def domain_exception_handler(request: Request, exc: Exception) -> JSONResp
 
     payload = _envelope(request, error_code, str(exc))
 
-    if isinstance(exc, NLToSQLBaseError) and exc.detail:
+    if (
+        isinstance(exc, NLToSQLBaseError)
+        and exc.detail
+        and not isinstance(exc, _DETAIL_SUPPRESSED_TYPES)
+    ):
         payload["details"] = {"detail": exc.detail}
 
     if isinstance(exc, RateLimitError) and exc.retry_after is not None:
@@ -150,9 +168,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-async def http_exception_handler(
-    request: Request, exc: Exception
-) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Route FastAPI/Starlette HTTPExceptions through the canonical envelope.
 
     Without this, `raise HTTPException(404, "...")` returns Starlette's default
@@ -171,9 +187,7 @@ async def http_exception_handler(
     return JSONResponse(status_code=exc.status_code, content=payload, headers=headers)
 
 
-async def validation_exception_handler(
-    request: Request, exc: Exception
-) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Route 422 request-validation errors through the canonical envelope."""
     # exc.errors() items contain non-JSON-serializable objects (e.g. ValueError
     # in "ctx"); jsonable_encoder normalizes them.
