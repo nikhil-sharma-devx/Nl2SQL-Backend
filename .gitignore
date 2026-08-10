@@ -46,3 +46,10 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal-only docs — kept locally, never pushed
+/ARCHITECTURE.md
+/BACKEND_GUIDE.md
+/CHANGELOG.md
+/ENGINEERING_REVIEW.md
+/FINAL_REMEDIATION_REPORT.md
