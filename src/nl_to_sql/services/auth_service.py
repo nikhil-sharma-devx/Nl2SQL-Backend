@@ -13,9 +13,27 @@ from jose import JWTError, jwt
 
 from nl_to_sql.config.settings import get_settings
 from nl_to_sql.core.exceptions import AuthenticationError
-from nl_to_sql.core.models.auth import TokenData
+from nl_to_sql.core.models.auth import TokenData, UserPublic
 
 logger = structlog.get_logger(__name__)
+
+
+def is_admin_email(email: str) -> bool:
+    """Whether ``email`` is in the ADMIN_EMAILS allowlist (case-insensitive)."""
+    return email.lower() in get_settings().admin_email_list
+
+
+def to_user_public(user: Any) -> UserPublic:
+    """Build a ``UserPublic`` from an ORM ``User`` row, stamping ``is_admin``.
+
+    The single place every route constructs a ``UserPublic`` so admin status
+    is derived consistently everywhere instead of only inside ``require_admin``
+    — the frontend needs it too, to hide admin-only controls up front rather
+    than rendering them for every user and failing on submit.
+    """
+    public = UserPublic.model_validate(user)
+    public.is_admin = is_admin_email(public.email)
+    return public
 
 
 # ── Password Utilities ────────────────────────────────────────────────────────

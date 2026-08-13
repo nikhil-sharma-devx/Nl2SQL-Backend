@@ -23,6 +23,8 @@ from nl_to_sql.core.models.config import (
     LLMConfigUpdateResponse,
     RagConfigResponse,
     RagConfigUpdate,
+    RateLimitConfigResponse,
+    RateLimitConfigUpdate,
 )
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 
@@ -373,3 +375,47 @@ async def update_rag_config(
 
     logger.info("RAG config updated", fields=list(updates.keys()))
     return _rag_response(live)
+
+
+# ── Rate limiter (runtime toggle) ────────────────────────────────────────────
+
+
+@router.get(
+    "/rate-limit",
+    response_model=RateLimitConfigResponse,
+    summary="Get rate limiter state",
+    description="Returns whether SlowAPI rate limiting is currently active.",
+)
+async def get_rate_limit_config(
+    _user: UserPublic = Depends(get_current_user),
+) -> RateLimitConfigResponse:
+    """Return the rate limiter's current enabled state."""
+    return RateLimitConfigResponse(enabled=limiter.enabled)
+
+
+@router.put(
+    "/rate-limit",
+    response_model=RateLimitConfigResponse,
+    summary="Toggle rate limiting at runtime",
+    description=(
+        "Enable or disable SlowAPI rate limiting without a restart (e.g. for "
+        "load testing or an operational emergency)."
+    ),
+)
+@limiter.limit(_rate)
+async def update_rate_limit_config(
+    request: Request,  # required by SlowAPI for IP extraction
+    body: RateLimitConfigUpdate,
+    _user: UserPublic = Depends(require_admin),
+) -> RateLimitConfigResponse:
+    """Flip the live Limiter's ``enabled`` flag.
+
+    SlowAPI reads ``Limiter.enabled`` fresh on every request (it's a plain
+    instance attribute, not captured at startup), so mutating it here takes
+    effect immediately — no process restart needed, unlike leaving the flag
+    to only ever be read once at import time from ``Settings``.
+    """
+    limiter.enabled = body.enabled
+    get_settings().rate_limit_enabled = body.enabled
+    logger.info("Rate limiter toggled at runtime", enabled=body.enabled)
+    return RateLimitConfigResponse(enabled=limiter.enabled)

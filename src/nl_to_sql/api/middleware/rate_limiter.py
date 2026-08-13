@@ -26,9 +26,9 @@ def _get_user_or_ip_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-# Medium: rate_limit_enabled existed on Settings but was never read anywhere,
-# so there was no way to actually disable rate limiting (e.g. for load
-# testing or an operational emergency) short of removing every @limiter.limit
-# decorator. SlowAPI's own `enabled` flag makes every decorated route a no-op
-# when False, without touching route code.
+# SlowAPI reads `Limiter.enabled` fresh on every request (a plain instance
+# attribute), so it can be flipped after startup too — see
+# PUT /api/v1/config/rate-limit in api/routes/config.py, which mutates
+# `limiter.enabled` directly instead of leaving this initial value as the
+# only place it's ever set.
 limiter = Limiter(key_func=_get_user_or_ip_key, enabled=get_settings().rate_limit_enabled)

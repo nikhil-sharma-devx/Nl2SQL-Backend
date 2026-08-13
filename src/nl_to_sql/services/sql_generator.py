@@ -280,6 +280,7 @@ class SQLGeneratorService:
         conversation_history: list[dict[str, Any]] | None = None,
         few_shot_examples: list[dict[str, Any]] | None = None,
         certified_metrics: str | None = None,
+        connection_id: str | None = None,
     ) -> GeneratedSQL:
         """Generate SQL for the given question.
 
@@ -289,6 +290,8 @@ class SQLGeneratorService:
             dialect_override: Optional per-request SQL dialect.
             error_feedback: On retry attempts, include previous validation
                             errors so the LLM can self-correct.
+            connection_id: Scopes learned feedback patterns to this connection's
+                own patterns plus shared ones — never another tenant's.
 
         Returns:
             GeneratedSQL with the raw and cleaned SQL, plus token counts.
@@ -309,7 +312,9 @@ class SQLGeneratorService:
             import re
 
             tables = re.findall(r"Table[:\s]+(\w+)", schema_context, re.IGNORECASE)
-            learning_patterns = self._feedback_learner.get_learning_prompt(tables)
+            learning_patterns = self._feedback_learner.get_learning_prompt(
+                tables, connection_id=connection_id
+            )
 
         # Apply token budget to custom instructions before injection
         effective_instructions: str | None = None

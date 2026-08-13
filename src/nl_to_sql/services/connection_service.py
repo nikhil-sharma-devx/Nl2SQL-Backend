@@ -3,8 +3,8 @@
 Owns everything about a user's database connections:
 
   - CRUD (create / rename+edit / delete / list),
-  - encryption of the DSN at rest (reuses the ``api_key_service`` Fernet
-    derivation — no second crypto mechanism),
+  - encryption of the DSN at rest (reuses ``infrastructure.crypto``'s
+    versioned-Fernet helper — no second crypto mechanism),
   - ownership validation (cross-user access is reported as *not found*),
   - connectivity testing,
   - default/active selection and resolution,
@@ -45,15 +45,11 @@ from nl_to_sql.core.exceptions import (
     ConnectionTestError,
     ConnectionValidationError,
 )
+from nl_to_sql.infrastructure.crypto import CURRENT_KDF_VERSION, VersionedFernet
 from nl_to_sql.infrastructure.database.models import Base, UserDatabaseConnection
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
-from nl_to_sql.services.api_key_service import (
-    CURRENT_KDF_VERSION,
-    _make_fernet_v1,
-    _make_fernet_v2,
-    _to_async_url,
-)
+from nl_to_sql.services.api_key_service import _to_async_url
 
 logger = structlog.get_logger(__name__)
 
@@ -185,8 +181,7 @@ class ConnectionService:
 
     def __init__(self, database_url: str, secret_key: str) -> None:
         self._database_url = _to_async_url(database_url)
-        self._fernet_v1 = _make_fernet_v1(secret_key)
-        self._fernet_v2 = _make_fernet_v2(secret_key)
+        self._crypto = VersionedFernet(secret_key)
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._client_cache = _LRUClientCache(maxsize=_CACHE_MAX_SIZE)
@@ -215,21 +210,10 @@ class ConnectionService:
     # ── Encryption ──────────────────────────────────────────────────────────────
 
     async def _encrypt(self, value: str) -> str:
-        """Encrypt with the current (v2/HKDF) key — every new/updated row upgrades."""
-        import asyncio
-
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._fernet_v2.encrypt(value.encode()).decode()
-        )
+        return await self._crypto.encrypt(value)
 
     async def _decrypt(self, value: str, kdf_version: int = 1) -> str:
-        """Decrypt with the Fernet matching ``kdf_version`` (legacy rows default to v1)."""
-        import asyncio
-
-        fernet = self._fernet_v2 if kdf_version >= CURRENT_KDF_VERSION else self._fernet_v1
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: fernet.decrypt(value.encode()).decode())
+        return await self._crypto.decrypt(value, kdf_version)
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
 

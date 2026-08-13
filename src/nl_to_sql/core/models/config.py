@@ -111,6 +111,20 @@ class RagConfigResponse(BaseModel):
     adaptive_top_k_max: int = Field(..., description="Upper bound for adaptive top_k.")
 
 
+class RateLimitConfigResponse(BaseModel):
+    """Current rate-limiter state (runtime-adjustable)."""
+
+    enabled: bool = Field(..., description="Whether SlowAPI rate limiting is active.")
+
+
+class RateLimitConfigUpdate(BaseModel):
+    """Request body for toggling the rate limiter at runtime."""
+
+    enabled: bool = Field(
+        ..., description="Set false to disable rate limiting (e.g. load testing, an incident)."
+    )
+
+
 class RagConfigUpdate(BaseModel):
     """Partial update of the RAG configuration. Only supplied fields change."""
 

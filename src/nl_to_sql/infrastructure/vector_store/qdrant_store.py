@@ -32,6 +32,7 @@ from nl_to_sql.core.exceptions import VectorStoreError
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaChunk
 from nl_to_sql.infrastructure.database.url_utils import sanitize_url_for_logging
+from nl_to_sql.infrastructure.vector_store.tenant_scope import own_or_shared_should
 
 logger = structlog.get_logger(__name__)
 
@@ -52,30 +53,6 @@ def _exc_detail(exc: Exception) -> str:
 def _to_uuid(chunk_id: str) -> str:
     """Deterministic UUID from an arbitrary chunk_id string."""
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id))
-
-
-def _user_scope_should(connection_id: str | None) -> list[Any]:
-    """OR-conditions scoping reads to a user's own chunks *plus* shared ones.
-
-    When per-user isolation is active the caller passes the authenticated
-    ``connection_id``; a point is then visible if it is tagged with that user
-    (``connection_id == X``) **or** is un-tagged/shared (the ``connection_id`` payload is
-    missing — e.g. the default database schema ingested globally at startup).
-
-    With no ``connection_id`` (C7: fail-closed) the returned condition list
-    has exactly one entry — "untagged/shared only" — so an unscoped caller
-    can never see another tenant's points. This must never be ``None``/empty:
-    an empty ``should`` list applied no restriction at all, which is what let
-    a resolution failure silently degrade into an unrestricted cross-tenant
-    read.
-    """
-    shared_only = IsEmptyCondition(is_empty=PayloadField(key="connection_id"))
-    if connection_id is None:
-        return [shared_only]
-    return [
-        FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
-        shared_only,
-    ]
 
 
 def _no_hash_filter(
@@ -102,7 +79,7 @@ def _no_hash_filter(
         else MatchValue(value=reserved_types[0])
     )
     return Filter(
-        should=_user_scope_should(connection_id),
+        should=own_or_shared_should(connection_id),
         must_not=[FieldCondition(key="type", match=type_match)],
     )
 
@@ -496,7 +473,7 @@ class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
         )
         f = Filter(
             must=[FieldCondition(key="table_name", match=match)],
-            should=_user_scope_should(connection_id),
+            should=own_or_shared_should(connection_id),
         )
         all_records: list[Any] = []
         offset = None

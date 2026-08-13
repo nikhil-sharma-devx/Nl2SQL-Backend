@@ -72,6 +72,12 @@ class UserPublic(BaseModel):
     auth_provider: str
     is_verified: bool
     created_at: datetime
+    # Derived from ADMIN_EMAILS at construction time (see
+    # services.auth_service.to_user_public) — never stored on the user row.
+    # The frontend uses this to hide admin-only mutating controls (global
+    # LLM/RAG config) instead of rendering them for every user and only
+    # failing on submit with a 403.
+    is_admin: bool = False
 
     model_config = {"from_attributes": True}
 

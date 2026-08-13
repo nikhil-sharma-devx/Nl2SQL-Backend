@@ -27,6 +27,7 @@ class FeedbackPattern(BaseModel):
     correction: str  # The corrected SQL or guidance
     table_name: str | None = None  # Table involved (if applicable)
     column_name: str | None = None  # Column involved (if applicable)
+    connection_id: str | None = None  # Owning connection — None means shared/global
     occurrence_count: int = 1
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -99,6 +100,7 @@ class FeedbackLearner:
                 error_type=error_type,
                 user_correction=user_correction,
                 user_notes=user_notes,
+                connection_id=connection_id,
             )
 
             self._patterns[pattern.pattern_id] = pattern
@@ -150,13 +152,17 @@ class FeedbackLearner:
         error_type: str,
         user_correction: str | None = None,
         user_notes: str | None = None,
+        connection_id: str | None = None,
     ) -> FeedbackPattern:
         """Create a feedback pattern from error."""
         import hashlib
 
-        # Create unique pattern ID
+        # Create unique pattern ID. connection_id is part of the hash so two
+        # tenants hitting the same error signature never collide on the same
+        # dict key — that would silently overwrite one tenant's pattern
+        # (including its connection_id) with the other's.
         pattern_hash = hashlib.md5(  # noqa: S324 — used for dedup, not security
-            f"{error_type}:{generated_sql[:100]}".encode()
+            f"{connection_id or ''}:{error_type}:{generated_sql[:100]}".encode()
         ).hexdigest()[:12]
 
         # Extract table/column info if possible
@@ -179,6 +185,7 @@ class FeedbackLearner:
             correction=user_correction or "See description for guidance",
             table_name=table_name,
             column_name=column_name,
+            connection_id=connection_id,
         )
 
     def _extract_table_name(self, sql: str) -> str | None:
@@ -223,7 +230,27 @@ class FeedbackLearner:
 
         return ". ".join(parts)
 
-    async def get_relevant_patterns(self, question: str) -> list[FeedbackPattern]:
+    def _scoped_patterns(self, connection_id: str | None) -> list[FeedbackPattern]:
+        """Own-or-shared visibility: a pattern is visible if it belongs to
+        ``connection_id`` or is shared (``connection_id is None`` on the
+        pattern). With no ``connection_id`` (fail-closed), only shared
+        patterns are visible — never every tenant's patterns.
+
+        ``self._patterns`` is a single process-global dict shared across all
+        tenants (it isn't per-connection like the vector/example stores), so
+        every read must filter through this before it reaches a prompt.
+        """
+        if connection_id is None:
+            return [p for p in self._patterns.values() if p.connection_id is None]
+        return [
+            p
+            for p in self._patterns.values()
+            if p.connection_id is None or p.connection_id == connection_id
+        ]
+
+    async def get_relevant_patterns(
+        self, question: str, connection_id: str | None = None
+    ) -> list[FeedbackPattern]:
         """Get feedback patterns relevant to a question.
 
         Medium finding: this used to return every pattern regardless of
@@ -237,7 +264,7 @@ class FeedbackLearner:
         q_lower = question.lower()
         return [
             p
-            for p in self._patterns.values()
+            for p in self._scoped_patterns(connection_id)
             if p.table_name is None or p.table_name.lower() in q_lower
         ]
 
@@ -253,28 +280,28 @@ class FeedbackLearner:
             lines.append("")
         return "\n".join(lines)
 
-    def get_learning_prompt(self, tables: list[str] | None = None) -> str:
+    def get_learning_prompt(
+        self, tables: list[str] | None = None, connection_id: str | None = None
+    ) -> str:
         """Generate prompt section with learned patterns to avoid.
 
         Args:
             tables: Optional filter to only include patterns for these tables.
+            connection_id: Scopes patterns to this connection's own patterns
+                plus shared ones — see ``_scoped_patterns``. ``None`` (the
+                default) only surfaces shared patterns, never every tenant's.
 
         Returns:
             Formatted string with common mistakes to avoid.
         """
-        if not self._patterns:
+        relevant_patterns = self._scoped_patterns(connection_id)
+        if not relevant_patterns:
             return ""
 
-        # Filter patterns by tables if specified
-        relevant_patterns = self._patterns
         if tables:
-            relevant_patterns = {
-                pid: pattern
-                for pid, pattern in self._patterns.items()
-                if pattern.table_name in tables
-            }
+            relevant_patterns = [p for p in relevant_patterns if p.table_name in tables]
 
-        return self.build_pattern_context(list(relevant_patterns.values()))
+        return self.build_pattern_context(relevant_patterns)
 
     async def analyze_and_optimize(self) -> dict[str, Any]:
         """Analyze all feedback patterns and generate optimization suggestions.

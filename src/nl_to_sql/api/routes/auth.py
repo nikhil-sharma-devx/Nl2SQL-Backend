@@ -40,14 +40,12 @@ from nl_to_sql.services.auth_service import (
     hash_password,
     hash_refresh_token,
     refresh_token_expiry,
+    to_user_public,
     verify_google_token,
     verify_password,
 )
 from nl_to_sql.services.chat_session_service import ChatSessionService
 
-# In-memory OTP failure counter keyed by email.
-# Safe for single-process deployments; move to Redis for multi-process.
-_otp_failures: dict[str, int] = {}
 _OTP_MAX_ATTEMPTS = 5
 
 logger = structlog.get_logger(__name__)
@@ -158,7 +156,7 @@ async def _issue_token_response(
         access_token=access,
         refresh_token=raw_refresh,
         token_type="bearer",
-        user=UserPublic.model_validate(user),
+        user=to_user_public(user),
     )
 
 
@@ -437,7 +435,7 @@ async def refresh(
             access_token=access,
             refresh_token=raw_refresh,
             token_type="bearer",
-            user=UserPublic.model_validate(user),
+            user=to_user_public(user),
         )
 
 
@@ -465,12 +463,12 @@ async def verify_otp(
             raise HTTPException(status_code=404, detail="User not found")
 
         if user.is_verified:
-            _otp_failures.pop(email_key, None)
             return await _issue_token_response(user, session_service._session_factory)
 
-        # Enforce attempt limit before checking the code
-        attempts = _otp_failures.get(email_key, 0)
-        if attempts >= _OTP_MAX_ATTEMPTS:
+        # Enforce attempt limit before checking the code. The counter lives on
+        # the user row (not process memory) so it's shared across every
+        # worker/pod, not just the one that happens to handle this request.
+        if user.otp_failed_attempts >= _OTP_MAX_ATTEMPTS:
             # Invalidate the OTP so attacker must request a new one
             user.otp_code = None
             user.otp_expires_at = None
@@ -481,7 +479,8 @@ async def verify_otp(
             )
 
         if not user.otp_code or user.otp_code != body.otp_code:
-            _otp_failures[email_key] = attempts + 1
+            user.otp_failed_attempts += 1
+            await db_sess.commit()
             raise HTTPException(status_code=400, detail="Invalid OTP code")
 
         now = datetime.now(UTC).replace(tzinfo=None)
@@ -489,7 +488,7 @@ async def verify_otp(
             raise HTTPException(status_code=400, detail="OTP code has expired")
 
         # Verify success — clear failure counter and OTP
-        _otp_failures.pop(email_key, None)
+        user.otp_failed_attempts = 0
         user.is_verified = True
         user.otp_code = None
         user.otp_expires_at = None
@@ -534,7 +533,7 @@ async def resend_otp(
             raise HTTPException(status_code=400, detail="User is already verified")
 
         # Reset failure counter so the fresh OTP gets a clean slate
-        _otp_failures.pop(user.email.lower(), None)
+        user.otp_failed_attempts = 0
         otp = generate_otp()
         expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
 
@@ -574,7 +573,7 @@ async def forgot_password(
         # Always return success to prevent email enumeration; only send if user exists
         if user and user.auth_provider == "email":
             # Also reset the failure counter so a fresh OTP gets a clean slate
-            _otp_failures.pop(user.email.lower(), None)
+            user.otp_failed_attempts = 0
             otp = generate_otp()
             expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
 
@@ -613,12 +612,10 @@ async def reset_password(
         if not user or user.auth_provider != "email":
             raise HTTPException(status_code=400, detail="Invalid request")
 
-        email_key = user.email.lower()
-
         # Enforce the same per-account attempt lockout as /verify-otp before
-        # checking the code — this OTP guards the same otp_code field.
-        attempts = _otp_failures.get(email_key, 0)
-        if attempts >= _OTP_MAX_ATTEMPTS:
+        # checking the code — this OTP guards the same otp_code field. The
+        # counter lives on the row so it's shared across every worker/pod.
+        if user.otp_failed_attempts >= _OTP_MAX_ATTEMPTS:
             user.otp_code = None
             user.otp_expires_at = None
             await db_sess.commit()
@@ -628,14 +625,15 @@ async def reset_password(
             )
 
         if not user.otp_code or user.otp_code != body.otp_code:
-            _otp_failures[email_key] = attempts + 1
+            user.otp_failed_attempts += 1
+            await db_sess.commit()
             raise HTTPException(status_code=400, detail="Invalid OTP code")
 
         now = datetime.now(UTC).replace(tzinfo=None)
         if user.otp_expires_at and now > user.otp_expires_at:
             raise HTTPException(status_code=400, detail="OTP code has expired")
 
-        _otp_failures.pop(email_key, None)
+        user.otp_failed_attempts = 0
 
         # Check password history (last 3 passwords)
         result = await db_sess.execute(

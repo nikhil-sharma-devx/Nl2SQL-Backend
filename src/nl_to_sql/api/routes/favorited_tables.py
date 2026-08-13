@@ -5,7 +5,7 @@ from datetime import datetime
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from nl_to_sql.api.dependencies import (
@@ -29,6 +29,13 @@ class FavoritedTableOut(BaseModel):
     created_at: datetime
 
 
+class FavoritedTableListResponse(BaseModel):
+    items: list[FavoritedTableOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class FavoritedTableCreate(BaseModel):
     table_name: str = Field(..., min_length=1, max_length=200)
     schema_name: str | None = Field(default=None, max_length=100)
@@ -49,14 +56,21 @@ def _to_out(f: FavoritedTable) -> FavoritedTableOut:
     )
 
 
-@router.get("", response_model=list[FavoritedTableOut], summary="List favorited tables")
+@router.get("", response_model=FavoritedTableListResponse, summary="List favorited tables")
 async def list_favorited_tables(
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
-) -> list[FavoritedTableOut]:
+) -> FavoritedTableListResponse:
     async with session_service._session_factory() as db:
+        total = (
+            await db.execute(
+                select(func.count())
+                .select_from(FavoritedTable)
+                .where(FavoritedTable.user_id == current_user.id)
+            )
+        ).scalar_one()
         result = await db.execute(
             select(FavoritedTable)
             .where(FavoritedTable.user_id == current_user.id)
@@ -65,7 +79,9 @@ async def list_favorited_tables(
             .offset(offset)
         )
         items = result.scalars().all()
-    return [_to_out(f) for f in items]
+    return FavoritedTableListResponse(
+        items=[_to_out(f) for f in items], total=total, limit=limit, offset=offset
+    )
 
 
 @router.post(

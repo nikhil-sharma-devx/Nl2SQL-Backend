@@ -145,12 +145,13 @@ async def resolve_active_connection(
     if credentials is None:
         return None, None, db_client
 
-    from nl_to_sql.services.auth_service import decode_access_token
-
     try:
+        from nl_to_sql.services.auth_service import decode_access_token
+
         token_data = decode_access_token(credentials.credentials)
     except Exception:
-        # Invalid/expired token — equivalent to no credentials: anonymous, shared-only.
+        # Invalid/expired token (or the import itself failing) — equivalent to
+        # no credentials: anonymous, shared-only.
         return None, None, db_client
 
     try:
@@ -323,7 +324,7 @@ async def get_current_user(
     from sqlalchemy import select
 
     from nl_to_sql.infrastructure.database.models import User
-    from nl_to_sql.services.auth_service import decode_access_token
+    from nl_to_sql.services.auth_service import decode_access_token, to_user_public
 
     if credentials is None:
         raise HTTPException(
@@ -376,7 +377,7 @@ async def get_current_user(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-    user_public = UserPublic.model_validate(user)
+    user_public = to_user_public(user)
     _auth_cache_set(cache_key, user_public)
     return user_public
 
@@ -397,13 +398,12 @@ async def require_admin(
 ) -> UserPublic:
     """FastAPI dependency: requires the current user to be an admin.
 
-    Admins are defined via the ADMIN_EMAILS setting (comma-separated list).
-    Returns the user on success; raises HTTP 403 otherwise.
+    Admins are defined via the ADMIN_EMAILS setting (comma-separated list);
+    ``current_user.is_admin`` is stamped by ``auth_service.to_user_public`` at
+    login/token-validation time. Returns the user on success; raises HTTP 403
+    otherwise.
     """
-    from nl_to_sql.config.settings import get_settings
-
-    settings = get_settings()
-    if current_user.email.lower() not in settings.admin_email_list:
+    if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required.",

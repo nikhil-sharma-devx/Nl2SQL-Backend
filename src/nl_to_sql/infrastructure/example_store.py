@@ -17,37 +17,12 @@ from typing import Any
 
 import structlog
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import (
-    Distance,
-    FieldCondition,
-    Filter,
-    IsEmptyCondition,
-    MatchValue,
-    PayloadField,
-    PointStruct,
-    VectorParams,
-)
+from qdrant_client.models import Distance, Filter, PointStruct, VectorParams
 
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
+from nl_to_sql.infrastructure.vector_store.tenant_scope import own_or_shared_should
 
 logger = structlog.get_logger(__name__)
-
-
-def _example_scope_should(connection_id: str | None) -> list[Any]:
-    """OR-conditions scoping reads to a user's own examples plus shared ones.
-
-    C7 fail-closed: with no ``connection_id`` this returns a single
-    "untagged/shared only" condition rather than an empty/``None`` should
-    clause — an empty ``should`` applies no restriction at all, which would
-    let an unscoped caller read every tenant's examples.
-    """
-    shared_only = IsEmptyCondition(is_empty=PayloadField(key="connection_id"))
-    if connection_id is None:
-        return [shared_only]
-    return [
-        FieldCondition(key="connection_id", match=MatchValue(value=connection_id)),
-        shared_only,
-    ]
 
 
 class ExampleStore:
@@ -131,7 +106,7 @@ class ExampleStore:
             response = await self._client.query_points(
                 collection_name=self._collection_name,
                 query=embedding,
-                query_filter=Filter(should=_example_scope_should(connection_id)),
+                query_filter=Filter(should=own_or_shared_should(connection_id)),
                 limit=top_k,
                 with_payload=True,
             )
@@ -153,7 +128,7 @@ class ExampleStore:
             await self._ensure_initialized()
             result = await self._client.count(
                 collection_name=self._collection_name,
-                count_filter=Filter(should=_example_scope_should(connection_id)),
+                count_filter=Filter(should=own_or_shared_should(connection_id)),
                 exact=True,
             )
             return int(result.count)

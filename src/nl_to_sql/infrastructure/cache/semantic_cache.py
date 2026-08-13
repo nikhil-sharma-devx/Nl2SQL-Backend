@@ -210,7 +210,11 @@ class SemanticCache(ICache):  # type: ignore[misc]
                     "cached_at": time.time(),
                     "ttl": effective_ttl,
                     "type": "semantic_cache",
-                    "connection_id": connection_id,
+                    # Omit entirely rather than storing None: a shared (unscoped)
+                    # entry has no connection_id key at all, matching the
+                    # qdrant/example-store convention — and ChromaDB rejects
+                    # None-valued metadata outright.
+                    **({"connection_id": connection_id} if connection_id is not None else {}),
                 },
             )
 

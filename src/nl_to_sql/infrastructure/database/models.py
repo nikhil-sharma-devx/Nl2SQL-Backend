@@ -44,6 +44,10 @@ class User(Base):
     is_verified = Column(Boolean, nullable=False, default=False)
     otp_code = Column(String(6), nullable=True)
     otp_expires_at = Column(DateTime, nullable=True)
+    # DB-backed (not in-memory) lockout counter — shared across every worker
+    # process, unlike a process-local dict that a multi-worker deployment
+    # would let an attacker multiply.
+    otp_failed_attempts = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

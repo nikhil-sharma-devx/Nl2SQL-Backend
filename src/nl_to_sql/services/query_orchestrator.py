@@ -406,94 +406,13 @@ class QueryOrchestrator:
                 return response
 
         # ── Step 3: Schema retrieval — two-phase grounding ─────────────────────
-        stage_timings: dict[str, int] = {}
-        _stage_start = time.perf_counter()
-
-        # Phase A: vector similarity search → candidate tables (coarse).
-        # The known-table list needed by Phase B doesn't depend on Phase A,
-        # so both run concurrently.
-        log.info("Phase A: Retrieving candidate schema chunks via vector search")
-        intent_top_k = self._compute_top_k(request.question)
-        if self._table_selector is not None:
-            candidate_chunks, all_known_tables = await asyncio.gather(
-                self._retriever.retrieve(request.question, top_k=intent_top_k),
-                self._retriever.get_all_table_names(),
-            )
-        else:
-            candidate_chunks = await self._retriever.retrieve(request.question, top_k=intent_top_k)
-            all_known_tables = []
-        candidate_tables = list({c.table_name for c in candidate_chunks})
-        stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
-        log.info(
-            "Candidate tables from vector search",
-            tables=candidate_tables,
-            top_k=intent_top_k,
-            retrieval_ms=stage_timings["retrieval"],
+        final_chunks, retrieved_tables, stage_timings = await self._retrieve_schema(
+            request.question, log
         )
-
-        _stage_start = time.perf_counter()
-        if self._table_selector is not None:
-            # Phase B: LLM picks tables from the known ingested list (no hallucination)
-            log.info("Phase B: Running LLM table selector")
-            selected_tables = await self._table_selector.select_tables(
-                question=request.question,
-                available_tables=all_known_tables,
-                fallback_tables=candidate_tables,
-            )
-            log.info("Tables selected by LLM", selected=selected_tables)
-
-            # Phase C: fetch exact column definitions for selected tables
-            log.info("Phase C: Fetching exact schema chunks for selected tables")
-            grounded_chunks = await self._retriever.get_schema_for_tables(selected_tables)
-
-            # Fallback: if grounding returned nothing, use candidate chunks
-            final_chunks = grounded_chunks if grounded_chunks else candidate_chunks
-
-            # Phase D: FK-Aware Expansion (NEW - Layer 1)
-            if self._fk_extractor is not None and final_chunks:
-                log.info("Phase D: Expanding schema via FK relationships")
-                try:
-                    final_chunks = await self._fk_extractor.expand_tables(
-                        final_chunks,
-                        max_expansion=3,
-                        connection_id=self._connection_id,
-                    )
-                except Exception as fk_exc:
-                    log.warning("FK expansion failed, using grounded chunks", error=str(fk_exc))
-
-            retrieved_tables = list({c.table_name for c in final_chunks})
-            log.info(
-                "Schema grounding complete",
-                grounded=bool(grounded_chunks),
-                final_tables=retrieved_tables,
-                fk_expansion_applied=self._fk_extractor is not None,
-            )
-        else:
-            # No table selector configured — use candidate chunks directly
-            final_chunks = candidate_chunks
-            retrieved_tables = candidate_tables
-        stage_timings["table_selection"] = int((time.perf_counter() - _stage_start) * 1000)
-
         schema_context = self._retriever.build_schema_context(final_chunks)
 
-        # ── Fetch conversation history (ConversationBufferMemory) ────────────
-        conversation_history: list[dict[str, Any]] | None = None
-        if self._session_service is not None and request.session_id:
-            try:
-                session_obj = await self._session_service.get_session(request.session_id)
-                if session_obj and session_obj.messages:
-                    sorted_msgs = sorted(session_obj.messages, key=lambda m: m.timestamp)
-                    conversation_history = [
-                        {"question": m.question, "sql": m.sql or ""} for m in sorted_msgs if m.sql
-                    ]
-                    log.info("Loaded conversation history", turns=len(conversation_history))
-            except Exception as hist_exc:
-                log.warning(
-                    "Failed to load conversation history — continuing without", error=str(hist_exc)
-                )
-
-        # ── Conversation pruning + compression (bound prompt growth) ──────────
-        conversation_history = self._prune_conversation(conversation_history)
+        # ── Fetch + prune conversation history (ConversationBufferMemory) ─────
+        conversation_history = await self._load_conversation_history(request, log)
 
         # ── Ambiguous follow-up clarification (ask instead of guessing) ───────
         clarification_prompt = self._needs_clarification(request, conversation_history)
@@ -534,6 +453,7 @@ class QueryOrchestrator:
                     conversation_history=conversation_history,
                     few_shot_examples=few_shot_examples,
                     certified_metrics=certified_metrics,
+                    connection_id=self._connection_id,
                 )
                 generated_sql.attempt = attempt
                 stage_timings["generation"] = stage_timings.get("generation", 0) + int(
@@ -775,6 +695,110 @@ class QueryOrchestrator:
                     log.warning("Failed to collect training data — skipping", error=str(train_exc))
 
         return response
+
+    async def _retrieve_schema(
+        self, question: str, log: Any
+    ) -> tuple[list[Any], list[str], dict[str, int]]:
+        """Two-phase schema grounding shared by ``run()`` and ``run_stream()``.
+
+        Both pipelines need the identical candidate-search → LLM table
+        selection → FK expansion sequence; keeping one copy means a fix here
+        (e.g. the FK-extractor's ``connection_id`` argument) applies to both
+        instead of needing to be hand-applied twice.
+
+        Returns ``(final_chunks, retrieved_tables, stage_timings)`` where
+        ``stage_timings`` has ``"retrieval"`` and ``"table_selection"`` keys.
+        """
+        stage_timings: dict[str, int] = {}
+        _stage_start = time.perf_counter()
+
+        # Phase A: vector similarity search → candidate tables (coarse).
+        # The known-table list needed by Phase B doesn't depend on Phase A,
+        # so both run concurrently.
+        log.info("Phase A: Retrieving candidate schema chunks via vector search")
+        intent_top_k = self._compute_top_k(question)
+        if self._table_selector is not None:
+            candidate_chunks, all_known_tables = await asyncio.gather(
+                self._retriever.retrieve(question, top_k=intent_top_k),
+                self._retriever.get_all_table_names(),
+            )
+        else:
+            candidate_chunks = await self._retriever.retrieve(question, top_k=intent_top_k)
+            all_known_tables = []
+        candidate_tables = list({c.table_name for c in candidate_chunks})
+        stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
+        log.info(
+            "Candidate tables from vector search",
+            tables=candidate_tables,
+            top_k=intent_top_k,
+            retrieval_ms=stage_timings["retrieval"],
+        )
+
+        _stage_start = time.perf_counter()
+        if self._table_selector is not None:
+            # Phase B: LLM picks tables from the known ingested list (no hallucination)
+            log.info("Phase B: Running LLM table selector")
+            selected_tables = await self._table_selector.select_tables(
+                question=question,
+                available_tables=all_known_tables,
+                fallback_tables=candidate_tables,
+            )
+            log.info("Tables selected by LLM", selected=selected_tables)
+
+            # Phase C: fetch exact column definitions for selected tables
+            log.info("Phase C: Fetching exact schema chunks for selected tables")
+            grounded_chunks = await self._retriever.get_schema_for_tables(selected_tables)
+
+            # Fallback: if grounding returned nothing, use candidate chunks
+            final_chunks = grounded_chunks if grounded_chunks else candidate_chunks
+
+            # Phase D: FK-Aware Expansion (Layer 1)
+            if self._fk_extractor is not None and final_chunks:
+                log.info("Phase D: Expanding schema via FK relationships")
+                try:
+                    final_chunks = await self._fk_extractor.expand_tables(
+                        final_chunks,
+                        max_expansion=3,
+                        connection_id=self._connection_id,
+                    )
+                except Exception as fk_exc:
+                    log.warning("FK expansion failed, using grounded chunks", error=str(fk_exc))
+
+            retrieved_tables = list({c.table_name for c in final_chunks})
+            log.info(
+                "Schema grounding complete",
+                grounded=bool(grounded_chunks),
+                final_tables=retrieved_tables,
+                fk_expansion_applied=self._fk_extractor is not None,
+            )
+        else:
+            # No table selector configured — use candidate chunks directly
+            final_chunks = candidate_chunks
+            retrieved_tables = candidate_tables
+        stage_timings["table_selection"] = int((time.perf_counter() - _stage_start) * 1000)
+
+        return final_chunks, retrieved_tables, stage_timings
+
+    async def _load_conversation_history(
+        self, request: QueryRequest, log: Any
+    ) -> list[dict[str, Any]] | None:
+        """Fetch + prune conversation history (ConversationBufferMemory),
+        shared by ``run()`` and ``run_stream()``."""
+        conversation_history: list[dict[str, Any]] | None = None
+        if self._session_service is not None and request.session_id:
+            try:
+                session_obj = await self._session_service.get_session(request.session_id)
+                if session_obj and session_obj.messages:
+                    sorted_msgs = sorted(session_obj.messages, key=lambda m: m.timestamp)
+                    conversation_history = [
+                        {"question": m.question, "sql": m.sql or ""} for m in sorted_msgs if m.sql
+                    ]
+                    log.info("Loaded conversation history", turns=len(conversation_history))
+            except Exception as hist_exc:
+                log.warning(
+                    "Failed to load conversation history — continuing without", error=str(hist_exc)
+                )
+        return self._prune_conversation(conversation_history)
 
     async def _build_effective_question(
         self,
@@ -1360,56 +1384,11 @@ class QueryOrchestrator:
                     ).to_sse()
                     return
 
-            # Schema retrieval — two-phase grounding.
-            # The known-table list (Phase B input) is fetched concurrently
-            # with the Phase A vector search — neither depends on the other.
-            stage_timings: dict[str, int] = {}
-            _stage_start = time.perf_counter()
+            # Schema retrieval — two-phase grounding (shared with run()).
             yield PipelineStageEvent(status="progress", stage="retrieving_schema").to_sse()
-            _stream_intent_top_k = self._compute_top_k(request.question)
-            if self._table_selector is not None:
-                candidate_chunks, all_known_tables = await asyncio.gather(
-                    self._retriever.retrieve(request.question, top_k=_stream_intent_top_k),
-                    self._retriever.get_all_table_names(),
-                )
-            else:
-                candidate_chunks = await self._retriever.retrieve(
-                    request.question, top_k=_stream_intent_top_k
-                )
-                all_known_tables = []
-            candidate_tables = list({c.table_name for c in candidate_chunks})
-            stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
-
-            _stage_start = time.perf_counter()
-            if self._table_selector is not None:
-                selected_tables = await self._table_selector.select_tables(
-                    question=request.question,
-                    available_tables=all_known_tables,
-                    fallback_tables=candidate_tables,
-                )
-                grounded_chunks = await self._retriever.get_schema_for_tables(selected_tables)
-                final_chunks = grounded_chunks if grounded_chunks else candidate_chunks
-
-                if self._fk_extractor is not None and final_chunks:
-                    try:
-                        # H5: expand_tables only accepts connection_id — passing
-                        # user_id raised TypeError every time, silently
-                        # swallowed by this except, so FK expansion never ran
-                        # in the streaming path.
-                        final_chunks = await self._fk_extractor.expand_tables(
-                            final_chunks,
-                            max_expansion=3,
-                            connection_id=self._connection_id,
-                        )
-                    except Exception as fk_exc:
-                        log.warning("FK expansion failed", error=str(fk_exc))
-
-                retrieved_tables = list({c.table_name for c in final_chunks})
-            else:
-                final_chunks = candidate_chunks
-                retrieved_tables = candidate_tables
-            stage_timings["table_selection"] = int((time.perf_counter() - _stage_start) * 1000)
-
+            final_chunks, retrieved_tables, stage_timings = await self._retrieve_schema(
+                request.question, log
+            )
             schema_context = self._retriever.build_schema_context(final_chunks)
 
             yield PipelineStageEvent(
@@ -1418,28 +1397,8 @@ class QueryOrchestrator:
                 tables=retrieved_tables,
             ).to_sse()
 
-            # Fetch conversation history (ConversationBufferMemory)
-            conversation_history: list[dict[str, Any]] | None = None
-            if self._session_service is not None and request.session_id:
-                try:
-                    session_obj = await self._session_service.get_session(request.session_id)
-                    if session_obj and session_obj.messages:
-                        sorted_msgs = sorted(session_obj.messages, key=lambda m: m.timestamp)
-                        conversation_history = [
-                            {"question": m.question, "sql": m.sql or ""}
-                            for m in sorted_msgs
-                            if m.sql
-                        ]
-                        log.info(
-                            "Loaded conversation history (stream)", turns=len(conversation_history)
-                        )
-                except Exception as hist_exc:
-                    log.warning(
-                        "Failed to load conversation history in stream", error=str(hist_exc)
-                    )
-
-            # Conversation pruning + compression (bound prompt growth)
-            conversation_history = self._prune_conversation(conversation_history)
+            # Fetch + prune conversation history (ConversationBufferMemory)
+            conversation_history = await self._load_conversation_history(request, log)
 
             # Ambiguous follow-up clarification — ask instead of guessing
             clarification_prompt = self._needs_clarification(request, conversation_history)
@@ -1487,6 +1446,7 @@ class QueryOrchestrator:
                         conversation_history=conversation_history,
                         few_shot_examples=_stream_few_shot,
                         certified_metrics=certified_metrics,
+                        connection_id=self._connection_id,
                     )
                     generated_sql.attempt = attempt
                     stage_timings["generation"] = stage_timings.get("generation", 0) + int(
