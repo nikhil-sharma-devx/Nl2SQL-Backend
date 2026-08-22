@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     # ── Application ──────────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"
-    app_host: str = "0.0.0.0"  # noqa: S104 — required for Docker/container deployment
+    app_host: str = "0.0.0.0"  # noqa: S104 — required to be reachable from outside localhost
     app_port: int = 8000
     app_log_level: str = "INFO"
     # Default writes to {project_root}/data/logs/; override with APP_LOG_FILE= (empty) to disable
@@ -92,7 +92,7 @@ class Settings(BaseSettings):
 
     # ── LLM ─────────────────────────────────────────────────────────────────
     llm_provider: Literal["groq", "openai", "anthropic", "gemini"] = "groq"
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-120b"
     llm_max_tokens: int = 1024
     llm_temperature: float = 0.0
     groq_api_key: str = Field(default="", description="Required when llm_provider=groq")

@@ -1,7 +1,7 @@
-﻿"""Retrieval chain â€” composes the full online retrieval pipeline.
+"""Retrieval chain — composes the full online retrieval pipeline.
 
 This is the ONLY file that services/ needs to import from rag/retrieval/.
-Composes: embed â†’ vector search + BM25 search (parallel) â†’ rerank â†’ build context.
+Composes: embed → vector search + BM25 search (parallel) → rerank → build context.
 """
 import asyncio
 import time
@@ -11,6 +11,7 @@ import structlog
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaChunk
+from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.context_builder import ContextBuilder
 from nl_to_sql.rag.retrieval.query_embedder import QueryEmbedder
@@ -33,15 +34,15 @@ class RetrievalChain:
     should import.
 
     SOLID:
-      S â€” Only orchestrates retrieval; does not generate SQL or call the LLM.
-      D â€” Depends on abstractions (IEmbedder, IVectorStore).
+      S — Only orchestrates retrieval; does not generate SQL or call the LLM.
+      D — Depends on abstractions (IEmbedder, IVectorStore).
     """
 
     def __init__(
         self,
         embedder: IEmbedder,
         vector_store: IVectorStore,
-        bm25_store: object | None = None,
+        bm25_store: BM25Store | None = None,
         top_k: int = 5,
         use_hybrid_search: bool = False,
         hybrid_alpha: float = 0.5,
@@ -162,7 +163,7 @@ class RetrievalChain:
         set_span_attribute("retrieval.embed_ms", embed_ms)
         set_span_attribute("retrieval.search_ms", search_ms)
         set_span_attribute("retrieval.rerank_ms", rerank_ms)
-        return reranked  # type: ignore[no-any-return]
+        return reranked
 
     def build_context(self, chunks: list[SchemaChunk]) -> str:
         """Format retrieved chunks into LLM context string.
@@ -173,7 +174,7 @@ class RetrievalChain:
         Returns:
             Formatted schema context string.
         """
-        return self._context_builder.build(chunks)  # type: ignore[no-any-return]
+        return self._context_builder.build(chunks)
 
     async def get_schema_for_tables(
         self,
@@ -184,12 +185,12 @@ class RetrievalChain:
 
         Used in Phase C of two-phase schema grounding.
         """
-        return await self._vector_retriever.get_schema_for_tables(  # type: ignore[no-any-return]
+        return await self._vector_retriever.get_schema_for_tables(
             table_names, connection_id=connection_id
         )
 
     async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         """Return all table names in the vector store (optionally per user)."""
-        return await self._vector_retriever.get_all_table_names(  # type: ignore[no-any-return]
+        return await self._vector_retriever.get_all_table_names(
             connection_id=connection_id
         )

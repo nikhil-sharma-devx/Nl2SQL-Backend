@@ -31,7 +31,7 @@ _BLOCKED_FUNCTIONS: frozenset[str] = frozenset({
 })
 
 
-class SQLValidatorService(ISQLValidator):  # type: ignore[misc]
+class SQLValidatorService(ISQLValidator):
     """Validates SQL using sqlglot's parser.
 
     Checks:

@@ -1,4 +1,4 @@
-"""Analytics routes â€” GET /api/v1/analytics/*."""
+"""Analytics routes — GET /api/v1/analytics/*."""
 
 from typing import Any
 
@@ -88,7 +88,7 @@ async def get_analytics_summary(
     """Get overall analytics summary, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_summary(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_summary(user_id=current_user.id, days=days)
 
 
 @router.get("/popular-queries", response_model=list[PopularQuery])
@@ -104,7 +104,7 @@ async def get_popular_queries(
         response.headers["Cache-Control"] = "private, max-age=120"
     return await analytics_service.get_popular_queries(
         user_id=current_user.id, limit=limit, days=days
-    )  # type: ignore[no-any-return]
+    )
 
 
 @router.get("/failure-patterns", response_model=list[FailurePattern])
@@ -117,7 +117,7 @@ async def get_failure_patterns(
     """Get common failure patterns, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_failure_patterns(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_failure_patterns(user_id=current_user.id, days=days)
 
 
 @router.get("/table-usage", response_model=list[TableUsage])
@@ -131,7 +131,7 @@ async def get_table_usage(
     """Get most frequently retrieved tables, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_table_usage(user_id=current_user.id, limit=limit, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_table_usage(user_id=current_user.id, limit=limit, days=days)
 
 
 @router.get("/intent-distribution", response_model=list[IntentDistribution])
@@ -144,7 +144,7 @@ async def get_intent_distribution(
     """Get distribution of query intent types, scoped to the caller."""
     if response:
         response.headers["Cache-Control"] = "private, max-age=120"
-    return await analytics_service.get_intent_distribution(user_id=current_user.id, days=days)  # type: ignore[no-any-return]
+    return await analytics_service.get_intent_distribution(user_id=current_user.id, days=days)
 
 
 @router.get("/prompt-versions", response_model=list[PromptVersionPerformance])
@@ -159,7 +159,7 @@ async def get_prompt_version_performance(
         response.headers["Cache-Control"] = "private, max-age=120"
     return await analytics_service.get_prompt_version_performance(
         user_id=current_user.id, days=days
-    )  # type: ignore[no-any-return]
+    )
 
 
 @router.get("/cache-stats", response_model=CacheStats)
@@ -200,7 +200,7 @@ async def reset_analytics(
     Clears query history, training data, and feedback records.
     Preserves chat sessions and messages.
     """
-    return await analytics_service.reset_analytics()  # type: ignore[no-any-return]
+    return await analytics_service.reset_analytics()
 
 
 @router.get("/debug")

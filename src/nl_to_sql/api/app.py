@@ -126,8 +126,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     schema_metadata = SchemaIngestionService.build_schema_from_dict(schema_dict)
                     current_schema_hash = SchemaIngestionService.compute_schema_hash(schema_metadata)
 
-                    # Get stored hash from vector store
-                    stored_hash = vector_store.get_schema_hash()
+                    # Get stored hash from vector store (not every backend supports this —
+                    # e.g. FAISS — so probe for it rather than assuming it's on the interface).
+                    get_schema_hash = getattr(vector_store, "get_schema_hash", None)
+                    stored_hash = get_schema_hash() if get_schema_hash is not None else None
 
                     # Check if schema has changed
                     should_ingest = False
@@ -568,8 +570,8 @@ def create_app() -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1000)
 
     # ── CORS ───────────────────────────────────────────────────────────────────
-    # In Docker the nginx reverse-proxy makes all traffic same-origin, so CORS
-    # is only relevant for direct API access (dev, tooling, etc.).
+    # A reverse proxy in front of the API can make all traffic same-origin, so
+    # CORS is only relevant for direct API access (dev, tooling, etc.).
     # allow_credentials=False is intentional: the app uses Bearer tokens in
     # Authorization headers, not cookies, so the browser credential flag is not needed.
     #

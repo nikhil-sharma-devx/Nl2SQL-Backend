@@ -79,7 +79,7 @@ def _mask_url(url: str) -> str:
 
 # Available models per provider
 AVAILABLE_MODELS = {
-    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+    "groq": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     "anthropic": [
         "claude-sonnet-4-6",

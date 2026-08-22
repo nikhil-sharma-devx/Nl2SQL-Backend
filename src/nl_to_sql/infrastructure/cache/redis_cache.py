@@ -15,7 +15,7 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_PREFIX = "nl2sql:"
 
 
-class RedisCache(ICache):  # type: ignore[misc]
+class RedisCache(ICache):
     """Async Redis cache with JSON serialisation.
 
     All keys are transparently prefixed with ``_prefix`` (default ``nl2sql:``)

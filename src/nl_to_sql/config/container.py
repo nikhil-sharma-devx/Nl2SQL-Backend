@@ -4,7 +4,7 @@ Object construction logic lives in `config/factories/`; this module is the
 thin wiring layer that composes those factories into providers.
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from dependency_injector import containers, providers
 
@@ -113,12 +113,13 @@ class ApplicationContainer(containers.DeclarativeContainer):
         threshold=config.provided.semantic_cache_threshold,
     )
 
+    _cache_selector_providers: ClassVar[dict[str, providers.Provider[Any]]] = {
+        "True": semantic_cache,
+        "False": cache,
+    }
     active_cache = providers.Selector(
         providers.Callable(lambda s: str(s.semantic_cache_enabled), config),
-        **{
-            "True": semantic_cache,
-            "False": cache,
-        },
+        **_cache_selector_providers,
     )
 
     db_client = providers.Singleton(

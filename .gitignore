@@ -48,8 +48,13 @@ coverage.xml
 Thumbs.db
 
 # Internal-only docs — kept locally, never pushed
-/ARCHITECTURE.md
-/BACKEND_GUIDE.md
-/CHANGELOG.md
-/ENGINEERING_REVIEW.md
-/FINAL_REMEDIATION_REPORT.md
+/docs/architecture/ARCHITECTURE.md
+/docs/architecture/SCHEMA_MIGRATIONS.md
+/docs/development/BACKEND_GUIDE.md
+/docs/project-overview/CHANGELOG.md
+/docs/project-overview/ENGINEERING_REVIEW.md
+/docs/project-overview/FINAL_REMEDIATION_REPORT.md
+
+# Local-only — kept out of the repo
+/tests/
+/scripts/

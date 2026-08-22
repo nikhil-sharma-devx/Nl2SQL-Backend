@@ -136,5 +136,5 @@ def compute_next_run(
     base_local = base.astimezone(tz)
 
     itr = croniter(cron_expr, base_local)
-    next_local = itr.get_next(datetime)
+    next_local: datetime = itr.get_next(datetime)
     return next_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)

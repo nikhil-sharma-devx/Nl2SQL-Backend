@@ -1,7 +1,7 @@
 """Training data routes — GET/POST /api/v1/training/*."""
 
 import io
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -32,7 +32,7 @@ async def get_training_stats(
     training_service: TrainingDataService = Depends(get_training_data_service),
 ) -> dict[str, Any]:
     """Get training data statistics. Admin-only: the training corpus is global, not per-user."""
-    return cast(dict[str, Any], await training_service.get_training_stats())
+    return await training_service.get_training_stats()
 
 
 @router.get("/export")
@@ -44,13 +44,10 @@ async def export_training_data(
     training_service: TrainingDataService = Depends(get_training_data_service),
 ) -> str:
     """Export training data for fine-tuning. Admin-only: the training corpus is global, not per-user."""
-    return cast(
-        str,
-        await training_service.export_training_data(
-            format=format,
-            limit=limit,
-            include_used=include_used,
-        ),
+    return await training_service.export_training_data(
+        format=format,
+        limit=limit,
+        include_used=include_used,
     )
 
 

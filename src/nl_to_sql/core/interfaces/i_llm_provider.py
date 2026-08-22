@@ -41,7 +41,7 @@ class ILLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream_complete(
+    def stream_complete(
         self,
         system_prompt: str,
         user_prompt: str,

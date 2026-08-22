@@ -141,7 +141,7 @@ def _payload_to_chunk(payload: dict[str, Any]) -> SchemaChunk:
     )
 
 
-class QdrantVectorStore(IVectorStore):  # type: ignore[misc]
+class QdrantVectorStore(IVectorStore):
     """Qdrant-backed vector store with native hybrid search.
 
     Each document is stored with two named vectors:

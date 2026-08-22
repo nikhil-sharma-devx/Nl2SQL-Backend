@@ -1,10 +1,11 @@
 """Cache backend factory — selects the exact-match cache from settings."""
 from nl_to_sql.config.settings import Settings
+from nl_to_sql.core.interfaces.i_cache import ICache
 from nl_to_sql.infrastructure.cache.in_memory_cache import InMemoryCache
 from nl_to_sql.infrastructure.cache.redis_cache import RedisCache
 
 
-def build_cache(settings: Settings) -> object:
+def build_cache(settings: Settings) -> ICache:
     """Factory: choose the cache backend from settings."""
     if settings.cache_provider == "redis":
         return RedisCache(

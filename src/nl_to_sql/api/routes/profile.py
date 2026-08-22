@@ -26,8 +26,8 @@ router = APIRouter(prefix="/api/v1/profile", tags=["Profile"])
 
 SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
     "groq": {
-        "label": "Groq (Llama)",
-        "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+        "label": "Groq (GPT-OSS)",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
     },
     "openai": {
         "label": "OpenAI (GPT)",

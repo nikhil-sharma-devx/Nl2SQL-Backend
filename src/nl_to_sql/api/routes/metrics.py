@@ -12,6 +12,7 @@ found* (404) so existence cannot be probed.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -81,7 +82,7 @@ class MetricDeleteResponse(BaseModel):
 class MetricPreviewResponse(BaseModel):
     ok: bool
     row_count: int | None = None
-    rows: list[dict] | None = None
+    rows: list[dict[str, Any]] | None = None
     estimated_rows: int | None = None
     estimated_cost: float | None = None
     message: str | None = None

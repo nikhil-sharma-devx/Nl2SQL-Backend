@@ -1,12 +1,13 @@
 """F8 - Login session management and login activity routes."""
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 
 from nl_to_sql.api.dependencies import (
     auth_cache_invalidate_session,
@@ -181,7 +182,7 @@ async def revoke_all_auth_sessions(
             )
             .values(revoked_at=now)
         )
-        revoked = result.rowcount
+        revoked = cast(CursorResult[Any], result).rowcount
         if revoked.__class__.__name__ in ("MagicMock", "AsyncMock"):
             try:
                 sessions = result.scalars().all()

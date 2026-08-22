@@ -9,6 +9,7 @@ from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.schema import SchemaMetadata
+from nl_to_sql.infrastructure.bm25_store import BM25Store
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.bm25_indexer import BM25Indexer
 from nl_to_sql.rag.ingestion.chunker import Chunker
@@ -43,7 +44,7 @@ class IngestionPipeline:
         db_client: AsyncDatabaseClient,
         embedder: IEmbedder,
         vector_store: IVectorStore,
-        bm25_store: object | None = None,
+        bm25_store: BM25Store | None = None,
         chunk_strategy: str = "table",
         chunk_size: int = 1000,
         chunk_overlap: int = 200,

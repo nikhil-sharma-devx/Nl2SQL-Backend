@@ -19,6 +19,7 @@ dependencies = [
     # LLM Providers
     "groq>=0.9.0",
     "openai>=1.0.0",
+    "anthropic>=0.40.0",
     "google-genai>=0.8.0",
 
     # Embeddings & Vector Store
@@ -75,9 +76,15 @@ dependencies = [
     "google-auth>=2.29.0",
     "python-jose[cryptography]>=3.3.0",
     "aiosmtplib>=3.0.1",
+
+    # PDF export (Export & Share)
+    "fpdf2>=2.8.0",
 ]
 
 [project.optional-dependencies]
+huggingface = [
+    "sentence-transformers>=2.2.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
@@ -123,6 +130,7 @@ known-first-party = ["nl_to_sql"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S"]
+"scripts/**" = ["ANN", "E402", "S", "B"]
 "**/api/routes/**" = ["B008"]
 "**/api/dependencies.py" = ["B008"]
 "**/api/middleware/**" = ["B008"]
@@ -135,8 +143,12 @@ ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["chromadb.*", "groq.*", "dependency_injector.*", "sqlglot.*", "slowapi.*"]
+module = ["chromadb.*", "groq.*", "dependency_injector.*", "sqlglot.*", "slowapi.*", "fpdf.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["google.oauth2.*", "google.auth.*"]
+follow_imports = "skip"
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

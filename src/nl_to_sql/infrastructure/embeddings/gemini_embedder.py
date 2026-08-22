@@ -1,6 +1,6 @@
 """Google Gemini embedding provider — implements IEmbedder using google-genai SDK."""
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -17,7 +17,7 @@ _GEMINI_MODEL_DIMS: dict[str, int] = {
 }
 
 
-class GeminiEmbedder(IEmbedder):  # type: ignore[misc]
+class GeminiEmbedder(IEmbedder):
     """Embeds text via the Gemini text-embedding-004 API.
 
     No local model or PyTorch required — all compute runs on Google's servers.
@@ -62,9 +62,20 @@ class GeminiEmbedder(IEmbedder):  # type: ignore[misc]
             response = await asyncio.to_thread(
                 client.models.embed_content,
                 model=self._model,
-                contents=cleaned,
+                contents=cast(Any, cleaned),
             )
-            return [list(e.values) for e in response.embeddings]
+            if response.embeddings is None:
+                raise EmbeddingError(
+                    "Gemini returned no embeddings", detail="response.embeddings was None"
+                )
+            result: list[list[float]] = []
+            for e in response.embeddings:
+                if e.values is None:
+                    raise EmbeddingError(
+                        "Gemini returned an empty embedding vector", detail=str(e)
+                    )
+                result.append(list(e.values))
+            return result
         except Exception as exc:
             log.error("Gemini embedding error", error=str(exc))
             raise EmbeddingError(

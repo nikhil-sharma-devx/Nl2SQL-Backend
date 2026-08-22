@@ -1,10 +1,12 @@
 """RAG infrastructure factories — embedder and vector store selection."""
 from nl_to_sql.config.settings import Settings
+from nl_to_sql.core.interfaces.i_embedder import IEmbedder
+from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.infrastructure.embeddings.huggingface_embedder import HuggingFaceEmbedder
 from nl_to_sql.infrastructure.vector_store.chroma_store import ChromaVectorStore
 
 
-def build_vector_store(settings: Settings) -> object:
+def build_vector_store(settings: Settings) -> IVectorStore:
     """Factory: choose the schema vector store from settings."""
     if settings.vector_store_provider == "qdrant":
         from nl_to_sql.infrastructure.vector_store.qdrant_store import QdrantVectorStore
@@ -27,7 +29,7 @@ def build_vector_store(settings: Settings) -> object:
     )
 
 
-def build_semantic_cache_store(settings: Settings) -> object:
+def build_semantic_cache_store(settings: Settings) -> IVectorStore:
     """Factory: a *dedicated* vector store for the semantic cache.
 
     The semantic cache must NOT share the schema vector store. Sharing it writes
@@ -56,7 +58,7 @@ def build_semantic_cache_store(settings: Settings) -> object:
     )
 
 
-def build_embedder(settings: Settings) -> object:
+def build_embedder(settings: Settings) -> IEmbedder:
     """Factory: choose the embedder from settings."""
     if settings.embedding_provider == "gemini":
         from nl_to_sql.infrastructure.embeddings.gemini_embedder import GeminiEmbedder

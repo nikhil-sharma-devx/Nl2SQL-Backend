@@ -4,24 +4,25 @@ import asyncio
 import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator, Callable
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 import structlog
 
 from nl_to_sql.core.exceptions import DatabaseExecutionError, RateLimitError, SQLGenerationError
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 # Langfuse — graceful no-op when not installed or not enabled
 try:
     from langfuse.decorators import langfuse_context as _lf_ctx
-    from langfuse.decorators import observe as _lf_observe
+    from langfuse.decorators import observe as _real_lf_observe
 
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
-
-    def _lf_observe(*_a: Any, **_kw: Any) -> Any:
-        return lambda f: f
+    _real_lf_observe = None
 
     class _lf_ctx:  # type: ignore[no-redef]  # noqa: N801
         @staticmethod
@@ -31,6 +32,18 @@ except ImportError:
         @staticmethod
         def update_current_trace(**_: Any) -> None:
             pass
+
+
+def _lf_observe(*args: Any, **kwargs: Any) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Typed wrapper around langfuse's ``observe`` decorator (no-op if unavailable)."""
+
+    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
+        if _real_lf_observe is None:
+            return func
+        wrapped: Callable[_P, _R] = _real_lf_observe(*args, **kwargs)(func)
+        return wrapped
+
+    return decorator
 
 
 from nl_to_sql.core.interfaces.i_cache import ICache

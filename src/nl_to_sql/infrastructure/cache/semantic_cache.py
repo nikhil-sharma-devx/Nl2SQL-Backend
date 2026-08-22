@@ -1,4 +1,4 @@
-"""Semantic cache â€” caches semantically similar queries using vector similarity."""
+"""Semantic cache — caches semantically similar queries using vector similarity."""
 
 import asyncio
 import hashlib
@@ -15,7 +15,7 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
-class SemanticCache(ICache):  # type: ignore[misc]
+class SemanticCache(ICache):
     """Vector-based semantic cache for query responses.
 
     Instead of exact matching, this cache uses embedding similarity to find
@@ -28,8 +28,8 @@ class SemanticCache(ICache):  # type: ignore[misc]
     - Falls back to exact match cache if semantic cache misses
 
     SOLID:
-      S â€” Only handles semantic caching logic
-      D â€” Depends on IEmbedder, IVectorStore, and ICache abstractions
+      S — Only handles semantic caching logic
+      D — Depends on IEmbedder, IVectorStore, and ICache abstractions
     """
 
     def __init__(
@@ -125,7 +125,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
             # Check if similarity exceeds threshold
             if similarity_score < effective_threshold:
                 log.debug(
-                    "Similarity below threshold â€” cache miss",
+                    "Similarity below threshold — cache miss",
                     similarity=similarity_score,
                 )
                 return None
@@ -137,7 +137,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
             if cached_at and ttl > 0:
                 age = time.time() - cached_at
                 if age > ttl:
-                    log.debug("Cached response expired â€” cache miss", age=age)
+                    log.debug("Cached response expired — cache miss", age=age)
                     return None
 
             # Return cached response
@@ -164,7 +164,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
             return None
 
         except Exception as exc:
-            log.warning("Semantic cache lookup failed â€” falling back", error=str(exc))
+            log.warning("Semantic cache lookup failed — falling back", error=str(exc))
             return None
 
     async def set_semantic(
@@ -174,7 +174,7 @@ class SemanticCache(ICache):  # type: ignore[misc]
         ttl: int | None = None,
         connection_id: str | None = None,
     ) -> None:
-        """Store query response in semantic cache (non-blocking â€” write happens in background)."""
+        """Store query response in semantic cache (non-blocking — write happens in background)."""
         task = asyncio.create_task(self._write_semantic(question, response, ttl, connection_id))
         task.add_done_callback(lambda t: None)  # prevent GC
 
@@ -222,4 +222,4 @@ class SemanticCache(ICache):  # type: ignore[misc]
             log.info("Semantic cache entry stored")
 
         except Exception as exc:
-            log.warning("Failed to store in semantic cache â€” skipping", error=str(exc))
+            log.warning("Failed to store in semantic cache — skipping", error=str(exc))

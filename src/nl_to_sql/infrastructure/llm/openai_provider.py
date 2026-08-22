@@ -16,7 +16,7 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class OpenAIProvider(ILLMProvider):  # type: ignore[misc]
+class OpenAIProvider(ILLMProvider):
     """Concrete LLM provider backed by OpenAI (GPT models).
 
     SOLID:

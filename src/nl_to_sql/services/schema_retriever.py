@@ -1,4 +1,4 @@
-﻿"""Schema retriever â€” RAG step: embed query â†’ find relevant schema chunks.
+"""Schema retriever — RAG step: embed query → find relevant schema chunks.
 
 NOTE: This module is kept for backward compatibility. New code should prefer
 ``rag.retrieval.retrieval_chain.RetrievalChain`` which adds BM25 sparse
@@ -42,8 +42,8 @@ class SchemaRetriever:
     Supports both pure vector search and hybrid search (vector + BM25).
 
     SOLID:
-      S â€” Purely responsible for schema retrieval; not generation.
-      D â€” Depends on IEmbedder and IVectorStore abstractions.
+      S — Purely responsible for schema retrieval; not generation.
+      D — Depends on IEmbedder and IVectorStore abstractions.
     """
 
     def __init__(
@@ -170,14 +170,14 @@ class SchemaRetriever:
     ) -> list[SchemaChunk]:
         """Run a single dense (or hybrid) search for one query variant."""
         if self._use_hybrid_search and hasattr(self._vector_store, "hybrid_search"):
-            return await self._vector_store.hybrid_search(  # type: ignore[no-any-return]
+            return await self._vector_store.hybrid_search(
                 query_text=query_text,
                 query_embedding=query_embedding,
                 top_k=top_k,
                 alpha=self._hybrid_alpha,
                 connection_id=self._connection_id,
             )
-        return await self._vector_store.similarity_search(  # type: ignore[no-any-return]
+        return await self._vector_store.similarity_search(
             query_embedding=query_embedding,
             top_k=top_k,
             connection_id=self._connection_id,
@@ -245,7 +245,7 @@ class SchemaRetriever:
             table_names: List of exact table names (from TableSelectorService).
 
         Returns:
-            List of SchemaChunk objects â€” one per matched table.
+            List of SchemaChunk objects — one per matched table.
         """
         if not table_names:
             return []
@@ -259,7 +259,7 @@ class SchemaRetriever:
             requested=len(table_names),
             found=len(chunks),
         )
-        return chunks  # type: ignore[no-any-return]
+        return chunks
 
     async def get_all_table_names(self) -> list[str]:
         """Return all table names currently ingested in the vector store.
@@ -270,6 +270,6 @@ class SchemaRetriever:
         Returns:
             Sorted list of unique table name strings.
         """
-        return await self._vector_store.get_all_table_names(  # type: ignore[no-any-return]
+        return await self._vector_store.get_all_table_names(
             connection_id=self._connection_id
         )

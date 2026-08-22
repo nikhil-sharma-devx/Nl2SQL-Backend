@@ -11,7 +11,7 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
-class FAISSVectorStore(IVectorStore):  # type: ignore[misc]
+class FAISSVectorStore(IVectorStore):
     """FAISS-backed in-memory vector store.
 
     Useful for environments where ChromaDB is not available or for ultra-fast

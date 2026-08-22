@@ -4,12 +4,14 @@ import asyncio
 import csv
 import io
 import json
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from starlette.responses import StreamingResponse
 
 from nl_to_sql.api.dependencies import (
@@ -164,7 +166,7 @@ async def export_history(
         )
         session_ids = [row[0] for row in session_result.all()]
 
-        rows = []
+        rows: Sequence[ChatMessage] = []
         if session_ids:
             msg_result = await db.execute(
                 select(ChatMessage)
@@ -251,7 +253,7 @@ async def clear_history_v2(
                 )
                 .values(deleted_at=now)
             )
-            soft_deleted = result.rowcount
+            soft_deleted = cast(CursorResult[Any], result).rowcount
         await db.commit()
 
     return ClearHistoryV2Response(soft_deleted=soft_deleted)

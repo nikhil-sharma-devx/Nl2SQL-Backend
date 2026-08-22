@@ -17,7 +17,7 @@ from typing import Any
 
 import structlog
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, Filter, PointStruct, VectorParams
+from qdrant_client.models import Distance, Filter, PayloadSchemaType, PointStruct, VectorParams
 
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.infrastructure.vector_store.tenant_scope import own_or_shared_should
@@ -65,6 +65,14 @@ class ExampleStore:
                 # Another worker may have created it concurrently — tolerate that.
                 if "already exists" not in str(exc).lower():
                     raise
+        try:
+            await self._client.create_payload_index(
+                collection_name=self._collection_name,
+                field_name="connection_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
         self._initialized = True
 
     async def index_example(

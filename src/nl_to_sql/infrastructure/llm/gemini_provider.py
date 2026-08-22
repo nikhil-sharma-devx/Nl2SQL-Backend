@@ -13,7 +13,7 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class GeminiProvider(ILLMProvider):  # type: ignore[misc]
+class GeminiProvider(ILLMProvider):
     """Concrete LLM provider backed by Google Gemini (google-genai SDK).
 
     SOLID:

@@ -14,7 +14,6 @@ A production-grade REST API that converts plain-English questions into validated
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Local Development](#local-development)
-  - [Docker (Recommended)](#docker-recommended)
 - [Environment Variables](#environment-variables)
 - [API Overview](#api-overview)
 - [Project Structure](#project-structure)
@@ -79,7 +78,6 @@ A production-grade REST API that converts plain-English questions into validated
 | Linting | Ruff | Replaces flake8 + isort + pyupgrade |
 | Type checking | Mypy (strict) | |
 | Testing | pytest + pytest-asyncio | |
-| Container | Docker multi-stage (python:3.13-slim) | Non-root `appuser`, healthcheck included |
 
 ---
 
@@ -120,8 +118,8 @@ A production-grade REST API that converts plain-English questions into validated
 
 - Python 3.13+
 - PostgreSQL (or a [Supabase](https://supabase.com) project)
-- Qdrant — `docker run -p 6333:6333 qdrant/qdrant`
-- Redis — `docker run -p 6379:6379 redis:7-alpine`
+- Qdrant (local install or hosted instance)
+- Redis (local install or hosted instance)
 - A Groq or OpenAI API key
 
 ### Local Development
@@ -151,19 +149,6 @@ uvicorn nl_to_sql.api.app:create_app --factory --reload --host 0.0.0.0 --port 80
 Interactive docs: `http://localhost:8000/docs`
 ReDoc: `http://localhost:8000/redoc`
 
-### Docker (Recommended)
-
-Starts the API, Qdrant, and Redis in one command:
-
-```bash
-cp .env.example .env
-# Edit .env — set DATABASE_URL, GROQ_API_KEY, SECRET_KEY, JWT_SECRET_KEY at minimum
-
-docker compose up --build
-```
-
-The `api` container waits for Qdrant and Redis health checks before starting.
-
 ---
 
 ## Environment Variables
@@ -179,11 +164,11 @@ Copy `.env.example` to `.env` and fill in every `REQUIRED` value. All other vari
 | `GROQ_API_KEY` | Yes* | Required when `LLM_PROVIDER=groq` |
 | `OPENAI_API_KEY` | Yes* | Required when `LLM_PROVIDER=openai` |
 | `LLM_PROVIDER` | No | `groq` (default) or `openai` |
-| `LLM_MODEL` | No | Default: `llama-3.3-70b-versatile` |
+| `LLM_MODEL` | No | Default: `openai/gpt-oss-120b` |
 | `VECTOR_STORE_PROVIDER` | No | `qdrant` (default), `chroma`, or `faiss` |
-| `QDRANT_URL` | No | Default: `http://qdrant:6333` (Docker) or `http://localhost:6333` |
+| `QDRANT_URL` | No | Default: `http://localhost:6333` |
 | `CACHE_PROVIDER` | No | `redis` (default) or `in_memory` |
-| `REDIS_URL` | No | Default: `redis://redis:6379/0` |
+| `REDIS_URL` | No | Default: `redis://localhost:6379/0` |
 | `GOOGLE_CLIENT_ID` | No | Enables Google OAuth login |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` | No | Required for OTP email verification |
 | `SQL_DIALECT` | No | `postgresql` (default) or `mysql` |
@@ -292,8 +277,6 @@ backend/
 │   └── versions/                # 17 migrations: initial schema → schema catalog,
 │                                 # refresh tokens, multi-connections, dashboards,
 │                                 # scheduled queries, metrics catalog, and more
-├── Dockerfile                  # Multi-stage build (python:3.13-slim)
-├── docker-compose.yml          # API + Qdrant + Redis
 ├── pyproject.toml              # Hatchling build, Ruff, Mypy, pytest config
 └── .env.example                # Full environment variable reference
 ```
@@ -353,15 +336,15 @@ Structured JSON logs are written by `structlog` to stdout and an optional weekly
 
 The app is designed to work with [Supabase](https://supabase.com) managed PostgreSQL out of the box. Use the **Direct connection** string from *Project Settings → Database* as `DATABASE_URL` and `HISTORY_DATABASE_URL`.
 
-### Production Docker
+### Running in production
 
 ```bash
-# Build
-docker build -t nl2sql-backend .
-
-# Run with your .env
-docker run --env-file .env -p 8000:8000 nl2sql-backend
+pip install -e "."
+alembic upgrade head
+uvicorn nl_to_sql.api.app:create_app --factory --host 0.0.0.0 --port 8000 --workers 4
 ```
+
+Run behind a reverse proxy (e.g. Nginx) with TLS termination.
 
 ### Scaling
 

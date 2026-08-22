@@ -402,7 +402,7 @@ async def visualize_schema(
     _validate_schema_name(schema_name)
     try:
         schema_def = await db_client.reflect_schema(schema_name=schema_name)
-        return cast(dict[str, Any], schema_def)
+        return schema_def
     except Exception as exc:
         logger.error("Schema visualization failed", error=str(exc))
         raise HTTPException(

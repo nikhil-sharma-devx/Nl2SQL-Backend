@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -407,7 +407,7 @@ class ScheduledQueryService:
             )
             if stale_ids:
                 await db.execute(
-                    ScheduledQueryRun.__table__.delete().where(ScheduledQueryRun.id.in_(stale_ids))
+                    delete(ScheduledQueryRun).where(ScheduledQueryRun.id.in_(stale_ids))
                 )
                 await db.commit()
         return run

@@ -14,7 +14,7 @@ from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 logger = structlog.get_logger(__name__)
 
 
-class HuggingFaceEmbedder(IEmbedder):  # type: ignore[misc]
+class HuggingFaceEmbedder(IEmbedder):
     """Embeds text using HuggingFace's sentence-transformers library.
 
     SOLID:

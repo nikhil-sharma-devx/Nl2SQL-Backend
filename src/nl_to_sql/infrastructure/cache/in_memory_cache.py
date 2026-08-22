@@ -12,7 +12,7 @@ logger = structlog.get_logger(__name__)
 _SENTINEL = object()
 
 
-class InMemoryCache(ICache):  # type: ignore[misc]
+class InMemoryCache(ICache):
     """Thread-safe, TTL-aware in-memory cache.
 
     Designed for development and testing. No external dependencies.

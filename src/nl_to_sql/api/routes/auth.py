@@ -636,13 +636,13 @@ async def reset_password(
         user.otp_failed_attempts = 0
 
         # Check password history (last 3 passwords)
-        result = await db_sess.execute(
+        history_result = await db_sess.execute(
             select(PasswordHistory)
             .where(PasswordHistory.user_id == user.id)
             .order_by(PasswordHistory.created_at.desc())
             .limit(3)
         )
-        history = result.scalars().all()
+        history = history_result.scalars().all()
 
         for record in history:
             if verify_password(body.new_password, record.hashed_password):
@@ -712,13 +712,13 @@ async def change_password(
             )
 
         # Check last 3 passwords
-        result = await db_sess.execute(
+        history_result = await db_sess.execute(
             select(PasswordHistory)
             .where(PasswordHistory.user_id == user.id)
             .order_by(PasswordHistory.created_at.desc())
             .limit(3)
         )
-        history = result.scalars().all()
+        history = history_result.scalars().all()
         for record in history:
             if verify_password(body.new_password, record.hashed_password):
                 raise HTTPException(

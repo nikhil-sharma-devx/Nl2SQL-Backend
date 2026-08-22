@@ -15,11 +15,11 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class GroqProvider(ILLMProvider):  # type: ignore[misc]
+class GroqProvider(ILLMProvider):
     """Concrete LLM provider backed by Groq (ultra-fast inference).
 
-    Groq supports Llama 3 and Mixtral models, ideal for low-latency SQL
-    generation without OpenAI costs.
+    Groq hosts open-weight models (e.g. OpenAI's GPT-OSS), ideal for
+    low-latency SQL generation without OpenAI costs.
 
     SOLID:
       L — Drop-in replacement for OpenAIProvider.
@@ -29,7 +29,7 @@ class GroqProvider(ILLMProvider):  # type: ignore[misc]
     def __init__(
         self,
         api_key: str,
-        model: str = "llama3-70b-8192",
+        model: str = "openai/gpt-oss-120b",
         timeout: float = 30.0,
         max_retries: int = 2,
     ) -> None:

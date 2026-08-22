@@ -1,6 +1,6 @@
 """Fine-tuning routes — POST/GET /api/v1/fine-tuning/*."""
 
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -145,7 +145,7 @@ async def check_job_status(
     Returns:
         Job status information.
     """
-    return cast(dict[str, Any], await fine_tuning_service.check_job_status(job_id))
+    return await fine_tuning_service.check_job_status(job_id)
 
 
 @router.get("/jobs")
@@ -168,7 +168,7 @@ async def list_jobs(
         if exc.status_code == 400:
             return []
         raise
-    return cast(list[dict[str, Any]], await fine_tuning_service.list_jobs(limit=limit))
+    return await fine_tuning_service.list_jobs(limit=limit)
 
 
 @router.post("/deploy", response_model=DeployResponse)

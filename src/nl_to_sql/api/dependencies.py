@@ -241,7 +241,8 @@ async def get_request_orchestrator(
 
     if credentials is not None:
         try:
-            from nl_to_sql.config.container import ApplicationContainer, create_llm_provider
+            from nl_to_sql.config.container import ApplicationContainer
+            from nl_to_sql.config.factories import create_llm_provider
             from nl_to_sql.services.auth_service import decode_access_token
 
             token_data = decode_access_token(credentials.credentials)

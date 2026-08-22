@@ -1,7 +1,8 @@
 """SQL generator — builds prompts and calls the LLM to produce SQL."""
 
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, ParamSpec, TypeVar
 
 import structlog
 
@@ -11,17 +12,18 @@ from nl_to_sql.core.models.sql_result import GeneratedSQL, LLMResponse, Validati
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.services.feedback_learner import FeedbackLearner
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 # Langfuse — graceful no-op when not installed or not enabled
 try:
     from langfuse.decorators import langfuse_context as _lf_ctx
-    from langfuse.decorators import observe as _lf_observe
+    from langfuse.decorators import observe as _real_lf_observe
 
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
-
-    def _lf_observe(*_a: Any, **_kw: Any) -> Any:
-        return lambda f: f
+    _real_lf_observe = None
 
     class _lf_ctx:  # type: ignore[no-redef]  # noqa: N801
         @staticmethod
@@ -31,6 +33,18 @@ except ImportError:
         @staticmethod
         def update_current_trace(**_: Any) -> None:
             pass
+
+
+def _lf_observe(*args: Any, **kwargs: Any) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Typed wrapper around langfuse's ``observe`` decorator (no-op if unavailable)."""
+
+    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
+        if _real_lf_observe is None:
+            return func
+        wrapped: Callable[_P, _R] = _real_lf_observe(*args, **kwargs)(func)
+        return wrapped
+
+    return decorator
 
 
 logger = structlog.get_logger(__name__)
@@ -62,8 +76,12 @@ Your job is to convert a natural language question into a valid, efficient, and 
    Never generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, or TRUNCATE.
 3. Use ONLY the tables and columns provided in the schema context.
 4. Ensure all referenced tables and columns exist in the schema.
-5. If the question cannot be answered using the schema, return exactly:
-   -- CANNOT_ANSWER
+5. If the question cannot be answered using the schema, you MUST still return
+   the full JSON object described under OUTPUT below — set its "sql" field to
+   exactly the string "-- CANNOT_ANSWER" (nothing else in that field), leave
+   "follow_up_questions" as an empty list, and set "suggested_chart" to
+   {"type": "none", "x_axis": "", "y_axis": ""}. Never reply with raw text
+   instead of the JSON object, even in this case.
 
 ---
 
@@ -204,6 +222,13 @@ A: {
   "sql": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM order_items oi JOIN products p ON oi.product_id = p.product_id GROUP BY p.category ORDER BY total_revenue DESC;",
   "follow_up_questions": ["Which category sold the highest quantity of items?", "What is the revenue trend over the last 6 months?", "Who are the top buyers in the most profitable category?"],
   "suggested_chart": {"type": "pie", "x_axis": "category", "y_axis": "total_revenue"}
+}
+
+Q: What is the average satisfaction rating for our mobile app? (no such table/column exists in the schema)
+A: {
+  "sql": "-- CANNOT_ANSWER",
+  "follow_up_questions": [],
+  "suggested_chart": {"type": "none", "x_axis": "", "y_axis": ""}
 }
 """
 

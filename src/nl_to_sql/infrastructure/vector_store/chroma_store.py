@@ -1,7 +1,7 @@
 """ChromaDB vector store — implements IVectorStore."""
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import chromadb
 import structlog
@@ -14,7 +14,7 @@ from nl_to_sql.core.models.schema import SchemaChunk
 logger = structlog.get_logger(__name__)
 
 
-class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
+class ChromaVectorStore(IVectorStore):
     """Persistent ChromaDB backed vector store for schema chunks.
 
     Stores and retrieves SchemaChunk objects using cosine similarity.
@@ -104,7 +104,7 @@ class ChromaVectorStore(IVectorStore):  # type: ignore[misc]
                         self._collection.upsert,
                         ids=ids,
                         documents=documents,
-                        embeddings=embeddings,
+                        embeddings=cast(Any, embeddings),
                         metadatas=metadatas,  # type: ignore[arg-type]
                     )
                     logger.info("Upserted schema chunks", count=len(chunks))

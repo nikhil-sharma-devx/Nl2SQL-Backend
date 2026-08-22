@@ -1,4 +1,4 @@
-﻿"""Vector retriever â€” performs ANN search in the vector database.
+"""Vector retriever — performs ANN search in the vector database.
 
 Uses the query embedding to find the top-K most similar schema chunks
 via approximate nearest-neighbour (ANN) search with cosine similarity.
@@ -16,9 +16,9 @@ class VectorRetriever:
     """Retrieves schema chunks via dense vector similarity search.
 
     SOLID:
-      S â€” Only performs vector search; does not embed or rerank.
-      D â€” Depends on IVectorStore abstraction.
-      L â€” Returns list[SchemaChunk] â€” same shape as BM25Retriever.
+      S — Only performs vector search; does not embed or rerank.
+      D — Depends on IVectorStore abstraction.
+      L — Returns list[SchemaChunk] — same shape as BM25Retriever.
     """
 
     def __init__(
@@ -93,7 +93,7 @@ class VectorRetriever:
             count=len(chunks),
             tables=[c.table_name for c in chunks],
         )
-        return chunks  # type: ignore[no-any-return]
+        return chunks
 
     async def get_schema_for_tables(
         self,
@@ -122,10 +122,10 @@ class VectorRetriever:
             requested=len(table_names),
             found=len(chunks),
         )
-        return chunks  # type: ignore[no-any-return]
+        return chunks
 
     async def get_all_table_names(self, connection_id: str | None = None) -> list[str]:
         """Return all table names in the vector store (optionally per user)."""
-        return await self._vector_store.get_all_table_names(  # type: ignore[no-any-return]
+        return await self._vector_store.get_all_table_names(
             connection_id=connection_id
         )

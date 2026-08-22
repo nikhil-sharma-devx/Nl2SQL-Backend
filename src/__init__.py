@@ -1,1 +1,0 @@
-"""src namespace package."""

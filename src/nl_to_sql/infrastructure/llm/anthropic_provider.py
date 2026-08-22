@@ -13,7 +13,7 @@ from nl_to_sql.core.models.sql_result import LLMResponse
 logger = structlog.get_logger(__name__)
 
 
-class AnthropicProvider(ILLMProvider):  # type: ignore[misc]
+class AnthropicProvider(ILLMProvider):
     """Concrete LLM provider backed by Anthropic (Claude models).
 
     SOLID:

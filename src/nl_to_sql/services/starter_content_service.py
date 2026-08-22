@@ -38,6 +38,8 @@ already caused once, unguarded, on this same kind of call site).
 """
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -56,7 +58,7 @@ MARKER_DASHBOARDS = "seeded_dashboards"
 
 # ── Seed content — grounded in customer / sales_order's real columns ─────────
 
-_TEMPLATE_SEED: list[dict] = [
+_TEMPLATE_SEED: list[dict[str, Any]] = [
     {
         "name": "Customer Retention Analysis",
         "description": (
@@ -107,7 +109,7 @@ _TEMPLATE_SEED: list[dict] = [
     },
 ]
 
-_METRIC_SEED: list[dict] = [
+_METRIC_SEED: list[dict[str, Any]] = [
     {
         "name": "Active Customers",
         "description": "Count of customers currently marked active.",
@@ -130,7 +132,7 @@ _METRIC_SEED: list[dict] = [
 
 # schedule_text accepts a literal 5-field cron expression, passed straight
 # through by ``cron_utils.parse_schedule_text`` (see that module's docstring).
-_SCHEDULE_SEED: list[dict] = [
+_SCHEDULE_SEED: list[dict[str, Any]] = [
     {
         "name": "Daily Active Customer Report",
         "nl_prompt": "How many active customers do we have today?",
@@ -151,7 +153,7 @@ _SCHEDULE_SEED: list[dict] = [
     },
 ]
 
-_DASHBOARD_SEED: list[dict] = [
+_DASHBOARD_SEED: list[dict[str, Any]] = [
     {
         "name": "Executive Overview",
         "widgets": [

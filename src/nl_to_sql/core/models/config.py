@@ -40,7 +40,7 @@ class LLMConfigUpdate(BaseModel):
         min_length=1,
         max_length=200,
         description="Model name to use with the provider.",
-        examples=["llama3-70b-8192"],
+        examples=["openai/gpt-oss-120b"],
     )
 
 

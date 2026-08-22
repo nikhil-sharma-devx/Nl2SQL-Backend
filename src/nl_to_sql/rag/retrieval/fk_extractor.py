@@ -1,4 +1,4 @@
-﻿"""FK Relationship Extractor â€” Expands retrieved tables via foreign keys.
+"""FK Relationship Extractor — Expands retrieved tables via foreign keys.
 
 When the retriever returns a set of tables, this service:
 1. Extracts all foreign key relationships from those tables
@@ -7,11 +7,11 @@ When the retriever returns a set of tables, this service:
 4. Returns the expanded set of tables
 
 This prevents hallucination when the LLM needs to JOIN to related tables
-(like products â†’ categories) but the retriever only returned products.
+(like products → categories) but the retriever only returned products.
 
 SOLID:
-  S â€” Only handles FK relationship expansion
-  D â€” Depends on vector store and schema metadata
+  S — Only handles FK relationship expansion
+  D — Depends on vector store and schema metadata
 """
 from typing import Any
 
@@ -76,7 +76,7 @@ class FKRelationshipExtractor:
     def _extract_fk_from_chunks(self, chunks: list[SchemaChunk]) -> dict[str, set[str]]:
         """Extract FK relationships from chunk content.
 
-        Parses chunk text to find FK patterns like "[FK â†’ categories.category_id]"
+        Parses chunk text to find FK patterns like "[FK → categories.category_id]"
 
         Args:
             chunks: Schema chunks to analyze.
@@ -93,7 +93,7 @@ class FKRelationshipExtractor:
             related_tables: set[str] = set()
 
             # Find all FK references in chunk content
-            fk_pattern = r'\[FK\s*â†’\s*([a-zA-Z_][a-zA-Z0-9_]*)\.'
+            fk_pattern = r'\[FK\s*→\s*([a-zA-Z_][a-zA-Z0-9_]*)\.'
             matches = re.findall(fk_pattern, chunk.content)
 
             for ref_table in matches:
@@ -171,7 +171,7 @@ class FKRelationshipExtractor:
                 tables=[c.table_name for c in expanded],
             )
 
-            return expanded  # type: ignore[no-any-return]
+            return expanded
 
         except Exception as exc:
             logger.warning(
