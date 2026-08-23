@@ -104,10 +104,8 @@ class Settings(BaseSettings):
     )
 
     # ── Embeddings ───────────────────────────────────────────────────────────
-    embedding_provider: Literal["huggingface", "gemini"] = "huggingface"
-    embedding_model: str = "all-MiniLM-L6-v2"
-    embedding_dimensions: int = 384
-    huggingface_model: str = "all-MiniLM-L6-v2"
+    embedding_provider: Literal["gemini"] = "gemini"
+    embedding_dimensions: int = 768
     gemini_embedding_model: str = "models/text-embedding-004"
     # Separate key for embeddings — falls back to gemini_api_key if not set
     gemini_embedding_api_key: str = Field(
@@ -388,28 +386,14 @@ class Settings(BaseSettings):
                     "jwt_secret_key has insufficient entropy. Use a randomly generated value of at least 32 characters."
                 )
 
-        if self.embedding_provider == "huggingface":
-            # P6 — extend this map when swapping in a higher-quality embedding
-            # model. Switching the model requires a full re-ingestion so the
-            # stored vectors match the new model's dimensionality.
-            hf_model_dims = {
-                "all-MiniLM-L6-v2": 384,
-                "all-mpnet-base-v2": 768,
-                "BAAI/bge-small-en-v1.5": 384,
-                "BAAI/bge-base-en-v1.5": 768,
-                "BAAI/bge-large-en-v1.5": 1024,
-                "intfloat/e5-base-v2": 768,
-                "intfloat/e5-large-v2": 1024,
-                "jinaai/jina-embeddings-v3": 1024,
-            }
-            if self.huggingface_model in hf_model_dims:
-                self.embedding_dimensions = hf_model_dims[self.huggingface_model]
-        elif self.embedding_provider == "gemini":
-            gemini_model_dims = {
-                "models/text-embedding-004": 768,
-            }
-            if self.gemini_embedding_model in gemini_model_dims:
-                self.embedding_dimensions = gemini_model_dims[self.gemini_embedding_model]
+        # Extend this map when swapping in a higher-quality Gemini embedding
+        # model. Switching the model requires a full re-ingestion so the
+        # stored vectors match the new model's dimensionality.
+        gemini_model_dims = {
+            "models/text-embedding-004": 768,
+        }
+        if self.gemini_embedding_model in gemini_model_dims:
+            self.embedding_dimensions = gemini_model_dims[self.gemini_embedding_model]
 
         # Switch CACHE_PROVIDER to redis in production by default if not explicitly provided
         if self.app_env == "production" and "cache_provider" not in self.model_fields_set:
