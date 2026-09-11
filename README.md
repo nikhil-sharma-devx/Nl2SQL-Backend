@@ -62,7 +62,7 @@ A production-grade REST API that converts plain-English questions into validated
 | API framework | FastAPI + Uvicorn | Async, application factory pattern |
 | Language | Python 3.13 | |
 | LLM | Groq · OpenAI · Anthropic · Gemini | Pluggable via `LLM_PROVIDER` env var |
-| Embeddings | Gemini `text-embedding-004` (API) | No local model or PyTorch — all compute runs on Google's servers |
+| Embeddings | Gemini `gemini-embedding-001` (API) | No local model or PyTorch — all compute runs on Google's servers |
 | Vector store | Qdrant (default) · Chroma · FAISS | Swappable via `VECTOR_STORE_PROVIDER` |
 | Keyword search | BM25 (rank-bm25) | Hybrid retrieval alongside vector search |
 | Database | PostgreSQL via async SQLAlchemy | Supabase recommended for managed hosting |
