@@ -104,13 +104,18 @@ class Settings(BaseSettings):
     )
 
     # ── Embeddings ───────────────────────────────────────────────────────────
-    embedding_provider: Literal["gemini"] = "gemini"
-    embedding_dimensions: int = 768
-    gemini_embedding_model: str = "models/text-embedding-004"
+    embedding_provider: Literal["gemini", "cohere"] = "gemini"
+    embedding_dimensions: int = 3072
+    gemini_embedding_model: str = "models/gemini-embedding-001"
     # Separate key for embeddings — falls back to gemini_api_key if not set
     gemini_embedding_api_key: str = Field(
         default="", description="Gemini API key for embeddings; falls back to gemini_api_key"
     )
+    # Cohere: free trial keys are rate-limited rather than token-capped, and
+    # its /v2/embed endpoint batches many texts per request (unlike Gemini's
+    # one-text-per-call limit) — a lighter option with no SDK beyond httpx.
+    cohere_embedding_model: str = "embed-english-v3.0"
+    cohere_api_key: str = Field(default="", description="Required when embedding_provider=cohere")
 
     @property
     def resolved_gemini_embedding_api_key(self) -> str:
@@ -386,13 +391,25 @@ class Settings(BaseSettings):
                     "jwt_secret_key has insufficient entropy. Use a randomly generated value of at least 32 characters."
                 )
 
-        # Extend this map when swapping in a higher-quality Gemini embedding
-        # model. Switching the model requires a full re-ingestion so the
+        # Extend these maps when swapping in a different embedding model.
+        # Switching provider or model requires a full re-ingestion (and,
+        # since dimensions usually differ, a fresh Qdrant collection name —
+        # an existing collection keeps its original vector size) so the
         # stored vectors match the new model's dimensionality.
         gemini_model_dims = {
             "models/text-embedding-004": 768,
+            "models/gemini-embedding-001": 3072,
         }
-        if self.gemini_embedding_model in gemini_model_dims:
+        cohere_model_dims = {
+            "embed-english-v3.0": 1024,
+            "embed-multilingual-v3.0": 1024,
+            "embed-english-light-v3.0": 384,
+            "embed-multilingual-light-v3.0": 384,
+            "embed-v4.0": 1536,
+        }
+        if self.embedding_provider == "cohere" and self.cohere_embedding_model in cohere_model_dims:
+            self.embedding_dimensions = cohere_model_dims[self.cohere_embedding_model]
+        elif self.embedding_provider == "gemini" and self.gemini_embedding_model in gemini_model_dims:
             self.embedding_dimensions = gemini_model_dims[self.gemini_embedding_model]
 
         # Switch CACHE_PROVIDER to redis in production by default if not explicitly provided

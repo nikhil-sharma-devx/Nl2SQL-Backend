@@ -1,11 +1,19 @@
 """Schema Monitor — Automatically detects and ingests schema changes."""
 import asyncio
+import time
 from typing import Any
 
 import structlog
 from sqlalchemy import text
 
 logger = structlog.get_logger(__name__)
+
+# After a failed re-ingestion (e.g. an exhausted embedding-provider quota), a
+# failed re-ingestion never updates _last_schema_hash, so every subsequent
+# check_interval tick sees the same tables as "changed" and retries — without
+# this cooldown that means hammering an already-failing embedding API forever
+# at the regular polling cadence instead of backing off.
+_FAILURE_COOLDOWN_SECONDS = 1800.0
 
 
 class SchemaMonitor:
@@ -36,6 +44,7 @@ class SchemaMonitor:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._last_schema_hash: dict[str, str] = {}
+        self._last_failure_at: float | None = None
         self._logger = logger.bind(component="SchemaMonitor")
 
     async def start(self) -> None:
@@ -70,11 +79,23 @@ class SchemaMonitor:
         self._logger.info("Schema monitor stopped")
 
     async def _monitor_loop(self) -> None:
-        """Main monitoring loop."""
+        """Main monitoring loop.
+
+        Sleeps *before* the first check rather than checking immediately on
+        start. This monitor's own _last_schema_hash always starts empty (it's
+        purely in-memory, unlike the startup workflow's hash which is
+        persisted in the vector store), so an immediate first check always
+        sees "everything is new" — on every restart, independent of and
+        unsynchronized with app.py's own startup auto-ingest (a different
+        advisory lock, no shared state), it used to re-embed the entire
+        schema a second time right after startup ingestion had just done the
+        same thing. It also defeated AUTO_INGEST_SCHEMA_ON_STARTUP=false,
+        which was supposed to mean "don't ingest at boot."
+        """
         while self._running:
             try:
-                await self._check_for_changes()
                 await asyncio.sleep(self._check_interval)
+                await self._check_for_changes()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -104,6 +125,15 @@ class SchemaMonitor:
                     changed_tables.append(table_name)
 
             if changed_tables:
+                if self._last_failure_at is not None:
+                    remaining = _FAILURE_COOLDOWN_SECONDS - (time.monotonic() - self._last_failure_at)
+                    if remaining > 0:
+                        self._logger.info(
+                            "Skipping re-ingestion — cooling down after a recent failure",
+                            retry_in_seconds=round(remaining),
+                        )
+                        return
+
                 self._logger.info(
                     "Schema changes detected",
                     changed_tables=changed_tables,
@@ -117,6 +147,12 @@ class SchemaMonitor:
                 try:
                     await self._reingest_schema()
                     self._last_schema_hash = current_hash
+                    self._last_failure_at = None
+                except Exception:
+                    # _reingest_schema already logged the failure — just start
+                    # the cooldown. _last_schema_hash stays stale on purpose so
+                    # the change is retried (after cooldown) instead of lost.
+                    self._last_failure_at = time.monotonic()
                 finally:
                     await self._release_lock()
 
@@ -234,3 +270,8 @@ class SchemaMonitor:
             )
         except Exception as exc:
             self._logger.error("Schema re-ingestion failed", error=str(exc))
+            # Re-raise so the caller does NOT record this schema as in-sync —
+            # swallowing it here previously updated _last_schema_hash on a
+            # failed attempt, permanently masking the change until the DB
+            # schema drifted again (i.e. a failure looked identical to success).
+            raise
