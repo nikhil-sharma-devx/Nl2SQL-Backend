@@ -1,5 +1,6 @@
 """RAG infrastructure factories — embedder and vector store selection."""
 from nl_to_sql.config.settings import Settings
+from nl_to_sql.core.exceptions import ConfigurationError
 from nl_to_sql.core.interfaces.i_embedder import IEmbedder
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.infrastructure.vector_store.chroma_store import ChromaVectorStore
@@ -58,10 +59,27 @@ def build_semantic_cache_store(settings: Settings) -> IVectorStore:
 
 
 def build_embedder(settings: Settings) -> IEmbedder:
-    """Factory: choose the embedder from settings."""
-    from nl_to_sql.infrastructure.embeddings.gemini_embedder import GeminiEmbedder
-    return GeminiEmbedder(
-        api_key=settings.resolved_gemini_embedding_api_key,
-        model=settings.gemini_embedding_model,
-        dimensions=settings.embedding_dimensions,
+    """Factory: choose the embedder from settings.
+
+    Raises:
+        ConfigurationError: If ``settings.embedding_provider`` isn't a
+            recognized provider name (mirrors create_llm_provider's contract —
+            never silently default to one specific provider).
+    """
+    if settings.embedding_provider == "cohere":
+        from nl_to_sql.infrastructure.embeddings.cohere_embedder import CohereEmbedder
+        return CohereEmbedder(
+            api_key=settings.cohere_api_key,
+            model=settings.cohere_embedding_model,
+            dimensions=settings.embedding_dimensions,
+        )
+    if settings.embedding_provider == "gemini":
+        from nl_to_sql.infrastructure.embeddings.gemini_embedder import GeminiEmbedder
+        return GeminiEmbedder(
+            api_key=settings.resolved_gemini_embedding_api_key,
+            model=settings.gemini_embedding_model,
+            dimensions=settings.embedding_dimensions,
+        )
+    raise ConfigurationError(
+        f"Unknown embedding provider '{settings.embedding_provider}'. Available: ['gemini', 'cohere']"
     )
