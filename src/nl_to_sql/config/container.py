@@ -28,9 +28,11 @@ from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.rag.retrieval.retrieval_chain import RetrievalChain
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
+from nl_to_sql.services.account_reactivation_service import AccountReactivationService
 from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.analytics_service import AnalyticsService
 from nl_to_sql.services.api_key_service import APIKeyService
+from nl_to_sql.services.auth_service import send_email
 from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.connection_service import ConnectionService
@@ -61,6 +63,16 @@ from nl_to_sql.services.starter_content_service import StarterContentService
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
 from nl_to_sql.services.workspace_service import WorkspaceService
+
+
+def _admin_page_url(settings: Settings) -> str:
+    """Link to the Admin page for notification emails (frontend origin + /admin).
+
+    Uses the first CORS origin (the frontend) when set, else APP_BASE_URL;
+    empty when neither is configured (emails then name the page instead).
+    """
+    base = (settings.cors_origin_list[:1] or [settings.app_base_url])[0].rstrip("/")
+    return f"{base}/admin" if base else ""
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
@@ -395,6 +407,15 @@ class ApplicationContainer(containers.DeclarativeContainer):
     admin_service = providers.Singleton(
         AdminService,
         session_factory=session_service.provided._session_factory,
+        setup_token=config.provided.admin_setup_token,
+    )
+
+    # Deactivated accounts: blocked sign-ins, reactivation requests, decisions.
+    account_reactivation_service = providers.Singleton(
+        AccountReactivationService,
+        session_factory=session_service.provided._session_factory,
+        send_email=providers.Object(send_email),
+        admin_page_url=providers.Callable(_admin_page_url, config),
     )
 
     # Teams: membership + roles + connection sharing (role rules live here only).

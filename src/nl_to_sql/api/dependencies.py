@@ -16,6 +16,7 @@ from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
+from nl_to_sql.services.account_reactivation_service import AccountReactivationService
 from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.api_key_service import APIKeyService
 from nl_to_sql.services.auth_throttle_service import AuthThrottleService
@@ -225,6 +226,11 @@ def get_admin_service() -> AdminService:
     return _get_container().admin_service()
 
 
+def get_account_reactivation_service() -> AccountReactivationService:
+    """Dependency: AccountReactivationService (blocked sign-ins + reactivation requests)."""
+    return _get_container().account_reactivation_service()
+
+
 def get_workspace_service() -> WorkspaceService:
     """Dependency: WorkspaceService (teams, roles, connection sharing)."""
     return _get_container().workspace_service()
@@ -417,14 +423,29 @@ async def require_admin(
 ) -> UserPublic:
     """FastAPI dependency: requires the current user to be an admin.
 
-    Admins are defined via the ADMIN_EMAILS setting (comma-separated list);
-    ``current_user.is_admin`` is stamped by ``auth_service.to_user_public`` at
-    login/token-validation time. Returns the user on success; raises HTTP 403
+    Admin status is the ``users.is_admin`` column, read on every token
+    validation (cached up to ``_AUTH_CACHE_TTL``; granting/revoking clears the
+    target's cache entries). Returns the user on success; raises HTTP 403
     otherwise.
     """
     if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required.",
+        )
+    return current_user
+
+
+async def require_owner(
+    current_user: UserPublic = Security(require_admin),
+) -> UserPublic:
+    """FastAPI dependency: requires the platform owner (``users.is_owner``).
+
+    The owner is the only account allowed to revoke admin access.
+    """
+    if not current_user.is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the owner can remove admins.",
         )
     return current_user

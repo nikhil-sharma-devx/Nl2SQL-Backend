@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from nl_to_sql.api.dependencies import (
+    get_account_reactivation_service,
     get_auth_throttle,
     get_current_user,
     get_session_service,
@@ -35,6 +36,10 @@ from nl_to_sql.infrastructure.database.models import (
     RefreshToken,
     User,
     UserLoginSession,
+)
+from nl_to_sql.services.account_reactivation_service import (
+    MAX_MESSAGE_LENGTH,
+    AccountReactivationService,
 )
 from nl_to_sql.services.auth_service import (
     create_access_token,
@@ -242,6 +247,7 @@ async def login(
     body: UserLogin,
     session_service: ChatSessionService = Depends(get_session_service),
     throttle: AuthThrottleService = Depends(get_auth_throttle),
+    reactivation: AccountReactivationService = Depends(get_account_reactivation_service),
 ) -> TokenResponse:
     """Validate credentials and return a JWT.
 
@@ -275,10 +281,11 @@ async def login(
     await throttle.record_login_success(body.email)
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is deactivated",
-        )
+        # Valid password, deactivated account: no tokens. 403
+        # ACCOUNT_DEACTIVATED (+ reactivation token) or REACTIVATION_PENDING;
+        # the owner is emailed about the attempt.
+        await _record_login(user.id, session_service._session_factory, request, outcome="failed")
+        await reactivation.deny_sign_in(user.id, user.email)
 
     if not user.is_verified and user.auth_provider == "email":
         raise HTTPException(
@@ -305,6 +312,7 @@ async def google_auth(
     request: Request,
     body: GoogleAuthRequest,
     session_service: ChatSessionService = Depends(get_session_service),
+    reactivation: AccountReactivationService = Depends(get_account_reactivation_service),
 ) -> TokenResponse:
     """Verify a Google ID token and login/register the user.
 
@@ -360,12 +368,53 @@ async def google_auth(
         await db_sess.commit()
         await db_sess.refresh(user)
 
+    if not user.is_active:
+        # Same as password login: a deactivated account never gets tokens.
+        await _record_login(user.id, session_service._session_factory, request, outcome="failed")
+        await reactivation.deny_sign_in(user.id, user.email)
+
     session_id = await _record_login(
         user.id, session_service._session_factory, request, outcome="success"
     )
     logger.info("User authenticated via Google", email=user.email)
     return await _issue_token_response(
         user, session_service._session_factory, session_id=session_id
+    )
+
+
+class ReactivationRequestCreate(BaseModel):
+    token: str = Field(
+        min_length=1, max_length=2048, description="From the ACCOUNT_DEACTIVATED sign-in error"
+    )
+    message: str | None = Field(default=None, max_length=MAX_MESSAGE_LENGTH)
+
+
+class ReactivationRequestAck(BaseModel):
+    status: str
+    message: str
+
+
+@router.post(
+    "/reactivation-request",
+    response_model=ReactivationRequestAck,
+    status_code=status.HTTP_201_CREATED,
+    summary="A deactivated account asks the admins to reactivate it",
+)
+@limiter.limit("5/hour")
+async def request_reactivation(
+    request: Request,
+    body: ReactivationRequestCreate,
+    reactivation: AccountReactivationService = Depends(get_account_reactivation_service),
+) -> ReactivationRequestAck:
+    """Public, but only usable with the short-lived token a deactivated
+    account receives after signing in with valid credentials."""
+    from nl_to_sql.services.auth_service import decode_reactivation_token
+
+    user_id = decode_reactivation_token(body.token)
+    await reactivation.create_request(user_id, body.message)
+    return ReactivationRequestAck(
+        status="pending",
+        message="Request sent. An admin will review it and you'll get an email with the result.",
     )
 
 

@@ -7,7 +7,7 @@ from typing import Literal
 
 import structlog
 from dotenv import load_dotenv
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = structlog.get_logger(__name__)
@@ -349,13 +349,14 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     # ── Admin ─────────────────────────────────────────────────────────────────
-    admin_emails: str = Field(
-        default="", description="Comma-separated email addresses granted admin access"
+    # Who is an admin lives on users.is_admin / users.is_owner (migration 0024).
+    # This token only unlocks the one-time setup page that claims the first
+    # owner while none exists; empty disables setup entirely. Once an owner
+    # exists the token is inert, so it can be removed from .env afterwards.
+    admin_setup_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="One-time token for POST /api/v1/admin/setup (claims the owner account)",
     )
-
-    @property
-    def admin_email_list(self) -> list[str]:
-        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
     @field_validator("groq_api_key")
     @classmethod

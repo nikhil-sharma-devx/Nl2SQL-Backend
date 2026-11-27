@@ -160,6 +160,32 @@ class WorkspaceConflictError(NLToSQLBaseError):
     """Raised when the user is already a member of the workspace."""
 
 
+# ── Platform admin Errors ────────────────────────────────────────────────────
+
+
+class AdminPermissionError(NLToSQLBaseError):
+    """Raised when an admin action needs more than the caller has: removing an
+    admin is owner-only, and the one-time setup needs the right setup token."""
+
+
+class AccountDeactivatedError(NLToSQLBaseError):
+    """Raised when a deactivated account signs in with valid credentials.
+
+    ``detail`` carries a short-lived reactivation token the sign-in page uses
+    to send a reactivation request to the admins.
+    """
+
+
+class ReactivationPendingError(AccountDeactivatedError):
+    """A deactivated account signed in, but its reactivation request is
+    already waiting for an admin — nothing more for the sign-in page to send."""
+
+
+class AdminConflictError(NLToSQLBaseError):
+    """Raised when the action no longer applies: setup already done, or the
+    target is already (or no longer) an admin in a way the action can't change."""
+
+
 class ConnectionTestError(NLToSQLBaseError):
     """Raised when a database connection cannot be reached during a test."""
 

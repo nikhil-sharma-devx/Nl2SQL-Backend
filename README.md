@@ -45,7 +45,7 @@ This file is the reference for backend configuration and the API. The repo-level
 - **Evidence-based confidence** — every answer is rated high / medium / low from what the pipeline observed (validation, self-correction, execution, empty results), with plain-English reasons
 - **Sample values (opt-in)** — index the distinct values of small categorical columns so filters use exact literals (`RAG_SAMPLE_VALUES_ENABLED`)
 - **Teams (workspaces)** — share a database connection, its certified metrics and a workspace glossary; three roles (admin / editor / member); people join by accepting an in-app invitation
-- **Platform admin** — accounts in `ADMIN_EMAILS` can see every user, read and delete any chat, delete connections and teams, and deactivate accounts
+- **Platform admin** — accounts with `users.is_admin` can see every user, read and delete any chat, delete connections and teams, and deactivate accounts
 - **Per-connection access policy** — allow-list the tables the AI may use and restrict sensitive columns; enforced on every execution path
 - **Glossary / Business Dictionary** — per-user term definitions automatically injected into query prompts (token-budget-aware)
 - **Query Templates** — parameterized NL + SQL templates with `{{placeholder}}` variables; render endpoint substitutes values at call time
@@ -189,7 +189,7 @@ ReDoc: `http://localhost:8000/redoc`
 | `AUTO_INGEST_SCHEMA_ON_STARTUP` | No | Reflect and ingest schema from live DB on boot (default: `true`) |
 | `SEMANTIC_CACHE_ENABLED` | No | Cache near-identical questions (default: `true`) |
 | `EMBEDDING_PROVIDER` | No | `gemini` (default) or `cohere` — set the matching API key |
-| `ADMIN_EMAILS` | No | Comma-separated emails with platform-admin access: every user's chats, connections and teams (`/admin`), deactivation, Training, fine-tuning, RAG settings, model switching. Set it in production too |
+| `ADMIN_SETUP_TOKEN` | No | One-time token for the **Set up admin** page (`/setup-admin`): while no owner exists, a signed-in user who enters it becomes the owner. Inert once an owner exists; empty disables setup. Admin status itself lives in `users.is_admin` / `users.is_owner` |
 | `TARGET_DB_READONLY` / `TARGET_STATEMENT_TIMEOUT_MS` | No | Generated SQL runs read-only (default `true`) with a timeout (default `30000`) — keep these on |
 | `RAG_SAMPLE_VALUES_ENABLED` | No | Index distinct values of small categorical columns on the next schema sync (default `false`). Reads row data, honours the access policy, skips columns whose names look personal |
 | `LANGFUSE_SECRET_KEY` | No | LangFuse secret key — enables LLM trace logging |
@@ -378,7 +378,11 @@ Role checks live only in `services/workspace_service.py`. Non-members get `404` 
 
 The policy is applied by wrapping the connection's client (`infrastructure/database/policy_client.py`) wherever a client is resolved, so interactive queries, previews, dashboards and scheduled queries all inherit it.
 
-**Platform admins.** Accounts listed in `ADMIN_EMAILS` get `/api/v1/admin/*`: list and search every account, read any user's chats (questions, SQL, answers, up to 50 result rows per message), delete chats / connections / teams, and deactivate or reactivate accounts (deactivation revokes the user's sessions and refresh tokens; every request re-checks `is_active`). Deletions and deactivations are written to the application log; reading a user's data is not logged, and there is no audit table. Connection strings and API keys are never returned.
+**Platform admins.** Accounts with `users.is_admin = true` get `/api/v1/admin/*`: list and search every account, read any user's chats (questions, SQL, answers, up to 50 result rows per message), delete chats / connections / teams, and deactivate or reactivate accounts (deactivation revokes the user's sessions and refresh tokens; every request re-checks `is_active`). Deletions and deactivations are written to the application log; reading a user's data is not logged, and there is no audit table. Connection strings and API keys are never returned.
+
+**Who is an admin.** `users.is_admin` marks admins; `users.is_owner` marks the single owner (a partial unique index allows only one). The first owner is claimed once on the **Set up admin** page (`/setup-admin`, `POST /api/v1/admin/setup`) with `ADMIN_SETUP_TOKEN`; it only works while no owner exists. After that, any admin can make another active, verified account an admin from **Admin → Admins** (`POST /api/v1/admin/admins`), but only the owner can remove an admin (`DELETE /api/v1/admin/admins/{user_id}`) or deactivate an admin's account. The owner can't be removed.
+
+**Deactivated accounts.** A deactivated account never gets a session: a valid password or Google sign-in answers `403 ACCOUNT_DEACTIVATED` (or `403 REACTIVATION_PENDING` when a request is already waiting) and no tokens are issued. The owner is emailed about the attempt (at most once per account per hour, per worker). The `ACCOUNT_DEACTIVATED` error carries a 30-minute reactivation token (`details.detail`) that the sign-in page uses to send `POST /api/v1/auth/reactivation-request` with an optional message; every active admin is emailed. Admins approve (reactivates the account) or reject on **Admin → Requests** (`/api/v1/admin/reactivation-requests`), and the user is emailed the outcome. Reactivating the account directly from the Users tab also closes its pending request. Requests live in `account_reactivation_requests` (one pending per user). Emails need the SMTP settings; without them the flow still works, but nothing is sent.
 
 Create or reset an admin account (the password is read from the environment, never the command line):
 
@@ -386,7 +390,7 @@ Create or reset an admin account (the password is read from the environment, nev
 ADMIN_PASSWORD='…at least 12 characters…' python scripts/create_admin.py admin@example.com
 ```
 
-The account also needs to be in `ADMIN_EMAILS` — the script warns if it isn't.
+The account is marked `is_admin`; add `--owner` to also make it the owner (refused if another account already is).
 
 ---
 

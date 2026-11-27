@@ -15,6 +15,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
+    text,
     true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -54,9 +56,31 @@ class User(Base):
     # Cleared when they select one of their own connections. Access is
     # re-verified on every read, so a revoked share falls back to the default.
     active_shared_connection_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Platform admin (the /admin page). Admins can grant admin to others; only
+    # the single owner can revoke it. Managed in services/admin_service.py —
+    # nowhere else writes these. Seeded by migration 0024 or the one-time
+    # setup page (POST /api/v1/admin/setup).
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    is_owner: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        # At most one owner. A partial unique index (Postgres and SQLite both
+        # support it) makes a racing second setup fail instead of minting two.
+        Index(
+            "uq_users_single_owner",
+            "is_owner",
+            unique=True,
+            postgresql_where=text("is_owner"),
+            sqlite_where=text("is_owner"),
+        ),
     )
 
     # Relationships
@@ -981,3 +1005,39 @@ class ScheduledQueryRun(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     schedule = relationship("ScheduledQuery", back_populates="runs")
+
+
+class AccountReactivationRequest(Base):
+    """A deactivated user's request to be reactivated, decided by an admin.
+
+    Created from the sign-in page after a deactivated account signs in with
+    valid credentials. At most one ``pending`` request per user (partial unique
+    index). Approving reactivates the account; rejecting leaves it deactivated
+    and lets the user ask again later. Managed only by
+    services/account_reactivation_service.py.
+    """
+
+    __tablename__ = "account_reactivation_requests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="pending")  # pending|approved|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_reactivation_requests_status_created", "status", "created_at"),
+        Index(
+            "uq_reactivation_requests_one_pending",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )

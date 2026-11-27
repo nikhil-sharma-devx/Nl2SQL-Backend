@@ -18,22 +18,15 @@ from nl_to_sql.core.models.auth import TokenData, UserPublic
 logger = structlog.get_logger(__name__)
 
 
-def is_admin_email(email: str) -> bool:
-    """Whether ``email`` is in the ADMIN_EMAILS allowlist (case-insensitive)."""
-    return email.lower() in get_settings().admin_email_list
-
-
 def to_user_public(user: Any) -> UserPublic:
-    """Build a ``UserPublic`` from an ORM ``User`` row, stamping ``is_admin``.
+    """Build a ``UserPublic`` from an ORM ``User`` row.
 
-    The single place every route constructs a ``UserPublic`` so admin status
-    is derived consistently everywhere instead of only inside ``require_admin``
-    — the frontend needs it too, to hide admin-only controls up front rather
-    than rendering them for every user and failing on submit.
+    The single place every route constructs a ``UserPublic``. ``is_admin`` and
+    ``is_owner`` come straight from the ``users`` row (managed only by
+    ``AdminService``) — the frontend needs them to hide admin-only controls up
+    front rather than rendering them for every user and failing on submit.
     """
-    public = UserPublic.model_validate(user)
-    public.is_admin = is_admin_email(public.email)
-    return public
+    return UserPublic.model_validate(user)
 
 
 # ── Password Utilities ────────────────────────────────────────────────────────
@@ -97,11 +90,53 @@ def decode_access_token(token: str) -> TokenData:
     """
     settings = get_settings()
     payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    # Access tokens carry no ``typ``; any typed token (e.g. a reactivation
+    # token) is for one narrow purpose and must never authenticate a request.
+    if payload.get("typ") not in (None, "access"):
+        raise JWTError("Not an access token")
     user_id: str = payload.get("sub", "")
     email: str = payload.get("email", "")
     if not user_id or not email:
         raise JWTError("Missing subject or email in token")
     return TokenData(user_id=user_id, email=email, session_id=payload.get("sid"))
+
+
+# ── Reactivation Token (deactivated accounts) ──────────────────────────────────
+
+_REACTIVATION_TYP = "reactivation"
+_REACTIVATION_TTL = timedelta(minutes=30)
+
+
+def create_reactivation_token(user_id: str) -> str:
+    """Short-lived token proving the holder just signed in to a deactivated account.
+
+    Issued only after the password / Google credential checked out, so it lets
+    that person — and nobody guessing emails — ask an admin for reactivation.
+    It has no ``email`` claim and a ``typ``, so ``decode_access_token`` rejects it.
+    """
+    settings = get_settings()
+    now = datetime.now(UTC)
+    payload = {"sub": user_id, "typ": _REACTIVATION_TYP, "iat": now, "exp": now + _REACTIVATION_TTL}
+    return str(jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm))
+
+
+def decode_reactivation_token(token: str) -> str:
+    """Return the user id in a valid reactivation token.
+
+    Raises:
+        AuthenticationError: if the token is invalid, expired or another type.
+    """
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError as exc:
+        raise AuthenticationError(
+            "This request link has expired. Sign in again to send it."
+        ) from exc
+    user_id = payload.get("sub", "")
+    if payload.get("typ") != _REACTIVATION_TYP or not user_id:
+        raise AuthenticationError("This request link has expired. Sign in again to send it.")
+    return str(user_id)
 
 
 # ── Refresh Token Utilities ────────────────────────────────────────────────────
@@ -177,6 +212,43 @@ def generate_otp() -> str:
     import secrets
 
     return "".join(str(secrets.randbelow(10)) for _ in range(6))
+
+
+async def send_email(to_email: str, subject: str, body: str) -> None:
+    """Send a plain-text email with the configured SMTP settings.
+
+    Never raises: a missing SMTP config or a send failure is logged, so callers
+    can fire it in the background without failing the request.
+    """
+    from email.message import EmailMessage
+
+    import aiosmtplib
+
+    settings = get_settings()
+    if not settings.smtp_username or not settings.smtp_password:
+        logger.warning(
+            "SMTP credentials not configured — email not sent.", to_email=to_email, subject=subject
+        )
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.smtp_from_email
+    msg["To"] = to_email
+    msg.set_content(body)
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=settings.smtp_host,
+            port=settings.smtp_port,
+            username=settings.smtp_username,
+            password=settings.smtp_password,
+            use_tls=False,
+            start_tls=settings.smtp_port == 587,
+        )
+        logger.info("Email sent", to_email=to_email, subject=subject)
+    except Exception as exc:
+        logger.error("Failed to send email", error=str(exc), to_email=to_email, subject=subject)
 
 
 async def send_otp_email(to_email: str, otp: str) -> None:
