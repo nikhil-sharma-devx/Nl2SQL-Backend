@@ -105,6 +105,10 @@ class RagConfigResponse(BaseModel):
     parent_child_chunking_enabled: bool = Field(
         ..., description="P4 — column-level child chunks at ingest (needs re-ingest)."
     )
+    sample_values_enabled: bool = Field(
+        default=False,
+        description="Index distinct values of low-cardinality columns (applies on next sync).",
+    )
     hyde_enabled: bool = Field(..., description="P5 — HyDE hypothetical-document embedding.")
     adaptive_top_k_enabled: bool = Field(..., description="P7 — adaptive retrieval top_k.")
     adaptive_top_k_min: int = Field(..., description="Lower bound for adaptive top_k.")
@@ -134,6 +138,7 @@ class RagConfigUpdate(BaseModel):
     few_shot_retrieval_enabled: bool | None = None
     few_shot_top_k: int | None = Field(default=None, ge=0, le=10)
     parent_child_chunking_enabled: bool | None = None
+    sample_values_enabled: bool | None = None
     hyde_enabled: bool | None = None
     adaptive_top_k_enabled: bool | None = None
     adaptive_top_k_min: int | None = Field(default=None, ge=1, le=50)

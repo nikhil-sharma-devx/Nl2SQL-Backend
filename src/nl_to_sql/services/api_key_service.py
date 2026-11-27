@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
 
 from nl_to_sql.infrastructure.crypto import CURRENT_KDF_VERSION, VersionedFernet
 from nl_to_sql.infrastructure.database.models import Base, UserAPIKey
+from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args
 
 logger = structlog.get_logger(__name__)
 
@@ -51,6 +52,7 @@ class APIKeyService:
                 pool_size=5,
                 max_overflow=10,
                 pool_recycle=300,
+                connect_args=asyncpg_connect_args(self._database_url),
             )
             self._session_factory = async_sessionmaker(
                 self._engine,

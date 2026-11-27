@@ -16,6 +16,10 @@ def main() -> None:
         log_level=settings.app_log_level.lower(),
         workers=1 if settings.app_env == "development" else 4,
         log_config=None,
+        # Trust X-Forwarded-For only from these proxy IPs so request.client.host
+        # is the real visitor — per-IP rate limits depend on it.
+        proxy_headers=True,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
     )
 
 

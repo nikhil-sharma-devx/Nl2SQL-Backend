@@ -8,7 +8,9 @@ URL-encodes special characters in passwords.
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import quote
+from uuid import uuid4
 
 # Driver tokens that are already async-capable -> leave the URL as-is.
 _ASYNC_DRIVERS = ("+asyncpg", "+aiomysql", "+asyncmy")
@@ -145,6 +147,39 @@ def to_async_database_url(url: str) -> str:
             normalized = normalized.replace("sslmode=", "ssl=")
 
     return normalized
+
+
+def _unique_prepared_statement_name() -> str:
+    return f"__asyncpg_{uuid4().hex}__"
+
+
+def asyncpg_connect_args(url: str, **extra: Any) -> dict[str, Any]:
+    """Build ``connect_args`` for ``create_async_engine`` that work behind a pooler.
+
+    Transaction-mode poolers (Supabase Supavisor on :6543, PgBouncer) hand each
+    transaction to whichever server connection is free, so asyncpg's default
+    statement names (``__asyncpg_stmt_a__``…) collide across clients and fail
+    with ``DuplicatePreparedStatementError`` / ``InvalidSQLStatementNameError``.
+    Disabling both statement caches and giving every prepared statement a
+    unique name is the configuration SQLAlchemy documents for this case. It is
+    harmless on a direct connection or a session-mode pooler, so it is applied
+    to every asyncpg engine rather than guessed from the port.
+
+    Args:
+        url: The (already async-normalised) database URL.
+        **extra: Additional driver connect args (e.g. ``command_timeout``).
+
+    Returns:
+        The connect-args dict; only ``extra`` for non-asyncpg drivers.
+    """
+    if "+asyncpg" not in url.lower():
+        return dict(extra)
+    return {
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": _unique_prepared_statement_name,
+        **extra,
+    }
 
 
 def sanitize_url_for_logging(url: str) -> str:

@@ -127,6 +127,18 @@ class SchemaCatalogService:
         loader = SchemaLoader(db_client)
         schema = await loader.load(schema_name)
         new_hash = SchemaIngestionService.compute_schema_hash(schema)
+        # Optional: attach distinct values of small categorical columns. Runs
+        # through the request's scoped client, so the access policy applies.
+        from nl_to_sql.config.settings import get_settings
+
+        if get_settings().rag_sample_values_enabled:
+            from nl_to_sql.rag.ingestion.sample_values import (
+                apply_sample_values,
+                profile_sample_values,
+            )
+
+            values = await profile_sample_values(schema, db_client, schema.dialect or "postgresql")
+            schema = apply_sample_values(schema, values)
         now = datetime.utcnow()
         live_names = {t.name for t in schema.tables}
         new_tables: list[str] = []

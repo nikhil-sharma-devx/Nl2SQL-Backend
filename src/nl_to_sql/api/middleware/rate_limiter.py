@@ -31,4 +31,22 @@ def _get_user_or_ip_key(request: Request) -> str:
 # PUT /api/v1/config/rate-limit in api/routes/config.py, which mutates
 # `limiter.enabled` directly instead of leaving this initial value as the
 # only place it's ever set.
-limiter = Limiter(key_func=_get_user_or_ip_key, enabled=get_settings().rate_limit_enabled)
+def _build_limiter() -> Limiter:
+    settings = get_settings()
+    use_redis = settings.cache_provider == "redis"
+    return Limiter(
+        key_func=_get_user_or_ip_key,
+        enabled=settings.rate_limit_enabled,
+        # Sliding window: a fixed window lets a client fire 2x the limit across
+        # a window boundary (e.g. 5 at 0:59 + 5 at 1:00) — bad for auth routes.
+        strategy="moving-window",
+        # Redis makes counters shared across workers/pods; in-memory otherwise.
+        storage_uri=settings.redis_url if use_redis else "memory://",
+        # If Redis is down, keep limiting in-process instead of failing requests.
+        in_memory_fallback_enabled=use_redis,
+        swallow_errors=use_redis,
+        headers_enabled=False,  # Retry-After is set by the envelope handler
+    )
+
+
+limiter = _build_limiter()

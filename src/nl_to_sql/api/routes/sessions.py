@@ -1,7 +1,7 @@
 """Session routes — manage chat sessions (scoped to authenticated user)."""
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -34,6 +34,10 @@ class AddMessageRequest(BaseModel):
     intent_type: str | None = None
     suggested_chart: dict[str, Any] | None = None
     follow_up_questions: list[str] = Field(default_factory=list)
+    answer: str | None = Field(default=None, max_length=2000)
+    assumptions: list[str] = Field(default_factory=list, max_length=10)
+    confidence: Literal["high", "medium", "low"] | None = None
+    confidence_reasons: list[str] = Field(default_factory=list, max_length=10)
 
 
 class SessionSummary(BaseModel):
@@ -79,6 +83,21 @@ class SessionMessagePayload(BaseModel):
     intent_type: str | None = None
     suggested_chart: dict[str, Any] | None = None
     follow_up_questions: list[Any] = Field(default_factory=list)
+    answer: str | None = None
+    assumptions: list[str] = Field(default_factory=list)
+    confidence: str | None = None
+    confidence_reasons: list[str] = Field(default_factory=list)
+
+
+def _trust_fields(trust: Any) -> dict[str, Any]:
+    """Unpack the stored ``chat_messages.trust`` JSON (absent on older rows)."""
+    t = trust if isinstance(trust, dict) else {}
+    return {
+        "answer": t.get("answer"),
+        "assumptions": list(t.get("assumptions") or []),
+        "confidence": t.get("confidence"),
+        "confidence_reasons": list(t.get("confidence_reasons") or []),
+    }
 
 
 class SessionMessageOut(BaseModel):
@@ -176,7 +195,8 @@ async def get_session(
             raise HTTPException(status_code=404, detail="Session not found")
 
         # Security: ensure session belongs to current user (or is legacy/unowned)
-        if session.user_id and session.user_id != current_user.id:
+        # Fail closed: an ownerless (legacy) session belongs to nobody, not everybody.
+        if session.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Session not found")
 
         return {
@@ -205,6 +225,7 @@ async def get_session(
                         "intent_type": msg.intent_type,
                         "suggested_chart": msg.suggested_chart,
                         "follow_up_questions": msg.follow_up_questions or [],
+                        **_trust_fields(getattr(msg, "trust", None)),
                     },
                 }
                 for msg in session.messages
@@ -242,7 +263,8 @@ async def add_session_message(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if session.user_id and session.user_id != current_user.id:
+        # Fail closed: an ownerless (legacy) session belongs to nobody, not everybody.
+        if session.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Session not found")
 
         # Map request body to a QueryResponse
@@ -262,6 +284,10 @@ async def add_session_message(
             intent_type=body.intent_type,
             suggested_chart=body.suggested_chart,
             follow_up_questions=body.follow_up_questions,
+            answer=body.answer,
+            assumptions=body.assumptions,
+            confidence=body.confidence,
+            confidence_reasons=body.confidence_reasons,
         )
 
         message = await session_service.add_message(
@@ -290,6 +316,7 @@ async def add_session_message(
                 "intent_type": message.intent_type,
                 "suggested_chart": message.suggested_chart,
                 "follow_up_questions": message.follow_up_questions or [],
+                **_trust_fields(getattr(message, "trust", None)),
             },
         }
     except HTTPException:
@@ -327,7 +354,8 @@ async def delete_session(
     """Delete a chat session."""
     # Verify ownership before deletion
     session = await session_service.get_session(session_id)
-    if session and session.user_id and session.user_id != current_user.id:
+    # Fail closed: an ownerless (legacy) session belongs to nobody, not everybody.
+    if session and session.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
     await session_service.delete_session(session_id)
     return {"message": "Session deleted successfully"}

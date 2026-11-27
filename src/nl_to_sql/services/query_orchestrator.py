@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 import structlog
 
+from nl_to_sql.core.access_policy import AccessPolicy
 from nl_to_sql.core.exceptions import DatabaseExecutionError, RateLimitError, SQLGenerationError
 
 _P = ParamSpec("_P")
@@ -54,8 +55,11 @@ from nl_to_sql.infrastructure.cache.cache_metrics import (
     get_cache_metrics,
     get_stage_metrics,
 )
+from nl_to_sql.infrastructure.database.policy_client import PolicyEnforcingClient
 from nl_to_sql.infrastructure.observability.tracing import set_span_attribute, trace_function
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
+from nl_to_sql.services.answer_confidence import assess_confidence
+from nl_to_sql.services.answer_summarizer import AnswerSummarizer
 from nl_to_sql.services.correction_detector import CorrectionDetector
 from nl_to_sql.services.query_classifier import QueryClassifier
 from nl_to_sql.services.query_history import QueryHistoryService
@@ -180,6 +184,7 @@ class QueryOrchestrator:
         query_rewriter: QueryRewriter | None = None,
         correction_detector: CorrectionDetector | None = None,
         conversation_max_turns: int = 6,
+        answer_summarizer: AnswerSummarizer | None = None,
     ) -> None:
         self._retriever = retriever
         self._generator = generator
@@ -212,6 +217,91 @@ class QueryOrchestrator:
         # Multi-turn conversation memory: cap how many recent turns are fed to
         # generation verbatim (older turns compressed/dropped by PromptBudget).
         self._conversation_max_turns = conversation_max_turns
+        # Plain-English answer from executed rows (opt-out per user, since it
+        # is the one path that sends result rows — not just schema — to the LLM).
+        self._answer_summarizer = answer_summarizer
+
+    @property
+    def _cache_scope(self) -> str | None:
+        """Cache isolation key: the connection, plus a fingerprint of its access
+        policy. Changing the policy changes the scope, so answers cached under
+        the old rules are never served (exact or semantic) under the new ones."""
+        policy = self._policy
+        if self._connection_id is None or policy.is_empty:
+            return self._connection_id
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "allowed": sorted(policy.allowed_tables) if policy.allowed_tables is not None else None,
+                    "restricted": {t: sorted(c) for t, c in sorted(policy.restricted.items())},
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()[:12]
+        return f"{self._connection_id}#policy={fingerprint}"
+
+    @property
+    def _policy(self) -> AccessPolicy:
+        """The active connection's access policy (empty when none is set)."""
+        if isinstance(self._db_client, PolicyEnforcingClient):
+            return self._db_client.policy
+        return AccessPolicy()
+
+    async def _enrich(
+        self,
+        response: QueryResponse,
+        *,
+        generated_sql: Any,
+        execute_requested: bool,
+        empty_result_warning: str | None,
+        model_override: str | None,
+        answer_summary: bool,
+        log: Any,
+    ) -> QueryResponse:
+        """Add assumptions, a confidence assessment, and a plain-English answer.
+
+        Shared by ``run()`` and ``run_stream()`` (and the cached-execute path)
+        so the three response builders can't drift apart.
+        """
+        assumptions = list(getattr(generated_sql, "assumptions", None) or response.assumptions)
+        attempts = int(getattr(generated_sql, "attempt", 1) or 1)
+        assessment = assess_confidence(
+            sql=response.sql,
+            is_valid=response.is_valid,
+            validation_errors=response.validation_errors,
+            attempts=attempts,
+            retrieved_tables=response.retrieved_tables,
+            used_tables=response.used_tables,
+            execute_requested=execute_requested,
+            execution_result=response.execution_result,
+            execution_error=response.execution_error,
+            empty_result_warning=empty_result_warning,
+            assumptions=assumptions,
+        )
+        answer: str | None = None
+        if (
+            answer_summary
+            and self._answer_summarizer is not None
+            and response.is_valid
+            and response.execution_result
+        ):
+            answer = await self._answer_summarizer.summarize(
+                response.question, response.execution_result, model_override=model_override
+            )
+        log.info(
+            "Answer enrichment",
+            confidence=assessment.level,
+            assumptions=len(assumptions),
+            answered=answer is not None,
+        )
+        return response.model_copy(
+            update={
+                "assumptions": assumptions,
+                "confidence": assessment.level,
+                "confidence_reasons": assessment.reasons,
+                "answer": answer,
+            }
+        )
 
     @_lf_observe(name="nl2sql.pipeline", capture_input=False)
     @trace_function("pipeline.run")
@@ -222,6 +312,7 @@ class QueryOrchestrator:
         model_override: str | None = None,
         custom_instructions: str | None = None,
         certified_metrics: str | None = None,
+        answer_summary: bool = True,
     ) -> QueryResponse:
         """Execute the full pipeline for a single query request.
 
@@ -341,6 +432,16 @@ class QueryOrchestrator:
                 # fall back to inference from the freshly executed rows.
                 suggested_chart=_effective_chart(cached.get("suggested_chart"), execution_result),
                 follow_up_questions=cached.get("follow_up_questions", []),
+                assumptions=cached.get("assumptions", []),
+            )
+            response = await self._enrich(
+                response,
+                generated_sql=None,
+                execute_requested=True,
+                empty_result_warning=None,
+                model_override=model_override,
+                answer_summary=answer_summary,
+                log=log,
             )
 
             # Save to chat session if session_id provided
@@ -389,7 +490,7 @@ class QueryOrchestrator:
                     message=message,
                     intent_type=classification,
                     query_complexity=0,
-                    prompt_version="v1.0",
+                    prompt_version=self.PROMPT_VERSION,
                     retrieval_method="none",
                     response_time_ms=response_time_ms,
                 )
@@ -636,13 +737,22 @@ class QueryOrchestrator:
             cached=False,
             intent_type=intent_type,
             query_complexity=query_complexity,
-            prompt_version="v1.0",
+            prompt_version=self.PROMPT_VERSION,
             retrieval_method="vector",
             response_time_ms=response_time_ms,
             stage_timings=stage_timings,
             suggested_chart=generated_sql.suggested_chart,
             follow_up_questions=generated_sql.follow_up_questions,
             message=empty_result_warning,
+        )
+        response = await self._enrich(
+            response,
+            generated_sql=generated_sql,
+            execute_requested=request.execute,
+            empty_result_warning=empty_result_warning,
+            model_override=model_override,
+            answer_summary=answer_summary,
+            log=log,
         )
         log.info("Pipeline stage timings", **{f"{k}_ms": v for k, v in stage_timings.items()})
         for _stage, _ms in stage_timings.items():
@@ -670,23 +780,28 @@ class QueryOrchestrator:
                 log.warning("Failed to save to chat session — skipping", error=str(sess_exc))
 
         if generated_sql.validation.is_valid:
-            try:
-                # Update exact cache
-                cache_key = self._make_cache_key(
-                    request.question, dialect, self._connection_id, self.PROMPT_VERSION
-                )
-                await self._cache.set(cache_key, response.model_dump())
-
-                # Update semantic cache
-                if hasattr(self._cache, "set_semantic"):
-                    await self._cache.set_semantic(
-                        request.question, response.model_dump(), connection_id=self._connection_id
+            # Cache only under a resolved scope (see _cache_lookup).
+            if self._cache_scope is not None:
+                try:
+                    # Update exact cache
+                    cache_key = self._make_cache_key(
+                        request.question, dialect, self._cache_scope, self.PROMPT_VERSION
                     )
-            except Exception as cache_exc:
-                log.warning("Failed to cache response — skipping", error=str(cache_exc))
+                    await self._cache.set(cache_key, response.model_dump())
+
+                    # Update semantic cache
+                    if hasattr(self._cache, "set_semantic"):
+                        await self._cache.set_semantic(
+                            request.question, response.model_dump(), connection_id=self._cache_scope
+                        )
+                except Exception as cache_exc:
+                    log.warning("Failed to cache response — skipping", error=str(cache_exc))
 
             # Collect training data for self-learning — non-critical
-            if self._training_data_service is not None:
+            # Fail closed: a row with no connection_id is treated as SHARED and
+            # offered as a few-shot example to every user, so an unresolved
+            # request must not create one from this user's question and SQL.
+            if self._training_data_service is not None and self._connection_id is not None:
                 try:
                     # Build schema context from retrieved tables
                     schema_context = (
@@ -738,6 +853,11 @@ class QueryOrchestrator:
         else:
             candidate_chunks = await self._retriever.retrieve(question, top_k=intent_top_k)
             all_known_tables = []
+        # Access policy layer 1: the model never sees disallowed tables or
+        # restricted columns, and the table selector can't pick them.
+        policy = self._policy
+        candidate_chunks = policy.filter_chunks(candidate_chunks)
+        all_known_tables = policy.filter_table_names(all_known_tables)
         candidate_tables = list({c.table_name for c in candidate_chunks})
         stage_timings["retrieval"] = int((time.perf_counter() - _stage_start) * 1000)
         log.info(
@@ -777,6 +897,8 @@ class QueryOrchestrator:
                 except Exception as fk_exc:
                     log.warning("FK expansion failed, using grounded chunks", error=str(fk_exc))
 
+            # FK expansion can pull a related table back in — filter again.
+            final_chunks = policy.filter_chunks(final_chunks)
             retrieved_tables = list({c.table_name for c in final_chunks})
             log.info(
                 "Schema grounding complete",
@@ -1121,7 +1243,7 @@ class QueryOrchestrator:
             clarification_prompt=clarification_prompt,
             intent_type="clarification",
             query_complexity=0,
-            prompt_version="v1.0",
+            prompt_version=self.PROMPT_VERSION,
             retrieval_method="none",
             response_time_ms=int((time.time() - start_time) * 1000),
         )
@@ -1140,7 +1262,7 @@ class QueryOrchestrator:
         return response
 
     # Bump this string whenever the prompt template changes to auto-invalidate old cache entries.
-    PROMPT_VERSION = "v1.0"
+    PROMPT_VERSION = "v1.1"  # v1.1: assumptions in the generator contract
 
     async def _cache_lookup(self, question: str, dialect: str) -> tuple[dict[str, Any] | None, str]:
         """Two-layer cache lookup: L1 exact key → L2 semantic similarity.
@@ -1152,14 +1274,20 @@ class QueryOrchestrator:
             (cached_payload_or_None, layer) where layer ∈ {exact, semantic, miss}.
         """
         layer: CacheLayer = "miss"
+        if self._cache_scope is None:
+            # No resolved user/connection (unauthenticated, or the connection
+            # lookup failed). An unscoped cache would be shared by everyone in
+            # that state, so neither read nor write it.
+            get_cache_metrics().record(layer)
+            return None, layer
         cache_key = self._make_cache_key(
-            question, dialect, self._connection_id, self.PROMPT_VERSION
+            question, dialect, self._cache_scope, self.PROMPT_VERSION
         )
         cached = await self._cache.get(cache_key)
         if cached:
             layer = "exact"
         elif hasattr(self._cache, "get_semantic"):
-            cached = await self._cache.get_semantic(question, connection_id=self._connection_id)
+            cached = await self._cache.get_semantic(question, connection_id=self._cache_scope)
             if cached:
                 layer = "semantic"
         get_cache_metrics().record(layer)
@@ -1309,6 +1437,7 @@ class QueryOrchestrator:
         model_override: str | None = None,
         custom_instructions: str | None = None,
         certified_metrics: str | None = None,
+        answer_summary: bool = True,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming version of run() — yields chunks as they're generated.
 
@@ -1372,7 +1501,7 @@ class QueryOrchestrator:
                         message=message,
                         intent_type=classification,
                         query_complexity=0,
-                        prompt_version="v1.0",
+                        prompt_version=self.PROMPT_VERSION,
                         retrieval_method="none",
                         response_time_ms=response_time_ms,
                     )
@@ -1594,13 +1723,22 @@ class QueryOrchestrator:
                 cached=False,
                 intent_type=intent_type,
                 query_complexity=query_complexity,
-                prompt_version="v1.0",
+                prompt_version=self.PROMPT_VERSION,
                 retrieval_method="vector",
                 response_time_ms=response_time_ms,
                 stage_timings=stage_timings,
                 suggested_chart=_effective_chart(generated_sql.suggested_chart, execution_result),
                 follow_up_questions=generated_sql.follow_up_questions,
                 message=_stream_empty_warning,
+            )
+            response = await self._enrich(
+                response,
+                generated_sql=generated_sql,
+                execute_requested=request.execute,
+                empty_result_warning=_stream_empty_warning,
+                model_override=model_override,
+                answer_summary=answer_summary,
+                log=log,
             )
             log.info(
                 "Pipeline stage timings (stream)",
@@ -1619,18 +1757,18 @@ class QueryOrchestrator:
                 except Exception as sess_exc:
                     log.warning("Failed to save to chat session in stream", error=str(sess_exc))
 
-            # Cache if valid
-            if validation.is_valid:
+            # Cache if valid — and only under a resolved scope (see _cache_lookup)
+            if validation.is_valid and self._cache_scope is not None:
                 try:
                     cache_key = self._make_cache_key(
-                        request.question, dialect, self._connection_id, self.PROMPT_VERSION
+                        request.question, dialect, self._cache_scope, self.PROMPT_VERSION
                     )
                     await self._cache.set(cache_key, response.model_dump())
                     if hasattr(self._cache, "set_semantic"):
                         await self._cache.set_semantic(
                             request.question,
                             response.model_dump(),
-                            connection_id=self._connection_id,
+                            connection_id=self._cache_scope,
                         )
                 except Exception as cache_exc:
                     log.warning("Failed to cache response", error=str(cache_exc))

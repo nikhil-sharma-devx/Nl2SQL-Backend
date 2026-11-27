@@ -93,7 +93,10 @@ class Settings(BaseSettings):
     # ── LLM ─────────────────────────────────────────────────────────────────
     llm_provider: Literal["groq", "openai", "anthropic", "gemini"] = "groq"
     llm_model: str = "openai/gpt-oss-120b"
-    llm_max_tokens: int = 1024
+    # Completion cap. Reasoning models (gpt-oss) spend 200-500 tokens thinking
+    # before the JSON answer, and SQL generation uses half of this on a first
+    # attempt — 1024 truncated answers mid-JSON (Groq json_validate_failed).
+    llm_max_tokens: int = 4096
     llm_temperature: float = 0.0
     groq_api_key: str = Field(default="", description="Required when llm_provider=groq")
     openai_api_key: str = Field(default="", description="Required when llm_provider=openai")
@@ -279,6 +282,12 @@ class Settings(BaseSettings):
     # Default off (opt-in + requires re-ingest).
     rag_parent_child_chunking_enabled: bool = False
 
+    # Sample values — index the distinct values of low-cardinality text columns
+    # (status, plan, region...) so WHERE-clause literals are exact. Reads row
+    # data, honours the connection access policy, skips sensitive-looking
+    # columns. Default off (opt-in + applies on the next schema sync).
+    rag_sample_values_enabled: bool = False
+
     # P5 — HyDE: embed an LLM-generated hypothetical schema description of the
     # answer instead of the raw question. Adds one LLM call per query; default off.
     rag_hyde_enabled: bool = False
@@ -318,6 +327,16 @@ class Settings(BaseSettings):
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 60  # per minute
+    # Per-account / per-IP token buckets on login, OTP send & verify, password
+    # reset (services/auth_throttle_service.py). Uses Redis when
+    # cache_provider == "redis" so limits are shared across workers/pods.
+    auth_throttle_enabled: bool = True
+    # Comma-separated proxy IPs whose X-Forwarded-For is trusted (uvicorn).
+    # Must include the reverse proxy's source IP as seen by the app (e.g. the
+    # Docker bridge gateway 172.17.0.1 when nginx on the host proxies into a
+    # container), otherwise every visitor shares the proxy's IP and per-IP
+    # limits become global. Never "*" unless the app is unreachable directly.
+    forwarded_allow_ips: str = "127.0.0.1"
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Comma-separated allowlist of frontend origins. In production the wildcard

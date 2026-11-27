@@ -58,6 +58,9 @@ class DocBuilder:
                 parts.append("[NOT NULL]")
             if col.description:
                 parts.append(f"— {col.description}")
+            if col.sample_values:
+                shown = ", ".join(f"'{v}'" for v in col.sample_values)
+                parts.append(f"(values: {shown})")
             lines.append(" ".join(parts))
 
         pk_cols = [c.name for c in table.columns if c.primary_key]

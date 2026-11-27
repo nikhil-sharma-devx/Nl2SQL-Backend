@@ -22,7 +22,9 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nl_to_sql.core.exceptions import (
+    AccessPolicyViolationError,
     AuthenticationError,
+    AuthRateLimitError,
     ConnectionNotFoundError,
     ConnectionTestError,
     ConnectionValidationError,
@@ -41,6 +43,10 @@ from nl_to_sql.core.exceptions import (
     SQLGenerationError,
     SQLValidationError,
     TableNotFoundError,
+    WorkspaceConflictError,
+    WorkspaceNotFoundError,
+    WorkspacePermissionError,
+    WorkspaceValidationError,
 )
 
 # NOTE: ordering matters — the handler iterates and stops at the first match, so
@@ -49,14 +55,20 @@ _ERROR_STATUS_MAP: dict[type, int] = {
     AuthenticationError: 401,
     ConnectionNotFoundError: 404,
     ConnectionValidationError: 400,
+    WorkspaceNotFoundError: 404,
+    WorkspacePermissionError: 403,
+    WorkspaceValidationError: 422,
+    WorkspaceConflictError: 409,
     ConnectionTestError: 400,
     TableNotFoundError: 404,
     EmptySchemaError: 503,
     SchemaRetrievalError: 503,
+    AuthRateLimitError: 429,
     RateLimitError: 429,
     LLMProviderError: 502,
     SQLGenerationError: 422,
     SQLValidationError: 422,
+    AccessPolicyViolationError: 403,
     DatabaseExecutionError: 422,
     ScheduleNotFoundError: 404,
     ScheduleValidationError: 400,
@@ -78,14 +90,20 @@ _ERROR_CODE_MAP: dict[type, str] = {
     AuthenticationError: "AUTHENTICATION_FAILED",
     ConnectionNotFoundError: "CONNECTION_NOT_FOUND",
     ConnectionValidationError: "CONNECTION_INVALID",
+    WorkspaceNotFoundError: "WORKSPACE_NOT_FOUND",
+    WorkspacePermissionError: "WORKSPACE_FORBIDDEN",
+    WorkspaceValidationError: "WORKSPACE_INVALID",
+    WorkspaceConflictError: "WORKSPACE_CONFLICT",
     ConnectionTestError: "CONNECTION_TEST_FAILED",
     TableNotFoundError: "TABLE_NOT_FOUND",
     EmptySchemaError: "SCHEMA_NOT_LOADED",
     SchemaRetrievalError: "SCHEMA_RETRIEVAL_FAILED",
+    AuthRateLimitError: "AUTH_RATE_LIMITED",
     RateLimitError: "RATE_LIMIT_EXCEEDED",
     LLMProviderError: "LLM_PROVIDER_ERROR",
     SQLGenerationError: "SQL_GENERATION_FAILED",
     SQLValidationError: "SQL_VALIDATION_FAILED",
+    AccessPolicyViolationError: "ACCESS_POLICY_VIOLATION",
     DatabaseExecutionError: "DATABASE_EXECUTION_FAILED",
     ScheduleNotFoundError: "SCHEDULE_NOT_FOUND",
     ScheduleValidationError: "SCHEDULE_INVALID",
@@ -129,10 +147,12 @@ async def domain_exception_handler(request: Request, exc: Exception) -> JSONResp
     ):
         payload["details"] = {"detail": exc.detail}
 
+    headers: dict[str, str] | None = None
     if isinstance(exc, RateLimitError) and exc.retry_after is not None:
         payload["retry_after"] = exc.retry_after
+        headers = {"Retry-After": str(exc.retry_after)}
 
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(status_code=status_code, content=payload, headers=headers)
 
 
 def _envelope(
@@ -154,6 +174,27 @@ def _envelope(
     if details is not None:
         payload["details"] = details
     return payload
+
+
+async def slowapi_rate_limit_handler(request: Request, exc: Exception) -> JSONResponse:
+    """SlowAPI RateLimitExceeded → canonical envelope + Retry-After.
+
+    SlowAPI's default handler returns a bare ``{"error": "..."}``; this keeps
+    429s in the same shape as every other error. ``retry_after`` is the limit's
+    window length — an upper bound on the wait.
+    """
+    limit = getattr(exc, "limit", None)
+    retry_after = 60
+    try:
+        if limit is not None:
+            retry_after = int(limit.limit.get_expiry())
+    except Exception:
+        pass
+    payload = _envelope(request, "RATE_LIMIT_EXCEEDED", "Too many requests. Try again later.")
+    payload["retry_after"] = retry_after
+    return JSONResponse(
+        status_code=429, content=payload, headers={"Retry-After": str(retry_after)}
+    )
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

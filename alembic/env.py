@@ -89,11 +89,17 @@ def do_run_migrations(connection) -> None:
 async def run_async_migrations() -> None:
     """Run migrations against a live async engine."""
     cfg = config.get_section(config.config_ini_section, {})
-    cfg["sqlalchemy.url"] = _get_async_url()
+    from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args
+
+    async_url = _get_async_url()
+    cfg["sqlalchemy.url"] = async_url
     connectable = async_engine_from_config(
         cfg,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # Unique prepared-statement names so migrations also run through a
+        # transaction-mode pooler (Supabase :6543).
+        connect_args=asyncpg_connect_args(async_url),
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

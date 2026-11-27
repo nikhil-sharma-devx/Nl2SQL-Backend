@@ -16,7 +16,9 @@ from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
 from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
+from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.api_key_service import APIKeyService
+from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.connection_service import ConnectionService
 from nl_to_sql.services.dashboard_service import DashboardService
@@ -29,6 +31,7 @@ from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.schema_doc_service import SchemaDocService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 from nl_to_sql.services.starter_content_service import StarterContentService
+from nl_to_sql.services.workspace_service import WorkspaceService
 
 logger = structlog.get_logger(__name__)
 
@@ -88,6 +91,11 @@ def get_query_history() -> QueryHistoryService:
 def get_session_service() -> ChatSessionService:
     """Dependency: ChatSessionService (for chat session management)."""
     return _get_container().session_service()
+
+
+def get_auth_throttle() -> AuthThrottleService:
+    """Dependency: AuthThrottleService (login / OTP / reset brute-force buckets)."""
+    return _get_container().auth_throttle()
 
 
 def get_export_service() -> ExportService:
@@ -157,9 +165,9 @@ async def resolve_active_connection(
     try:
         conn_svc = container.connection_service()
         connection_id = await conn_svc.get_active_connection_id(token_data.user_id)
-        user_client = await conn_svc.get_client(token_data.user_id, connection_id)
-        if user_client is not None:
-            db_client = user_client
+        # Owned or workspace-shared client, wrapped in the connection's access
+        # policy (table allow-list / restricted columns) when one is set.
+        db_client = await conn_svc.get_scoped_client(token_data.user_id, connection_id, db_client)
         return token_data.user_id, connection_id, db_client
     except Exception as exc:
         logger.warning(
@@ -210,6 +218,16 @@ def get_api_key_service() -> APIKeyService:
 def get_connection_service() -> ConnectionService:
     """Dependency: ConnectionService (per-user multiple BYOD connections)."""
     return _get_container().connection_service()
+
+
+def get_admin_service() -> AdminService:
+    """Dependency: AdminService (cross-user; only for require_admin routes)."""
+    return _get_container().admin_service()
+
+
+def get_workspace_service() -> WorkspaceService:
+    """Dependency: WorkspaceService (teams, roles, connection sharing)."""
+    return _get_container().workspace_service()
 
 
 # Must be defined before get_request_orchestrator — used as a default arg (evaluated at definition time)

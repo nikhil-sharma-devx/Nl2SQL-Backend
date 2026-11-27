@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from nl_to_sql.core.exceptions import SessionNotFoundError
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
-from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
+from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args, to_async_database_url
 
 logger = structlog.get_logger(__name__)
 
@@ -69,7 +69,7 @@ class ChatSessionService:
             max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
-            connect_args={"prepared_statement_cache_size": 0},
+            connect_args=asyncpg_connect_args(database_url),
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,
@@ -282,6 +282,12 @@ class ChatSessionService:
                 follow_up_questions=list(response.follow_up_questions)
                 if response.follow_up_questions
                 else [],
+                trust={
+                    "answer": getattr(response, "answer", None),
+                    "assumptions": list(getattr(response, "assumptions", None) or []),
+                    "confidence": getattr(response, "confidence", None),
+                    "confidence_reasons": list(getattr(response, "confidence_reasons", None) or []),
+                },
                 # Analytics fields
                 intent_type=getattr(response, "intent_type", None),
                 query_complexity=getattr(response, "query_complexity", None),

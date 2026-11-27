@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
     get_active_connection_id,
+    get_connection_service,
     get_current_user,
     get_llm_provider,
     get_metrics_service,
@@ -57,15 +58,28 @@ async def _load_user_instructions(user_id: str, session_factory: Any) -> str | N
     return None
 
 
-async def _load_glossary_context(user_id: str, session_factory: Any, char_limit: int = 500) -> str | None:
-    """Return a compact glossary block to inject into the prompt, capped at char_limit."""
-    from sqlalchemy import select
+async def _load_glossary_context(
+    user_id: str,
+    session_factory: Any,
+    char_limit: int = 500,
+    workspace_id: str | None = None,
+) -> str | None:
+    """Return a compact glossary block to inject into the prompt, capped at char_limit.
+
+    Includes the user's personal terms, plus — when the active connection is
+    shared into a workspace — that workspace's terms, so every member querying
+    it speaks the same business language.
+    """
+    from sqlalchemy import and_, or_, select
 
     from nl_to_sql.infrastructure.database.models import GlossaryEntry
+    scope = and_(GlossaryEntry.user_id == user_id, GlossaryEntry.workspace_id.is_(None))
+    if workspace_id:
+        scope = or_(scope, GlossaryEntry.workspace_id == workspace_id)
     async with session_factory() as db:
         result = await db.execute(
             select(GlossaryEntry)
-            .where(GlossaryEntry.user_id == user_id)
+            .where(scope)
             .order_by(GlossaryEntry.term.asc())
             .limit(50)
         )
@@ -129,6 +143,21 @@ async def _load_favorited_tables_hint(user_id: str, session_factory: Any) -> str
         return None
     names = ", ".join(t.table_name for t in tables)
     return f"User's prioritized tables (prefer these when relevant): {names}"
+
+
+async def _active_workspace_id(user_id: str, connection_id: str | None) -> str | None:
+    """Workspace the active connection is shared into (None when private)."""
+    if not connection_id:
+        return None
+    try:
+        return await get_connection_service().get_workspace_id(user_id, connection_id)
+    except Exception:
+        return None
+
+
+def _answer_summary_on(user_settings: Any) -> bool:
+    """Per-user opt-out for sending result rows to the LLM (default on)."""
+    return bool(getattr(user_settings, "answer_summary_enabled", True)) if user_settings else True
 
 
 def _build_style_hints(user_settings: Any) -> dict[str, Any] | None:
@@ -223,7 +252,11 @@ async def nl_to_sql_query(
 
     custom_instructions, glossary_ctx, tables_hint, certified_metrics = await asyncio.gather(
         _load_user_instructions(current_user.id, session_service._session_factory),
-        _load_glossary_context(current_user.id, session_service._session_factory),
+        _load_glossary_context(
+            current_user.id,
+            session_service._session_factory,
+            workspace_id=await _active_workspace_id(current_user.id, connection_id),
+        ),
         _load_favorited_tables_hint(current_user.id, session_service._session_factory),
         _load_certified_metrics_context(connection_id, metrics_svc),
     )
@@ -237,7 +270,14 @@ async def nl_to_sql_query(
         base = custom_instructions or ""
         custom_instructions = "\n\n".join(filter(None, [base, *extra_parts]))
 
-    response = await orchestrator.run(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions, certified_metrics=certified_metrics)
+    response = await orchestrator.run(
+        body,
+        style_hints=style_hints,
+        model_override=model_override,
+        custom_instructions=custom_instructions,
+        certified_metrics=certified_metrics,
+        answer_summary=_answer_summary_on(user_settings),
+    )
     response = _apply_user_settings(response, user_settings)
     background_tasks.add_task(_record_metrics, current_user.id, response.tokens_used, session_service._session_factory)
     return response
@@ -274,7 +314,14 @@ async def _stream_sql_generation(
     from fastapi.encoders import jsonable_encoder
 
     try:
-        async for chunk in orchestrator.run_stream(body, style_hints=style_hints, model_override=model_override, custom_instructions=custom_instructions, certified_metrics=certified_metrics):
+        async for chunk in orchestrator.run_stream(
+            body,
+            style_hints=style_hints,
+            model_override=model_override,
+            custom_instructions=custom_instructions,
+            certified_metrics=certified_metrics,
+            answer_summary=_answer_summary_on(user_settings),
+        ):
             # Apply user settings and record metrics on the final complete chunk
             if (
                 isinstance(chunk, dict)
@@ -337,7 +384,11 @@ async def nl_to_sql_query_stream(
 
     custom_instructions, glossary_ctx, tables_hint, certified_metrics = await asyncio.gather(
         _load_user_instructions(current_user.id, session_service._session_factory),
-        _load_glossary_context(current_user.id, session_service._session_factory),
+        _load_glossary_context(
+            current_user.id,
+            session_service._session_factory,
+            workspace_id=await _active_workspace_id(current_user.id, connection_id),
+        ),
         _load_favorited_tables_hint(current_user.id, session_service._session_factory),
         _load_certified_metrics_context(connection_id, metrics_svc),
     )

@@ -48,3 +48,7 @@ class GeneratedSQL(BaseModel):
     )
     suggested_chart: dict[str, Any] | None = Field(default=None)
     follow_up_questions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="Plain-English interpretation choices the model made.",
+    )

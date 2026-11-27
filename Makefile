@@ -1,4 +1,4 @@
-.PHONY: help install dev test test-unit test-integration lint format type-check check init-db seed ingest clean
+.PHONY: help install dev test test-unit test-integration lint format type-check check init-db seed ingest eval-sql clean
 
 PYTHON := python
 PIP := pip
@@ -48,6 +48,9 @@ seed: ## Seed the sample e-commerce SQLite database
 
 ingest: ## Ingest DB schema into the vector store
 	$(PYTHON) scripts/ingest_schema.py
+
+eval-sql: ## Run the end-to-end SQL execution-accuracy benchmark (needs LLM key + seeded DB; ARGS="--limit 15")
+	$(PYTHON) scripts/evaluate_sql_accuracy.py $(ARGS)
 
 clean: ## Remove generated caches, coverage output, and frontend build artifacts
 	$(POWERSHELL) " \

@@ -24,7 +24,7 @@ class AnthropicProvider(ILLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-sonnet-4-6",
+        model: str = "claude-sonnet-5-5",
         timeout: float = 30.0,
         max_retries: int = 2,
     ) -> None:
@@ -77,7 +77,9 @@ class AnthropicProvider(ILLMProvider):
             response = await self._client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
+                # Claude 5.x models reject `temperature` (400) and always think;
+                # low effort keeps thinking from eating the max_tokens budget.
+                output_config={"effort": "low"},
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -146,7 +148,7 @@ class AnthropicProvider(ILLMProvider):
             async with self._client.messages.stream(
                 model=self._model,
                 max_tokens=max_tokens,
-                temperature=temperature,
+                output_config={"effort": "low"},
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             ) as stream:

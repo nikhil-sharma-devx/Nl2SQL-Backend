@@ -27,7 +27,7 @@ class OpenAIProvider(ILLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-6-luna",
         timeout: float = 30.0,
         max_retries: int = 2,
     ) -> None:
@@ -68,8 +68,8 @@ class OpenAIProvider(ILLMProvider):
             log.debug("Sending completion request")
             kwargs: dict[str, Any] = {
                 "model": model,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
+                # GPT-5+ models reject `max_tokens` and non-default `temperature`.
+                "max_completion_tokens": max_tokens,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -131,8 +131,7 @@ class OpenAIProvider(ILLMProvider):
             log.debug("Starting streaming completion request")
             stream = await self._client.chat.completions.create(
                 model=self._model,
-                temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

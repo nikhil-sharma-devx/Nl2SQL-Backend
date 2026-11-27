@@ -137,6 +137,28 @@ class QueryResponse(BaseModel):
         description="List of 3 suggested follow-up questions.",
     )
 
+    # Trust & interpretation (for non-technical readers)
+    answer: str | None = Field(
+        default=None,
+        description="One-to-two sentence plain-English answer written from the executed "
+        "rows. Null when the query wasn't executed, returned no rows, or the user "
+        "turned answer summaries off.",
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="Interpretation choices the model made (how vague terms, date "
+        "ranges or metrics were defined), in plain English.",
+    )
+    confidence: Literal["high", "medium", "low"] | None = Field(
+        default=None,
+        description="Evidence-based trust level computed from validation, "
+        "self-correction, execution and empty-result outcomes (not the model's opinion).",
+    )
+    confidence_reasons: list[str] = Field(
+        default_factory=list,
+        description="Plain-English reasons behind a medium or low confidence.",
+    )
+
     # Analytics and intelligence fields
     intent_type: str | None = Field(
         default=None,

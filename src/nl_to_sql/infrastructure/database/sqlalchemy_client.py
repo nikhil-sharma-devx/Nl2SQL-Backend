@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from nl_to_sql.core.exceptions import DatabaseExecutionError
 from nl_to_sql.infrastructure.database.url_utils import (
+    asyncpg_connect_args,
     sanitize_url_for_logging,
     to_async_database_url,
 )
@@ -82,7 +83,7 @@ class AsyncDatabaseClient:
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
-            connect_args={"prepared_statement_cache_size": 0},
+            connect_args=asyncpg_connect_args(database_url),
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,
@@ -122,6 +123,62 @@ class AsyncDatabaseClient:
             except Exception:
                 await sess.rollback()
                 raise
+
+    @asynccontextmanager
+    async def advisory_xact_lock(self, name: str) -> AsyncGenerator[bool, None]:
+        """Hold a PostgreSQL advisory lock for the duration of the ``async with`` block.
+
+        Yields ``True`` when this caller owns the lock (or locking is unavailable,
+        in which case the work proceeds unguarded, as before) and ``False`` when
+        another worker already holds it.
+
+        Uses a *transaction-scoped* lock inside a transaction kept open for the
+        whole block. A session-level ``pg_advisory_lock`` / ``unlock`` pair is
+        unsafe behind a transaction-mode pooler (Supabase :6543): the unlock can
+        land on a different server connection, leaving the lock stuck on a
+        shared backend. The transaction lock is released automatically when the
+        transaction ends, including if this process crashes.
+        """
+        from sqlalchemy import text
+
+        if self._engine.dialect.name != "postgresql":
+            yield True
+            return
+
+        conn = None
+        trans = None
+        acquired = True
+        try:
+            conn = await self._engine.connect()
+            trans = await conn.begin()
+            result = await conn.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:name))"), {"name": name}
+            )
+            acquired = bool(result.scalar())
+        except Exception as exc:
+            logger.warning("Advisory lock unavailable, proceeding without it", lock=name, error=str(exc))
+            await self._close_lock_connection(trans, conn)
+            conn = trans = None
+            acquired = True
+
+        try:
+            yield acquired
+        finally:
+            await self._close_lock_connection(trans, conn)
+
+    @staticmethod
+    async def _close_lock_connection(trans: Any, conn: Any) -> None:
+        """End the lock transaction (releasing the lock) and return the connection."""
+        try:
+            if trans is not None:
+                await trans.rollback()
+        except Exception as exc:
+            logger.warning("Failed to end advisory lock transaction", error=str(exc))
+        try:
+            if conn is not None:
+                await conn.close()
+        except Exception as exc:
+            logger.warning("Failed to close advisory lock connection", error=str(exc))
 
     # Batch size for the server-side cursor in execute_sql — small enough to
     # bound memory, large enough to keep round trips reasonable.
@@ -505,7 +562,7 @@ class AsyncDatabaseClient:
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
-            connect_args={"prepared_statement_cache_size": 0},
+            connect_args=asyncpg_connect_args(new_url),
         )
 
         # Reconfigure sessionmaker to bind to the new engine

@@ -27,6 +27,13 @@ class RateLimitError(NLToSQLBaseError):
         self.retry_after = retry_after  # seconds to wait before retrying
 
 
+class AuthRateLimitError(RateLimitError):
+    """Raised when login / OTP / password-reset attempts exceed their throttle.
+
+    Subclasses RateLimitError so the envelope carries ``retry_after``.
+    """
+
+
 class SQLGenerationError(NLToSQLBaseError):
     """Raised when the LLM fails to produce valid SQL after all retries."""
 
@@ -110,6 +117,13 @@ class DatabaseExecutionError(NLToSQLBaseError):
     """Raised when executing a query against the target database fails."""
 
 
+class AccessPolicyViolationError(DatabaseExecutionError):
+    """Raised when SQL references a table or column the connection's access
+    policy forbids. Subclasses ``DatabaseExecutionError`` on purpose: the query
+    orchestrator's self-correction loop already feeds execution errors back to
+    the LLM, so a violation becomes "rewrite without that column" for free."""
+
+
 # ── Connection (multi-DB) Errors ──────────────────────────────────────────────
 
 
@@ -123,6 +137,27 @@ class ConnectionNotFoundError(NLToSQLBaseError):
 
 class ConnectionValidationError(NLToSQLBaseError):
     """Raised when a connection's inputs are invalid (bad DSN, duplicate name)."""
+
+
+# ── Workspace (team) Errors ───────────────────────────────────────────────────
+
+
+class WorkspaceNotFoundError(NLToSQLBaseError):
+    """Raised for an unknown workspace OR one the caller isn't a member of
+    (never confirms that another team's workspace exists)."""
+
+
+class WorkspacePermissionError(NLToSQLBaseError):
+    """Raised when a member's role doesn't allow the requested action."""
+
+
+class WorkspaceValidationError(NLToSQLBaseError):
+    """Raised for invalid workspace input, e.g. adding an email with no account
+    or removing the last admin."""
+
+
+class WorkspaceConflictError(NLToSQLBaseError):
+    """Raised when the user is already a member of the workspace."""
 
 
 class ConnectionTestError(NLToSQLBaseError):

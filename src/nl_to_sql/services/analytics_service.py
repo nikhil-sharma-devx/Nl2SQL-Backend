@@ -7,7 +7,7 @@ from sqlalchemy import Integer, String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, QueryHistoryRecord
-from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
+from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args, to_async_database_url
 
 logger = structlog.get_logger(__name__)
 
@@ -38,6 +38,7 @@ class AnalyticsService:
             max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
+            connect_args=asyncpg_connect_args(database_url),
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,

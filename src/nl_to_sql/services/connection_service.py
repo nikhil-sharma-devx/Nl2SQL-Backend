@@ -25,7 +25,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -40,15 +40,23 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from nl_to_sql.core.access_policy import AccessPolicy
 from nl_to_sql.core.exceptions import (
     ConnectionNotFoundError,
     ConnectionTestError,
     ConnectionValidationError,
 )
 from nl_to_sql.infrastructure.crypto import CURRENT_KDF_VERSION, VersionedFernet
-from nl_to_sql.infrastructure.database.models import Base, UserDatabaseConnection
+from nl_to_sql.infrastructure.database.models import (
+    Base,
+    User,
+    UserDatabaseConnection,
+    Workspace,
+    WorkspaceMember,
+)
+from nl_to_sql.infrastructure.database.policy_client import PolicyEnforcingClient
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
-from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
+from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args, to_async_database_url
 from nl_to_sql.services.api_key_service import _to_async_url
 
 logger = structlog.get_logger(__name__)
@@ -174,6 +182,13 @@ class ConnectionInfo:
     url_preview: str | None
     created_at: datetime
     updated_at: datetime
+    # Sharing / access (defaults describe a private, owned connection).
+    access: str = "owner"  # "owner" | "admin" | "editor" | "member"
+    workspace_id: str | None = None
+    workspace_name: str | None = None
+    owner_email: str | None = None
+    allowed_tables: list[str] | None = None
+    restricted_columns: list[str] = field(default_factory=list)
 
 
 class ConnectionService:
@@ -193,6 +208,7 @@ class ConnectionService:
             pool_size=1,
             max_overflow=1,
             pool_recycle=300,
+            connect_args=asyncpg_connect_args(self._database_url),
         )
         self._session_factory = async_sessionmaker(
             self._engine, class_=AsyncSession, expire_on_commit=False
@@ -233,7 +249,62 @@ class ConnectionService:
             url_preview=None,  # filled in by list/get/create when a DSN is present
             created_at=row.created_at,
             updated_at=row.updated_at,
+            workspace_id=row.workspace_id,
+            allowed_tables=list(row.allowed_tables) if row.allowed_tables is not None else None,
+            restricted_columns=list(row.restricted_columns or []),
         )
+
+    @staticmethod
+    async def _access(
+        db: AsyncSession, user_id: str, connection_id: str
+    ) -> tuple[UserDatabaseConnection, str] | None:
+        """Return (row, access) if ``user_id`` may USE the connection, else None.
+
+        ``access`` is ``"owner"`` for the owner, otherwise the caller's role in
+        the workspace the connection is shared into. This is the only place
+        shared access is decided; every read path goes through it.
+        """
+        row = (
+            await db.execute(
+                select(UserDatabaseConnection).where(
+                    UserDatabaseConnection.connection_id == connection_id
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        if row.user_id == user_id:
+            return row, "owner"
+        if row.workspace_id is None or row.encrypted_url is None:
+            return None
+        role = (
+            await db.execute(
+                select(WorkspaceMember.role).where(
+                    WorkspaceMember.workspace_id == row.workspace_id,
+                    WorkspaceMember.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return (row, str(role)) if role else None
+
+    async def assert_accessible(self, user_id: str, connection_id: str) -> str:
+        """Raise ``ConnectionNotFoundError`` unless the user may use the connection.
+
+        Returns the access level ("owner" or a workspace role).
+        """
+        factory = self._require_factory()
+        async with factory() as db:
+            found = await self._access(db, user_id, connection_id)
+        if found is None:
+            raise ConnectionNotFoundError("Connection not found.")
+        return found[1]
+
+    async def get_workspace_id(self, user_id: str, connection_id: str) -> str | None:
+        """Workspace the connection is shared into, if the user can access it."""
+        factory = self._require_factory()
+        async with factory() as db:
+            found = await self._access(db, user_id, connection_id)
+        return found[0].workspace_id if found else None
 
     async def _get_owned(
         self,
@@ -368,6 +439,52 @@ class ConnectionService:
                 except Exception:
                     info.url_preview = None
             infos.append(info)
+
+        # Connections other members shared into workspaces this user belongs to.
+        # Never carry a DSN preview — the host is the owner's business.
+        async with factory() as db:
+            active_shared = (
+                await db.execute(select(User.active_shared_connection_id).where(User.id == user_id))
+            ).scalar_one_or_none()
+            shared_rows = (
+                await db.execute(
+                    select(UserDatabaseConnection, WorkspaceMember.role, Workspace.name, User.email)
+                    .join(Workspace, Workspace.id == UserDatabaseConnection.workspace_id)
+                    .join(
+                        WorkspaceMember,
+                        (WorkspaceMember.workspace_id == UserDatabaseConnection.workspace_id)
+                        & (WorkspaceMember.user_id == user_id),
+                    )
+                    .join(User, User.id == UserDatabaseConnection.user_id)
+                    .where(
+                        UserDatabaseConnection.user_id != user_id,
+                        UserDatabaseConnection.encrypted_url.is_not(None),
+                    )
+                    .order_by(UserDatabaseConnection.name)
+                )
+            ).all()
+        for r, role, ws_name, owner_email in shared_rows:
+            info = self._to_info(r)
+            info.access = str(role)
+            info.workspace_name = ws_name
+            info.owner_email = owner_email
+            info.is_default = r.connection_id == active_shared
+            infos.append(info)
+        if active_shared and any(i.is_default and i.access != "owner" for i in infos):
+            for i in infos:
+                if i.access == "owner":
+                    i.is_default = False
+        # Owners also see which workspace each of their connections is in.
+        owned_ws = {i.workspace_id for i in infos if i.access == "owner" and i.workspace_id}
+        if owned_ws:
+            async with factory() as db:
+                name_rows = (
+                    await db.execute(select(Workspace.id, Workspace.name).where(Workspace.id.in_(owned_ws)))
+                ).all()
+            ws_names: dict[str, str] = {str(ws_id): str(name) for ws_id, name in name_rows}
+            for i in infos:
+                if i.access == "owner" and i.workspace_id:
+                    i.workspace_name = ws_names.get(i.workspace_id)
         return infos
 
     async def create(
@@ -517,10 +634,32 @@ class ConnectionService:
         logger.info("Connection deleted", user_id=user_id, connection_id=connection_id)
 
     async def set_default(self, user_id: str, connection_id: str) -> ConnectionInfo:
-        """Make ``connection_id`` the user's active/default connection."""
+        """Make ``connection_id`` the user's active connection.
+
+        For an owned connection this moves the ``is_default`` flag (and clears
+        any shared pointer). For a connection shared with the user through a
+        workspace it sets ``users.active_shared_connection_id`` instead — a
+        member can never flag another user's row.
+        """
         factory = self._require_factory()
         async with factory() as db:
-            row = await self._get_owned(db, user_id, connection_id)
+            found = await self._access(db, user_id, connection_id)
+            if found is None:
+                raise ConnectionNotFoundError("Connection not found.")
+            row, access = found
+            if access != "owner":
+                await db.execute(
+                    update(User).where(User.id == user_id).values(active_shared_connection_id=connection_id)
+                )
+                await db.commit()
+                info = self._to_info(row)
+                info.access = access
+                info.is_default = True
+                logger.info("Shared connection selected", user_id=user_id, connection_id=connection_id)
+                return info
+            await db.execute(
+                update(User).where(User.id == user_id).values(active_shared_connection_id=None)
+            )
             await db.execute(
                 update(UserDatabaseConnection)
                 .where(UserDatabaseConnection.user_id == user_id)
@@ -551,8 +690,98 @@ class ConnectionService:
     # ── Active-connection resolution ──────────────────────────────────────────────
 
     async def get_active_connection_id(self, user_id: str) -> str:
-        """Return the user's active (default) connection id, ensuring one exists."""
+        """Return the user's active connection id, ensuring one exists.
+
+        A selected shared connection wins while the user can still access it;
+        if the share or membership was revoked, the pointer is cleared and the
+        user falls back to their own default.
+        """
+        factory = self._require_factory()
+        async with factory() as db:
+            shared = (
+                await db.execute(select(User.active_shared_connection_id).where(User.id == user_id))
+            ).scalar_one_or_none()
+            if shared:
+                if await self._access(db, user_id, shared) is not None:
+                    return shared
+                await db.execute(
+                    update(User).where(User.id == user_id).values(active_shared_connection_id=None)
+                )
+                await db.commit()
+                logger.info("Stale shared-connection pointer cleared", user_id=user_id)
         return await self.ensure_default_connection(user_id)
+
+    # ── Access policy ───────────────────────────────────────────────────────────
+
+    async def get_policy(self, user_id: str, connection_id: str) -> tuple[AccessPolicy, str]:
+        """Return (policy, db_type) for a connection the user may use."""
+        factory = self._require_factory()
+        async with factory() as db:
+            found = await self._access(db, user_id, connection_id)
+        if found is None:
+            return AccessPolicy(), "postgresql"
+        row = found[0]
+        return (
+            AccessPolicy.from_config(row.allowed_tables, row.restricted_columns),
+            row.db_type or "postgresql",
+        )
+
+    async def update_policy(
+        self,
+        user_id: str,
+        connection_id: str,
+        allowed_tables: list[str] | None,
+        restricted_columns: list[str],
+    ) -> ConnectionInfo:
+        """Set the table allow-list / restricted columns (owner only)."""
+        cleaned_tables = (
+            sorted({t.strip() for t in allowed_tables if t and t.strip()})
+            if allowed_tables is not None
+            else None
+        )
+        cleaned_cols = sorted({c.strip() for c in restricted_columns if c and c.strip()})
+        for col in cleaned_cols:
+            table, _, column = col.rpartition(".")
+            if not table or not column:
+                raise ConnectionValidationError(
+                    f"Restricted column '{col}' must be written as table.column."
+                )
+        if cleaned_tables is not None and not cleaned_tables:
+            raise ConnectionValidationError(
+                "Allow at least one table, or clear the allow-list to allow every table."
+            )
+        factory = self._require_factory()
+        async with factory() as db:
+            row = await self._get_owned(db, user_id, connection_id)
+            row.allowed_tables = cleaned_tables
+            row.restricted_columns = cleaned_cols
+            row.updated_at = datetime.utcnow()
+            await db.commit()
+            await db.refresh(row)
+            info = self._to_info(row)
+        logger.info(
+            "Connection access policy updated",
+            connection_id=connection_id,
+            allowed_tables=None if cleaned_tables is None else len(cleaned_tables),
+            restricted_columns=len(cleaned_cols),
+        )
+        return info
+
+    async def get_scoped_client(
+        self, user_id: str, connection_id: str, fallback: AsyncDatabaseClient
+    ) -> AsyncDatabaseClient:
+        """Resolve the client for a connection AND apply its access policy.
+
+        This is the entry point every execution path should use: it falls back
+        to the platform client for the Server Default (exactly like
+        ``get_client``), then wraps whichever client it got in a
+        ``PolicyEnforcingClient`` when the connection has a non-empty policy.
+        """
+        client = await self.get_client(user_id, connection_id) or fallback
+        policy, db_type = await self.get_policy(user_id, connection_id)
+        if policy.is_empty:
+            return client
+        return PolicyEnforcingClient(client, policy, db_type)
 
     # ── Legacy /profile/database compatibility helpers ────────────────────────────
 
@@ -599,25 +828,18 @@ class ConnectionService:
         by scoping the lookup query, and the cache key includes ``user_id``
         so a cache hit can never return another user's client.
         """
+        # Access is re-checked on EVERY call, before the client cache: a cached
+        # client must never outlive a revoked share or a removed membership.
+        factory = self._require_factory()
+        async with factory() as db:
+            found = await self._access(db, user_id, connection_id)
+        if found is None:
+            return None  # unknown, or not accessible by user_id → caller uses server default
         cache_key = (user_id, connection_id)
         cached = self._client_cache.get(cache_key)
         if cached is not None:
             return cached
-        factory = self._require_factory()
-        async with factory() as db:
-            row = (
-                await db.execute(
-                    select(
-                        UserDatabaseConnection.encrypted_url, UserDatabaseConnection.kdf_version
-                    ).where(
-                        UserDatabaseConnection.connection_id == connection_id,
-                        UserDatabaseConnection.user_id == user_id,
-                    )
-                )
-            ).one_or_none()
-        if row is None:
-            return None  # unknown, or not owned by user_id → caller uses server default
-        encrypted, kdf_version = row
+        encrypted, kdf_version = found[0].encrypted_url, found[0].kdf_version
         if encrypted is None:
             return None  # Server Default connection
         try:

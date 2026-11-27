@@ -13,6 +13,7 @@ class ColumnInfo(BaseModel):
     primary_key: bool = False
     foreign_key: str | None = None  # e.g. "orders.customer_id"
     description: str | None = None
+    sample_values: list[str] | None = None  # distinct values of a small categorical column
 
 
 class TableInfo(BaseModel):

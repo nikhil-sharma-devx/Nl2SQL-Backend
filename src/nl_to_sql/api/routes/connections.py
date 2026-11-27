@@ -1,9 +1,14 @@
 """Connection management routes — per-user multiple database connections (BYOD).
 
 Every endpoint is authenticated and scoped to the current user; a connection
-owned by another user is reported as *not found* (404) so cross-user existence
+the user can't access is reported as *not found* (404) so cross-user existence
 cannot be probed. Responses never contain a decrypted DSN — only a masked
-``url_preview``.
+``url_preview``, and only for the connection's owner.
+
+Connections shared into a workspace the user belongs to are listed alongside
+their own (``access`` = their workspace role) and can be selected as the
+active connection. Only the owner can edit, delete, test, re-share or change
+the access policy of a connection.
 """
 
 from __future__ import annotations
@@ -11,16 +16,18 @@ from __future__ import annotations
 from datetime import datetime
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
     get_connection_service,
     get_current_user,
+    get_workspace_service,
 )
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.services.connection_service import ConnectionInfo, ConnectionService
+from nl_to_sql.services.workspace_service import WorkspaceService
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +46,29 @@ class ConnectionOut(BaseModel):
     url_preview: str | None = None
     created_at: datetime
     updated_at: datetime
+    access: str = Field(default="owner", description="owner, or your role in the sharing workspace")
+    workspace_id: str | None = None
+    workspace_name: str | None = None
+    owner_email: str | None = Field(default=None, description="Set only for connections shared with you")
+    allowed_tables: list[str] | None = Field(
+        default=None, description="Tables the AI may use (null = every table)"
+    )
+    restricted_columns: list[str] = Field(
+        default_factory=list, description="table.column entries whose values never leave the database"
+    )
+
+
+class ConnectionPolicyUpdate(BaseModel):
+    allowed_tables: list[str] | None = Field(
+        default=None, max_length=1000, description="null = allow every table"
+    )
+    restricted_columns: list[str] = Field(default_factory=list, max_length=2000)
+
+
+class ConnectionShareUpdate(BaseModel):
+    workspace_id: str | None = Field(
+        default=None, max_length=36, description="Workspace to share into; null to make it private"
+    )
 
 
 class ConnectionCreate(BaseModel):
@@ -71,6 +101,12 @@ def _to_out(info: ConnectionInfo) -> ConnectionOut:
         url_preview=info.url_preview,
         created_at=info.created_at,
         updated_at=info.updated_at,
+        access=info.access,
+        workspace_id=info.workspace_id,
+        workspace_name=info.workspace_name,
+        owner_email=info.owner_email,
+        allowed_tables=info.allowed_tables,
+        restricted_columns=info.restricted_columns,
     )
 
 
@@ -175,3 +211,55 @@ async def select_connection(
 ) -> ConnectionOut:
     info = await svc.set_default(current_user.id, connection_id)
     return _to_out(info)
+
+
+@router.put(
+    "/{connection_id}/policy",
+    response_model=ConnectionOut,
+    summary="Set which tables the AI may use and which columns are restricted",
+    description=(
+        "Owner only. `allowed_tables: null` allows every table. Restricted columns "
+        "(written `table.column`) are hidden from the model, rejected in SQL wherever "
+        "they appear, and redacted from results. Applies to every member using the "
+        "connection, on every execution path."
+    ),
+)
+@limiter.limit("20/minute")
+async def update_connection_policy(
+    request: Request,
+    connection_id: str,
+    body: ConnectionPolicyUpdate,
+    current_user: UserPublic = Depends(get_current_user),
+    svc: ConnectionService = Depends(get_connection_service),
+) -> ConnectionOut:
+    for value in [*(body.allowed_tables or []), *body.restricted_columns]:
+        if len(value) > 300:
+            raise HTTPException(status_code=422, detail="Table and column names must be 300 characters or fewer.")
+    # No explicit cache flush needed: the orchestrator's cache scope includes a
+    # fingerprint of the policy, so answers cached under the old rules miss.
+    info = await svc.update_policy(
+        current_user.id, connection_id, body.allowed_tables, body.restricted_columns
+    )
+    return _to_out(info)
+
+
+@router.put(
+    "/{connection_id}/workspace",
+    response_model=ConnectionOut,
+    summary="Share a connection into a workspace, or make it private",
+    description="Owner only, and the owner must be an admin of the target workspace.",
+)
+@limiter.limit("10/minute")
+async def share_connection(
+    request: Request,
+    connection_id: str,
+    body: ConnectionShareUpdate,
+    current_user: UserPublic = Depends(get_current_user),
+    svc: ConnectionService = Depends(get_connection_service),
+    workspaces: WorkspaceService = Depends(get_workspace_service),
+) -> ConnectionOut:
+    await workspaces.set_connection_workspace(current_user.id, connection_id, body.workspace_id)
+    for info in await svc.list_connections(current_user.id):
+        if info.connection_id == connection_id:
+            return _to_out(info)
+    raise HTTPException(status_code=404, detail="Connection not found.")

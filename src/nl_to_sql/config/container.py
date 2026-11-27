@@ -12,6 +12,7 @@ from nl_to_sql.config.factories import (
     build_cache,
     build_embedder,
     build_llm_provider,
+    build_rate_limiter,
     build_semantic_cache_store,
     build_vector_store,
     create_llm_provider,
@@ -27,8 +28,10 @@ from nl_to_sql.rag.ingestion.table_describer import TableDescriber
 from nl_to_sql.rag.retrieval.fk_extractor import FKRelationshipExtractor
 from nl_to_sql.rag.retrieval.retrieval_chain import RetrievalChain
 from nl_to_sql.rag.retrieval.table_selector import TableSelectorService
+from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.analytics_service import AnalyticsService
 from nl_to_sql.services.api_key_service import APIKeyService
+from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.connection_service import ConnectionService
 from nl_to_sql.services.correction_detector import CorrectionDetector
@@ -57,6 +60,7 @@ from nl_to_sql.services.sql_validator import SQLValidatorService
 from nl_to_sql.services.starter_content_service import StarterContentService
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
+from nl_to_sql.services.workspace_service import WorkspaceService
 
 
 class ApplicationContainer(containers.DeclarativeContainer):
@@ -95,6 +99,18 @@ class ApplicationContainer(containers.DeclarativeContainer):
     cache = providers.Singleton(
         build_cache,
         settings=config,
+    )
+
+    # Token-bucket store + brute-force throttle for login / OTP / reset flows.
+    rate_limiter = providers.Singleton(
+        build_rate_limiter,
+        settings=config,
+    )
+
+    auth_throttle = providers.Singleton(
+        AuthThrottleService,
+        rate_limiter=rate_limiter,
+        enabled=config.provided.auth_throttle_enabled,
     )
 
     # Dedicated vector store for the semantic cache — kept separate from the
@@ -375,6 +391,18 @@ class ApplicationContainer(containers.DeclarativeContainer):
     )
 
     # ── Metrics Service (Semantic Layer / Metrics Catalog) ───────────────────
+    # Platform admin: cross-user view and control (admin-only routes).
+    admin_service = providers.Singleton(
+        AdminService,
+        session_factory=session_service.provided._session_factory,
+    )
+
+    # Teams: membership + roles + connection sharing (role rules live here only).
+    workspace_service = providers.Singleton(
+        WorkspaceService,
+        session_factory=session_service.provided._session_factory,
+    )
+
     metrics_service = providers.Singleton(
         MetricsService,
         session_factory=session_service.provided._session_factory,

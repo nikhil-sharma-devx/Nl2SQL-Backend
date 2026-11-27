@@ -18,7 +18,6 @@ from fastapi import FastAPI
 _background_tasks: set[asyncio.Task[None]] = set()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
@@ -26,6 +25,7 @@ from nl_to_sql.api.dependencies import get_container
 from nl_to_sql.api.middleware.error_handler import (
     domain_exception_handler,
     http_exception_handler,
+    slowapi_rate_limit_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
@@ -33,6 +33,7 @@ from nl_to_sql.api.middleware.logging_middleware import RequestLoggingMiddleware
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.api.routes import (
     account,
+    admin,
     analytics,
     auth,
     auth_sessions,
@@ -61,6 +62,7 @@ from nl_to_sql.api.routes import (
     tutorial,
     usage,
     user_settings,
+    workspaces,
 )
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.config.settings import get_settings
@@ -167,25 +169,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                             )
 
                     if should_ingest:
-                        # Acquire a PostgreSQL advisory lock so only one worker performs
-                        # the expensive delete+re-ingest when WEB_CONCURRENCY > 1.
-                        lock_acquired = False
-                        try:
-                            from sqlalchemy import text as _text
-                            async with db_client.session() as _lock_session:
-                                _result = await _lock_session.execute(
-                                    _text("SELECT pg_try_advisory_lock(hashtext('nl2sql_startup_ingest'))")
+                        # Hold a PostgreSQL advisory lock for the whole ingest so only one
+                        # worker performs the expensive delete+re-ingest when
+                        # WEB_CONCURRENCY > 1. Released automatically on exit.
+                        async with db_client.advisory_xact_lock("nl2sql_startup_ingest") as lock_acquired:
+                            if not lock_acquired:
+                                structlog.get_logger().info(
+                                    "Another worker is already ingesting schema on startup — skipping"
                                 )
-                                lock_acquired = bool(_result.scalar())
-                        except Exception:
-                            lock_acquired = True  # Non-PostgreSQL or lock unavailable — proceed anyway
-
-                        if not lock_acquired:
-                            structlog.get_logger().info(
-                                "Another worker is already ingesting schema on startup — skipping"
-                            )
-                        else:
-                            try:
+                            else:
                                 structlog.get_logger().info("Starting background schema ingestion...")
                                 chunk_count = await ingestion_service.ingest(schema_metadata, reset=True)
                                 structlog.get_logger().info(
@@ -193,15 +185,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                                     tables_ingested=len(schema_metadata.tables),
                                     chunks_ingested=chunk_count
                                 )
-                            finally:
-                                try:
-                                    from sqlalchemy import text as _text
-                                    async with db_client.session() as _lock_session:
-                                        await _lock_session.execute(
-                                            _text("SELECT pg_advisory_unlock(hashtext('nl2sql_startup_ingest'))")
-                                        )
-                                except Exception:
-                                    pass
                 except Exception as e:
                     structlog.get_logger().error(
                         "Background schema ingestion failed",
@@ -563,7 +546,7 @@ def create_app() -> FastAPI:
 
     # ── Rate limiting ──────────────────────────────────────────────────────────
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RateLimitExceeded, slowapi_rate_limit_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # ── GZip compression ──────────────────────────────────────────────────────
@@ -637,6 +620,8 @@ def create_app() -> FastAPI:
     app.include_router(dashboards.router)
     app.include_router(schedules.router)
     app.include_router(metrics.router)
+    app.include_router(workspaces.router)  # teams: members, roles, workspace glossary
+    app.include_router(admin.router)  # platform admin: all users, chats, full control
 
     structlog.get_logger(__name__).info(
         "Application created",

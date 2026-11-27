@@ -11,6 +11,10 @@ from groq import AsyncGroq
 from nl_to_sql.core.exceptions import LLMProviderError, RateLimitError
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.core.models.sql_result import LLMResponse
+from nl_to_sql.infrastructure.llm.reasoning import (
+    is_groq_reasoning_model,
+    with_reasoning_headroom,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -56,7 +60,11 @@ class GroqProvider(ILLMProvider):
             kwargs = {
                 "model": model,
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                # Caller's max_tokens is the answer budget; reasoning models
+                # also need room to think before answering.
+                "max_tokens": with_reasoning_headroom(
+                    max_tokens, reasoning=is_groq_reasoning_model(model)
+                ),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -122,7 +130,9 @@ class GroqProvider(ILLMProvider):
             stream = await self._client.chat.completions.create(
                 model=self._model,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=with_reasoning_headroom(
+                    max_tokens, reasoning=is_groq_reasoning_model(self._model)
+                ),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

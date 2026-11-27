@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
+from nl_to_sql.services.answer_summarizer import AnswerSummarizer
 from nl_to_sql.services.query_orchestrator import QueryOrchestrator
 from nl_to_sql.services.sql_generator import SQLGeneratorService
 
@@ -81,6 +82,8 @@ def build_orchestrator(
         query_rewriter=container.query_rewriter(),
         correction_detector=container.correction_detector(),
         conversation_max_turns=settings.conversation_max_turns,
+        # Uses the per-request provider, so it honours a personal API key.
+        answer_summarizer=AnswerSummarizer(llm_provider),
     )
 
 
@@ -101,9 +104,7 @@ async def build_orchestrator_for_connection(
     """
     llm_provider = container.llm_provider()
     conn_svc = container.connection_service()
-    db_client = await conn_svc.get_client(user_id, connection_id)
-    if db_client is None:
-        db_client = container.db_client()
+    db_client = await conn_svc.get_scoped_client(user_id, connection_id, container.db_client())
     return build_orchestrator(
         container, settings, llm_provider, user_id, connection_id, db_client
     )

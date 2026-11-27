@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from nl_to_sql.core.models.query import QueryResponse
 from nl_to_sql.infrastructure.database.models import QueryHistoryRecord
 from nl_to_sql.infrastructure.database.schema_sync import ensure_schema
-from nl_to_sql.infrastructure.database.url_utils import to_async_database_url
+from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args, to_async_database_url
 
 logger = structlog.get_logger(__name__)
 
@@ -51,7 +51,7 @@ class QueryHistoryService:
             max_overflow=1,
             pool_timeout=30,
             pool_recycle=300,
-            connect_args={"command_timeout": 30, "prepared_statement_cache_size": 0},
+            connect_args=asyncpg_connect_args(database_url, command_timeout=30),
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,

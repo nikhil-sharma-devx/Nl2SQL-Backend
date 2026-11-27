@@ -142,7 +142,9 @@ async def execute_schedule(
         )
         request = QueryRequest(question=schedule.nl_prompt, execute=True)
         response = await asyncio.wait_for(
-            orchestrator.run(request),
+            # Schedules store row counts/hashes, never the answer sentence —
+            # so don't send result rows to the LLM or spend a call on it.
+            orchestrator.run(request, answer_summary=False),
             timeout=settings.scheduled_query_timeout_seconds,
         )
         generated_sql = response.sql

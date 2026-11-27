@@ -262,9 +262,7 @@ async def preview_metric(
 
     container = _get_container()
     conn_svc = container.connection_service()
-    db_client = await conn_svc.get_client(current_user.id, connection_id)
-    if db_client is None:
-        db_client = container.db_client()
+    db_client = await conn_svc.get_scoped_client(current_user.id, connection_id, container.db_client())
 
     try:
         if execute:

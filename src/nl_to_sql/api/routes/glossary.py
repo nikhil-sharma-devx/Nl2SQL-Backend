@@ -1,4 +1,10 @@
-"""P2 - Glossary / Business Dictionary: term definitions injected into query prompts."""
+"""P2 - Glossary / Business Dictionary: term definitions injected into query prompts.
+
+These endpoints manage the caller's PERSONAL terms only (``workspace_id IS
+NULL``). Workspace terms live under ``/api/v1/workspaces/{id}/glossary`` where
+the editor role is enforced — keeping them out of these queries means a
+demoted author can't keep editing a workspace term through the personal API.
+"""
 from datetime import datetime
 
 import structlog
@@ -65,7 +71,7 @@ async def list_glossary(
     session_service: ChatSessionService = Depends(get_session_service),
 ) -> GlossaryListResponse:
     async with session_service._session_factory() as db:
-        q = select(GlossaryEntry).where(GlossaryEntry.user_id == current_user.id)
+        q = select(GlossaryEntry).where(GlossaryEntry.user_id == current_user.id, GlossaryEntry.workspace_id.is_(None))
         if search:
             pattern = f"%{search}%"
             q = q.where(
@@ -114,7 +120,7 @@ async def get_glossary_entry(
     async with session_service._session_factory() as db:
         result = await db.execute(
             select(GlossaryEntry).where(
-                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id
+                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id, GlossaryEntry.workspace_id.is_(None)
             )
         )
         entry = result.scalar_one_or_none()
@@ -133,7 +139,7 @@ async def patch_glossary_entry(
     async with session_service._session_factory() as db:
         result = await db.execute(
             select(GlossaryEntry).where(
-                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id
+                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id, GlossaryEntry.workspace_id.is_(None)
             )
         )
         entry = result.scalar_one_or_none()
@@ -158,7 +164,7 @@ async def delete_glossary_entry(
     async with session_service._session_factory() as db:
         result = await db.execute(
             select(GlossaryEntry).where(
-                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id
+                GlossaryEntry.id == entry_id, GlossaryEntry.user_id == current_user.id, GlossaryEntry.workspace_id.is_(None)
             )
         )
         entry = result.scalar_one_or_none()

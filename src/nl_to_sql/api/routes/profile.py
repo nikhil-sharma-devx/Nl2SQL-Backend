@@ -31,15 +31,15 @@ SUPPORTED_PROVIDERS: dict[str, dict[str, Any]] = {
     },
     "openai": {
         "label": "OpenAI (GPT)",
-        "models": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+        "models": ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"],
     },
     "anthropic": {
         "label": "Anthropic (Claude)",
-        "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022"],
+        "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2"],
     },
     "gemini": {
         "label": "Google Gemini",
-        "models": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-lite"],
+        "models": ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"],
     },
     "together": {
         "label": "Together AI (Fine-tuning)",

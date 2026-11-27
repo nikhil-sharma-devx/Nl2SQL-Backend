@@ -9,8 +9,25 @@ import structlog
 from nl_to_sql.core.exceptions import LLMProviderError, RateLimitError
 from nl_to_sql.core.interfaces.i_llm_provider import ILLMProvider
 from nl_to_sql.core.models.sql_result import LLMResponse
+from nl_to_sql.infrastructure.llm.reasoning import with_reasoning_headroom
 
 logger = structlog.get_logger(__name__)
+
+# Original request + 2 retries for transient server-side failures.
+_RETRY_ATTEMPTS = 3
+_RETRYABLE_STATUS_CODES = (500, 502, 503, 504)
+
+
+def _is_overloaded(error_str: str) -> bool:
+    """True for Gemini's server-side capacity errors (still failing after retries)."""
+    return any(code in error_str for code in ("503", "UNAVAILABLE", "504", "DEADLINE_EXCEEDED"))
+
+
+def _overloaded_message(model: str) -> str:
+    return (
+        f"Gemini model '{model}' is overloaded or timing out on Google's side right now. "
+        "Try again in a minute, or switch to another model in Settings."
+    )
 
 
 class GeminiProvider(ILLMProvider):
@@ -24,7 +41,7 @@ class GeminiProvider(ILLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-3.8-flash",
         timeout_ms: int = 30_000,
     ) -> None:
         self._api_key = api_key
@@ -35,12 +52,22 @@ class GeminiProvider(ILLMProvider):
                 from google import genai
                 from google.genai import types as genai_types
 
-                # Medium: no timeout set — a hung upstream could tie up
-                # request capacity indefinitely. google-genai has no
-                # separate max_retries knob at the client level.
+                # Timeout so a hung upstream can't tie up request capacity, plus
+                # retries with backoff for Gemini's transient overload errors
+                # (503 "model is experiencing high demand", 500, 504). 429 is
+                # left out on purpose: it surfaces as RateLimitError with a
+                # retry-after the UI shows, rather than being retried blindly.
                 self._client = genai.Client(
                     api_key=api_key,
-                    http_options=genai_types.HttpOptions(timeout=timeout_ms),
+                    http_options=genai_types.HttpOptions(
+                        timeout=timeout_ms,
+                        retry_options=genai_types.HttpRetryOptions(
+                            attempts=_RETRY_ATTEMPTS,
+                            initial_delay=1.0,
+                            max_delay=8.0,
+                            http_status_codes=list(_RETRYABLE_STATUS_CODES),
+                        ),
+                    ),
                 )
             except ImportError:
                 logger.warning("google-genai package not installed — run: pip install google-genai")
@@ -84,10 +111,18 @@ class GeminiProvider(ILLMProvider):
         log = logger.bind(model=model_name, provider="gemini")
         try:
             log.debug("Sending completion request")
+            wants_json = bool(response_format) and response_format.get("type") in (
+                "json_object",
+                "json_schema",
+            )
             config = genai_types.GenerateContentConfig(
                 temperature=temperature,
-                max_output_tokens=max_tokens,
+                # Gemini's thinking tokens count against max_output_tokens.
+                max_output_tokens=with_reasoning_headroom(max_tokens, reasoning=True),
                 system_instruction=system_prompt if system_prompt else None,
+                # Honour JSON mode like the other providers; it was silently
+                # dropped, so callers expecting JSON got prose or fenced JSON.
+                response_mime_type="application/json" if wants_json else None,
             )
             response = await self._client.aio.models.generate_content(
                 model=model_name,
@@ -117,6 +152,8 @@ class GeminiProvider(ILLMProvider):
                     detail=error_str,
                     retry_after=retry_after,
                 ) from exc
+            if _is_overloaded(error_str):
+                raise LLMProviderError(_overloaded_message(model_name), detail=error_str) from exc
             raise LLMProviderError(f"Gemini request failed: {exc}", detail=error_str) from exc
 
     async def health_check(self) -> bool:
@@ -152,7 +189,7 @@ class GeminiProvider(ILLMProvider):
             log.debug("Starting streaming completion request")
             config = genai_types.GenerateContentConfig(
                 temperature=temperature,
-                max_output_tokens=max_tokens,
+                max_output_tokens=with_reasoning_headroom(max_tokens, reasoning=True),
                 system_instruction=system_prompt if system_prompt else None,
             )
             async for chunk in await self._client.aio.models.generate_content_stream(
@@ -173,6 +210,8 @@ class GeminiProvider(ILLMProvider):
                     detail=error_str,
                     retry_after=None,
                 ) from exc
+            if _is_overloaded(error_str):
+                raise LLMProviderError(_overloaded_message(self._model), detail=error_str) from exc
             raise LLMProviderError(
                 f"Gemini streaming request failed: {exc}", detail=error_str
             ) from exc

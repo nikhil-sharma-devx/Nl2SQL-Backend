@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -48,6 +49,11 @@ class User(Base):
     # process, unlike a process-local dict that a multi-worker deployment
     # would let an attacker multiply.
     otp_failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Set only while the user's active connection is one shared with them
+    # through a workspace (they can't flag another user's row ``is_default``).
+    # Cleared when they select one of their own connections. Access is
+    # re-verified on every read, so a revoked share falls back to the default.
+    active_shared_connection_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -137,12 +143,105 @@ class UserDatabaseConnection(Base):
     # See UserAPIKey.kdf_version — same versioned-KDF scheme, same module.
     kdf_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Access policy (see services/access_policy.py). ``allowed_tables`` NULL =
+    # every table; a list restricts the AI and execution to those tables.
+    # ``restricted_columns`` holds "table.column" entries whose values never
+    # leave the database: hidden from the model, rejected in SQL, redacted in rows.
+    allowed_tables: Mapped[Any] = mapped_column(JSON, nullable=True)
+    restricted_columns: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
+    # Workspace this connection is shared into (NULL = private to its owner).
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
     user = relationship("User", back_populates="database_connections")
+
+
+class Workspace(Base):
+    """A team that shares database connections, glossary terms and metrics.
+
+    Membership is the only way into a workspace: admins add *existing* users by
+    email (no invitation tokens — the removed 6a design's invitations never
+    reliably reached invitees). Chats, saved queries, dashboards and schedules
+    stay personal; only connection-level knowledge is shared.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WorkspaceMember(Base):
+    """A user's membership and role in a workspace.
+
+    Roles (enforced in services/workspace_service.py, nowhere else):
+      admin  — manage members and roles, share/unshare connections, everything below
+      editor — manage the workspace glossary
+      member — query shared connections; read the glossary and certified metrics
+    """
+
+    __tablename__ = "workspace_members"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),
+        Index("ix_workspace_members_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(10), nullable=False, default="member")
+    added_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WorkspaceInvitation(Base):
+    """A pending (or answered) invitation to join a workspace.
+
+    Kept separate from ``WorkspaceMember`` on purpose: a membership row only
+    exists after the invitee accepts, so every access check (connections,
+    glossary, roles) keeps meaning "is a member" without a status filter that
+    could be forgotten somewhere.
+
+    status: ``pending`` → ``accepted`` | ``declined`` | ``cancelled``
+    """
+
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (
+        Index("ix_workspace_invitations_invitee_status", "invitee_user_id", "status"),
+        Index("ix_workspace_invitations_workspace_status", "workspace_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    invitee_user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    invited_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    role: Mapped[str] = mapped_column(String(10), nullable=False, default="member")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ChatSession(Base):
@@ -206,6 +305,9 @@ class ChatMessage(Base):
     used_tables: Mapped[Any] = mapped_column(JSON, nullable=True, default=list)
     suggested_chart: Mapped[Any] = mapped_column(JSON, nullable=True)
     follow_up_questions: Mapped[Any] = mapped_column(JSON, nullable=True, default=list)
+    # {answer, assumptions, confidence, confidence_reasons} — kept together so
+    # a reopened chat shows the same answer and trust signal it did live.
+    trust: Mapped[Any] = mapped_column(JSON, nullable=True)
 
     # Analytics and intelligence fields
     intent_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -370,6 +472,12 @@ class UserSettings(Base):
     data_retention: Mapped[str] = mapped_column(String(10), nullable=False, default="forever")
     font_size: Mapped[str] = mapped_column(String(10), nullable=False, default="medium")
     ui_density: Mapped[str] = mapped_column(String(15), nullable=False, default="comfortable")
+    # Send up to 20 executed result rows to the LLM to write a one-sentence
+    # answer. Opt-out because it's the only path that sends row data (not just
+    # schema) to the model.
+    answer_summary_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
@@ -544,6 +652,11 @@ class GlossaryEntry(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # NULL = personal term. Set = a workspace term, injected for every member
+    # querying that workspace's shared connections; ``user_id`` is its author.
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     term: Mapped[str] = mapped_column(String(200), nullable=False)
     definition: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

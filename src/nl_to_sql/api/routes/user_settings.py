@@ -35,6 +35,11 @@ class SettingsResponse(BaseModel):
     data_retention: str
     font_size: str
     ui_density: str
+    answer_summary_enabled: bool = Field(
+        default=True,
+        description="Send up to 20 executed result rows to the model to write a "
+        "one-sentence answer. Turn off to keep result data out of the LLM entirely.",
+    )
 
 
 class SettingsPatchRequest(BaseModel):
@@ -49,6 +54,7 @@ class SettingsPatchRequest(BaseModel):
     data_retention: str | None = None
     font_size: str | None = None
     ui_density: str | None = None
+    answer_summary_enabled: bool | None = None
 
 
 def _default_settings() -> SettingsResponse:
@@ -87,6 +93,7 @@ def _to_response(s: UserSettings) -> SettingsResponse:
         data_retention=s.data_retention,
         font_size=font_size,
         ui_density=ui_density,
+        answer_summary_enabled=bool(getattr(s, "answer_summary_enabled", True)),
     )
 
 

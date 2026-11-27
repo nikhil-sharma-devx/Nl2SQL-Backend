@@ -8,10 +8,12 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from nl_to_sql.api.dependencies import (
+    get_auth_throttle,
     get_current_user,
     get_session_service,
 )
@@ -44,6 +46,7 @@ from nl_to_sql.services.auth_service import (
     verify_google_token,
     verify_password,
 )
+from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 
 _OTP_MAX_ATTEMPTS = 5
@@ -165,16 +168,19 @@ async def _issue_token_response(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Register a new user and send OTP",
 )
-@limiter.limit("5/minute")
+@limiter.limit("5/minute;20/hour")
 async def register(
     request: Request,
     body: UserCreate,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> dict[str, str]:
     """Create a new user account (unverified) and send an OTP."""
     from datetime import datetime, timedelta
 
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
+
+    await throttle.enforce_otp_send(body.email, get_remote_address(request))
 
     hashed = hash_password(body.password)
     otp = generate_otp()
@@ -204,9 +210,15 @@ async def register(
             await db_sess.commit()
             await db_sess.refresh(new_user)
     except IntegrityError:
+        # One account per email, however it was created. Point to every way
+        # back in without revealing which one this account uses.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists",
+            detail=(
+                "An account with this email already exists. Sign in instead. If you "
+                "signed up with Google, use Sign in with Google, or use Forgot password "
+                "to set a password."
+            ),
         ) from None
 
     # Send OTP asynchronously
@@ -224,13 +236,22 @@ async def register(
     response_model=TokenResponse,
     summary="Authenticate with email and password",
 )
-@limiter.limit("5/minute")
+@limiter.limit("10/minute;100/hour")
 async def login(
     request: Request,
     body: UserLogin,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> TokenResponse:
-    """Validate credentials and return a JWT."""
+    """Validate credentials and return a JWT.
+
+    Brute-force protection: refused up front while the account's or the IP's
+    failure bucket is empty; every bad password spends a token from both; a
+    successful login refills the account bucket.
+    """
+    client_ip = get_remote_address(request)
+    await throttle.check_login_allowed(body.email, client_ip)
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
@@ -240,6 +261,8 @@ async def login(
         or not user.hashed_password
         or not verify_password(body.password, user.hashed_password)
     ):
+        # Spend tokens whether or not the account exists — no enumeration signal.
+        await throttle.record_login_failure(body.email, client_ip)
         if user:
             await _record_login(
                 user.id, session_service._session_factory, request, outcome="failed"
@@ -248,6 +271,8 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+
+    await throttle.record_login_success(body.email)
 
     if not user.is_active:
         raise HTTPException(
@@ -315,6 +340,9 @@ async def google_auth(
                 full_name=full_name,
                 auth_provider="google",
                 google_sub=google_sub,
+                # Google already verified this address (email_verified is
+                # required above) — the OTP step exists to prove the same thing.
+                is_verified=True,
             )
             db_sess.add(user)
             await db_sess.flush()  # to get user.id
@@ -322,6 +350,10 @@ async def google_auth(
             # Existing user — link Google sub if not yet linked
             if user.google_sub is None:
                 user.google_sub = google_sub
+            # Signing in with a Google-verified address proves ownership, so an
+            # email sign-up that never finished OTP verification is now verified.
+            if not user.is_verified:
+                user.is_verified = True
             if full_name and user.full_name is None:
                 user.full_name = full_name
 
@@ -444,16 +476,20 @@ async def refresh(
     response_model=TokenResponse,
     summary="Verify OTP and activate account",
 )
-@limiter.limit("3/minute")
+@limiter.limit("5/minute;30/hour")
 async def verify_otp(
     request: Request,
     body: OTPVerifyRequest,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> TokenResponse:
     """Verify an OTP and return a JWT."""
     from datetime import datetime
 
     email_key = body.email.lower().strip()
+    # Per-account guess budget that survives resend-otp (which resets the
+    # per-OTP DB counter) — closes the resend → guess → resend loop.
+    await throttle.enforce_otp_verify(email_key)
 
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.email == email_key))
@@ -510,17 +546,20 @@ async def verify_otp(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Resend verification OTP",
 )
-@limiter.limit("3/minute")
+@limiter.limit("3/minute;10/hour")
 async def resend_otp(
     request: Request,
     body: OTPResendRequest,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> dict[str, str]:
     """Generate a new OTP and email it to the user."""
     import asyncio
     from datetime import datetime, timedelta
 
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
+
+    await throttle.enforce_otp_send(body.email, get_remote_address(request))
 
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
@@ -554,11 +593,12 @@ async def resend_otp(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Initiate password reset flow",
 )
-@limiter.limit("3/minute")
+@limiter.limit("3/minute;10/hour")
 async def forgot_password(
     request: Request,
     body: ForgotPasswordRequest,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> dict[str, str]:
     """Generate an OTP for password reset."""
     import asyncio
@@ -566,12 +606,26 @@ async def forgot_password(
 
     from nl_to_sql.services.auth_service import generate_otp, send_otp_email
 
+    generic = {"message": "If that email exists, an OTP has been sent."}
+
+    # Per-IP cap may 429 (reveals nothing about accounts). The per-account
+    # cooldown/cap is checked for every submitted email, existing or not; when
+    # exhausted we silently skip sending and return the same generic reply, so
+    # it can neither mail-bomb a victim nor be used to enumerate accounts.
+    await throttle.check_otp_send_ip(get_remote_address(request))
+    if not (await throttle.try_otp_send_account(body.email)).allowed:
+        logger.info("Forgot-password send suppressed by account throttle")
+        return generic
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
-        # Always return success to prevent email enumeration; only send if user exists
-        if user and user.auth_provider == "email":
+        # Always return success to prevent email enumeration; only send if user exists.
+        # Any active account qualifies — including Google sign-ups, who use this
+        # to add a password: the emailed OTP proves ownership of the address
+        # exactly as it does for email accounts.
+        if user and user.is_active:
             # Also reset the failure counter so a fresh OTP gets a clean slate
             user.otp_failed_attempts = 0
             otp = generate_otp()
@@ -586,7 +640,7 @@ async def forgot_password(
             _bg.add_done_callback(lambda t: None)  # prevent GC
             logger.info("Forgot password OTP generated", email=user.email)
 
-    return {"message": "If that email exists, an OTP has been sent."}
+    return generic
 
 
 @router.post(
@@ -594,22 +648,26 @@ async def forgot_password(
     response_model=TokenResponse,
     summary="Reset password with OTP",
 )
-@limiter.limit("3/minute")
+@limiter.limit("5/minute;30/hour")
 async def reset_password(
     request: Request,
     body: ResetPasswordRequest,
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> TokenResponse:
     """Validate OTP and set a new password, enforcing password history."""
     from datetime import datetime
 
     from nl_to_sql.infrastructure.database.models import PasswordHistory
 
+    await throttle.enforce_otp_verify(body.email)
+
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.email == body.email.lower().strip()))
         user = result.scalar_one_or_none()
 
-        if not user or user.auth_provider != "email":
+        # Google sign-ups may set a password here too (see forgot_password).
+        if not user or not user.is_active:
             raise HTTPException(status_code=400, detail="Invalid request")
 
         # Enforce the same per-account attempt lockout as /verify-otp before
@@ -685,15 +743,21 @@ class ChangePasswordRequest(BaseModel):
     status_code=status.HTTP_200_OK,
     summary="Change password while authenticated",
 )
-@limiter.limit("5/minute")
+@limiter.limit("5/minute;20/hour")
 async def change_password(
     request: Request,
     body: ChangePasswordRequest,
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
+    throttle: AuthThrottleService = Depends(get_auth_throttle),
 ) -> dict[str, str]:
     """Validate current password, enforce history, then update to the new password."""
     from nl_to_sql.infrastructure.database.models import PasswordHistory
+
+    # Shares the login failure bucket: a stolen access token can't be used to
+    # brute-force the current password faster than /login allows.
+    client_ip = get_remote_address(request)
+    await throttle.check_login_allowed(current_user.email, client_ip)
 
     async with session_service._session_factory() as db_sess:
         result = await db_sess.execute(select(User).where(User.id == current_user.id))
@@ -706,6 +770,7 @@ async def change_password(
             )
 
         if not verify_password(body.current_password, user.hashed_password):
+            await throttle.record_login_failure(current_user.email, client_ip)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Current password is incorrect",

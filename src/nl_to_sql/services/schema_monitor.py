@@ -138,48 +138,25 @@ class SchemaMonitor:
                     "Schema changes detected",
                     changed_tables=changed_tables,
                 )
-                acquired = await self._try_acquire_lock()
-                if not acquired:
-                    self._logger.info(
-                        "Another worker is already ingesting — skipping this cycle"
-                    )
-                    return
-                try:
-                    await self._reingest_schema()
-                    self._last_schema_hash = current_hash
-                    self._last_failure_at = None
-                except Exception:
-                    # _reingest_schema already logged the failure — just start
-                    # the cooldown. _last_schema_hash stays stale on purpose so
-                    # the change is retried (after cooldown) instead of lost.
-                    self._last_failure_at = time.monotonic()
-                finally:
-                    await self._release_lock()
+                # Lock is held for the whole re-ingest and released on exit.
+                async with self._db_client.advisory_xact_lock("nl2sql_schema_monitor") as acquired:
+                    if not acquired:
+                        self._logger.info(
+                            "Another worker is already ingesting — skipping this cycle"
+                        )
+                        return
+                    try:
+                        await self._reingest_schema()
+                        self._last_schema_hash = current_hash
+                        self._last_failure_at = None
+                    except Exception:
+                        # _reingest_schema already logged the failure — just start
+                        # the cooldown. _last_schema_hash stays stale on purpose so
+                        # the change is retried (after cooldown) instead of lost.
+                        self._last_failure_at = time.monotonic()
 
         except Exception as exc:
             self._logger.warning("Failed to check schema changes", error=str(exc))
-
-    async def _try_acquire_lock(self) -> bool:
-        """Acquire PostgreSQL advisory lock to prevent concurrent ingestions."""
-        try:
-            async with self._db_client.session() as session:
-                result = await session.execute(
-                    text("SELECT pg_try_advisory_lock(hashtext('nl2sql_schema_monitor'))")
-                )
-                return bool(result.scalar())
-        except Exception as exc:
-            self._logger.warning("Could not acquire advisory lock", error=str(exc))
-            return True  # Proceed anyway if locking itself fails (non-PostgreSQL)
-
-    async def _release_lock(self) -> None:
-        """Release PostgreSQL advisory lock."""
-        try:
-            async with self._db_client.session() as session:
-                await session.execute(
-                    text("SELECT pg_advisory_unlock(hashtext('nl2sql_schema_monitor'))")
-                )
-        except Exception as exc:
-            self._logger.warning("Could not release advisory lock", error=str(exc))
 
     async def _get_current_schema(self) -> list[dict[str, Any]]:
         """Get current database schema.

@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from nl_to_sql.api.dependencies import get_container, get_current_user, require_admin
+from nl_to_sql.api.dependencies import get_container, require_admin
 from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.config.container import ApplicationContainer
 from nl_to_sql.core.models.auth import UserPublic
@@ -30,7 +30,9 @@ class DeployResponse(BaseModel):
 
 async def get_fine_tuning_service(
     container: ApplicationContainer = Depends(get_container),
-    current_user: UserPublic = Depends(get_current_user),
+    # Admin check first: every route using this service is admin-only, and a
+    # non-admin must get 403 before learning whether a provider key exists.
+    current_user: UserPublic = Depends(require_admin),
 ) -> FineTuningService:
     """Get fine-tuning service, preferring the user's stored Together AI key."""
     settings = container.config()
@@ -84,6 +86,9 @@ async def prepare_training_file(
     format: str = Query(default="jsonl", pattern="^(json|jsonl)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
+    # Admin-only: the export is NOT scoped to the caller — it contains every
+    # user's questions and SQL (same reason /training/export is admin-only).
+    _admin: UserPublic = Depends(require_admin),
 ) -> dict[str, str]:
     """Prepare training data file for fine-tuning.
 
@@ -136,6 +141,7 @@ async def start_fine_tuning(
 async def check_job_status(
     job_id: str,
     fine_tuning_service: FineTuningService = Depends(get_fine_tuning_service),
+    _admin: UserPublic = Depends(require_admin),
 ) -> dict[str, Any]:
     """Check fine-tuning job status.
 
@@ -152,7 +158,7 @@ async def check_job_status(
 async def list_jobs(
     limit: int = Query(default=10, ge=1, le=100),
     container: ApplicationContainer = Depends(get_container),
-    current_user: UserPublic = Depends(get_current_user),
+    current_user: UserPublic = Depends(require_admin),
 ) -> list[dict[str, Any]]:
     """List recent fine-tuning jobs.
 
