@@ -111,7 +111,7 @@ class GeminiProvider(ILLMProvider):
         log = logger.bind(model=model_name, provider="gemini")
         try:
             log.debug("Sending completion request")
-            wants_json = bool(response_format) and response_format.get("type") in (
+            wants_json = response_format is not None and response_format.get("type") in (
                 "json_object",
                 "json_schema",
             )

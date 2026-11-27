@@ -208,13 +208,21 @@ async def get_available_models() -> AvailableModelsResponse:
     "/database",
     response_model=DatabaseConfigResponse,
     summary="Get current database configuration",
-    description="Returns the currently active target database connection string and available databases.",
+    description=(
+        "Admins only. Returns the platform's target database connection string "
+        "(masked) and available databases."
+    ),
 )
 async def get_database_config(
     container: ApplicationContainer = Depends(get_container),
-    current_user: UserPublic = Depends(get_current_user),
+    _admin: UserPublic = Depends(require_admin),
 ) -> DatabaseConfigResponse:
-    """Get the current database connection string and available DBs."""
+    """Get the current database connection string and available DBs.
+
+    Admin-only, like the PUT beside it: even masked, the platform DB host is
+    infrastructure detail a regular user has no reason to see (users manage
+    their own databases via /connections).
+    """
     settings = container.config()
     return DatabaseConfigResponse(
         database_url=_mask_url(settings.database_url),

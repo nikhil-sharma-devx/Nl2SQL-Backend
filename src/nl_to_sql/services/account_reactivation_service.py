@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import structlog
 from sqlalchemy import func, select
@@ -41,7 +41,7 @@ from nl_to_sql.services.auth_service import create_reactivation_token
 
 logger = structlog.get_logger(__name__)
 
-EmailSender = Callable[[str, str, str], Awaitable[None]]
+EmailSender = Callable[[str, str, str], Coroutine[Any, Any, None]]
 
 MAX_MESSAGE_LENGTH = 1000
 STATUSES = ("pending", "approved", "rejected")
@@ -89,7 +89,7 @@ class AccountReactivationService:
 
     def _email_later(self, to: str, subject: str, body: str) -> None:
         """Send without blocking the request; failures are logged by the sender."""
-        task = asyncio.create_task(self._send_email(to, subject, body))
+        task: asyncio.Task[None] = asyncio.create_task(self._send_email(to, subject, body))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
