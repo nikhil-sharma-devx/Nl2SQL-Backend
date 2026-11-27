@@ -2,7 +2,7 @@
 
 > Where natural language meets your schema.
 
-A REST API that converts plain-English questions into validated, executable SQL using a Retrieval-Augmented Generation (RAG) pipeline, then answers in a sentence with an evidence-based confidence level. Supports PostgreSQL and MySQL, streams results over SSE, self-corrects failed SQL, and ships with auth, teams, per-connection access control, analytics, fine-tuning, observability, glossary, query templates, and onboarding.
+A REST API that converts plain-English questions into validated, executable SQL using a Retrieval-Augmented Generation (RAG) pipeline, then answers in a sentence with an evidence-based confidence level. Supports PostgreSQL and MySQL (SQLite for local development), streams results over SSE, self-corrects failed SQL, and ships with auth, teams, per-connection access control, analytics, fine-tuning, observability, glossary, query templates, and onboarding.
 
 This file is the reference for backend configuration and the API. The repo-level overview and quickstart live in the [root README](../README.md).
 
@@ -384,6 +384,12 @@ The policy is applied by wrapping the connection's client (`infrastructure/datab
 
 **Deactivated accounts.** A deactivated account never gets a session: a valid password or Google sign-in answers `403 ACCOUNT_DEACTIVATED` (or `403 REACTIVATION_PENDING` when a request is already waiting) and no tokens are issued. The owner is emailed about the attempt (at most once per account per hour, per worker). The `ACCOUNT_DEACTIVATED` error carries a 30-minute reactivation token (`details.detail`) that the sign-in page uses to send `POST /api/v1/auth/reactivation-request` with an optional message; every active admin is emailed. Admins approve (reactivates the account) or reject on **Admin → Requests** (`/api/v1/admin/reactivation-requests`), and the user is emailed the outcome. Reactivating the account directly from the Users tab also closes its pending request. Requests live in `account_reactivation_requests` (one pending per user). Emails need the SMTP settings; without them the flow still works, but nothing is sent.
 
+**Daily query limits.** Each AI query generation (`POST /query`, `/query/stream`) counts against the user's allowance for the current UTC day: their own `users.daily_query_limit` if an admin set one (Admin → user → Daily query limit, `PUT /api/v1/admin/users/{id}/limit`), else `DEFAULT_DAILY_QUERY_LIMIT` (0 = unlimited). Admins are never limited. Over the limit the API answers `429 DAILY_LIMIT_REACHED` with `Retry-After` set to midnight UTC. Counts live in `user_daily_usage`, separate from chat history, so deleting chats doesn't give the allowance back; the increment is a single conditional `UPDATE`, so concurrent requests can't overshoot. `GET /api/v1/usage` reports `queries_today` and `daily_limit`.
+
+**Audit log.** Every admin change is recorded in `admin_audit_events` and shown on Admin → Audit log (`GET /api/v1/admin/audit`, filterable by action): owner claimed, admin granted/revoked, account deactivated/reactivated, reactivation approved/rejected, chat/connection/team deleted, daily limit changed. Viewing a user's data is not recorded. Recording is best-effort — a failed write is logged and never undoes the action.
+
+**Databases.** Connections can be PostgreSQL or MySQL (`aiomysql`). SQLite connections are accepted only outside production: a SQLite URL is a file on the server, so in production it would let users read server-side files. Schema reading and read-only enforcement cover all three — PostgreSQL via `pg_catalog` and `SET TRANSACTION READ ONLY`, MySQL via SQLAlchemy's inspector with `SET TRANSACTION READ ONLY` and `max_execution_time`, SQLite with `PRAGMA query_only`. Tables outside PostgreSQL's `public` schema are written `schema.table` in prompts and the graph.
+
 Create or reset an admin account (the password is read from the environment, never the command line):
 
 ```bash
@@ -401,6 +407,8 @@ make test               # unit + integration (pytest)
 make lint               # ruff
 make type-check         # mypy
 ```
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request: `ruff check src tests`, `mypy src/nl_to_sql`, a single-Alembic-head check, and the full pytest suite. It needs no secrets — the tests use temporary SQLite databases and stubbed LLM/SMTP clients, and settings fall back to safe defaults without a `.env`.
 
 Security-relevant behaviour is tested against a real (temporary SQLite) database rather than mocks — see `tests/unit/test_workspace_sharing.py` (roles, sharing, revocation) and `tests/unit/test_access_policy.py` (alias/CTE/filter/`*` bypass attempts).
 

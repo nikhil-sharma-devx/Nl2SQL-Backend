@@ -1,0 +1,362 @@
+[
+  {
+    "id": "sel_01",
+    "question": "List the names of all product categories.",
+    "gold_sql": "SELECT name FROM categories",
+    "category": "simple_select"
+  },
+  {
+    "id": "sel_02",
+    "question": "Show the email address of every customer.",
+    "gold_sql": "SELECT email FROM customers",
+    "category": "simple_select"
+  },
+  {
+    "id": "sel_03",
+    "question": "List every product's name and price.",
+    "gold_sql": "SELECT name, price FROM products",
+    "category": "simple_select"
+  },
+  {
+    "id": "sel_04",
+    "question": "Which countries do our customers come from? List each country once.",
+    "gold_sql": "SELECT DISTINCT country FROM customers",
+    "category": "simple_select"
+  },
+  {
+    "id": "sel_05",
+    "question": "List all the distinct order statuses.",
+    "gold_sql": "SELECT DISTINCT status FROM orders",
+    "category": "simple_select"
+  },
+  {
+    "id": "flt_01",
+    "question": "Which customers are from the US? Show their first and last names.",
+    "gold_sql": "SELECT first_name, last_name FROM customers WHERE country = 'US'",
+    "category": "filter"
+  },
+  {
+    "id": "flt_02",
+    "question": "List the names of products priced above 100.",
+    "gold_sql": "SELECT name FROM products WHERE price > 100",
+    "category": "filter"
+  },
+  {
+    "id": "flt_03",
+    "question": "Show the order IDs of all delivered orders.",
+    "gold_sql": "SELECT order_id FROM orders WHERE status = 'delivered'",
+    "category": "filter"
+  },
+  {
+    "id": "flt_04",
+    "question": "Which products have fewer than 100 units in stock? Show the product names.",
+    "gold_sql": "SELECT name FROM products WHERE stock_qty < 100",
+    "category": "filter"
+  },
+  {
+    "id": "flt_05",
+    "question": "List the names of products priced between 40 and 100 (inclusive).",
+    "gold_sql": "SELECT name FROM products WHERE price BETWEEN 40 AND 100",
+    "category": "filter"
+  },
+  {
+    "id": "flt_06",
+    "question": "What is the email address of the customer named Bob Jones?",
+    "gold_sql": "SELECT email FROM customers WHERE first_name = 'Bob' AND last_name = 'Jones'",
+    "category": "filter"
+  },
+  {
+    "id": "flt_07",
+    "question": "Which orders have a total amount greater than 200? Show the order ID and total amount.",
+    "gold_sql": "SELECT order_id, total_amount FROM orders WHERE total_amount > 200",
+    "category": "filter"
+  },
+  {
+    "id": "flt_08",
+    "question": "List the order IDs of all orders that are not cancelled.",
+    "gold_sql": "SELECT order_id FROM orders WHERE status <> 'cancelled'",
+    "category": "filter"
+  },
+  {
+    "id": "agg_01",
+    "question": "How many customers are there?",
+    "gold_sql": "SELECT COUNT(*) FROM customers",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_02",
+    "question": "What is the average product price?",
+    "gold_sql": "SELECT AVG(price) FROM products",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_03",
+    "question": "What is the total amount of all delivered orders?",
+    "gold_sql": "SELECT SUM(total_amount) FROM orders WHERE status = 'delivered'",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_04",
+    "question": "What is the price of the most expensive product?",
+    "gold_sql": "SELECT MAX(price) FROM products",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_05",
+    "question": "How many units of stock do we have in total across all products?",
+    "gold_sql": "SELECT SUM(stock_qty) FROM products",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_06",
+    "question": "How many orders are pending?",
+    "gold_sql": "SELECT COUNT(*) FROM orders WHERE status = 'pending'",
+    "category": "aggregation"
+  },
+  {
+    "id": "agg_07",
+    "question": "How many distinct customers have placed at least one order?",
+    "gold_sql": "SELECT COUNT(DISTINCT customer_id) FROM orders",
+    "category": "aggregation"
+  },
+  {
+    "id": "grp_01",
+    "question": "How many orders are there for each status? Show the status and the count.",
+    "gold_sql": "SELECT status, COUNT(*) FROM orders GROUP BY status",
+    "category": "group_having"
+  },
+  {
+    "id": "grp_02",
+    "question": "How many customers are there in each country? Show the country and the count.",
+    "gold_sql": "SELECT country, COUNT(*) FROM customers GROUP BY country",
+    "category": "group_having"
+  },
+  {
+    "id": "grp_03",
+    "question": "Which countries have more than one customer? Show the country and the number of customers.",
+    "gold_sql": "SELECT country, COUNT(*) FROM customers GROUP BY country HAVING COUNT(*) > 1",
+    "category": "group_having"
+  },
+  {
+    "id": "grp_04",
+    "question": "Which customers have placed more than one order? Show the customer ID and the number of orders.",
+    "gold_sql": "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id HAVING COUNT(*) > 1",
+    "category": "group_having"
+  },
+  {
+    "id": "grp_05",
+    "question": "Show each customer ID and their total order amount, only for customers whose orders total more than 300.",
+    "gold_sql": "SELECT customer_id, SUM(total_amount) FROM orders GROUP BY customer_id HAVING SUM(total_amount) > 300",
+    "category": "group_having"
+  },
+  {
+    "id": "grp_06",
+    "question": "For each product ID, show the total quantity sold, only for products with at least 2 units sold.",
+    "gold_sql": "SELECT product_id, SUM(quantity) FROM order_items GROUP BY product_id HAVING SUM(quantity) >= 2",
+    "category": "group_having"
+  },
+  {
+    "id": "join_01",
+    "question": "List each product's name together with its category name.",
+    "gold_sql": "SELECT p.name AS product_name, c.name AS category_name FROM products p JOIN categories c ON c.category_id = p.category_id",
+    "category": "join"
+  },
+  {
+    "id": "join_02",
+    "question": "Show the order ID and the customer's email for every order.",
+    "gold_sql": "SELECT o.order_id, c.email FROM orders o JOIN customers c ON c.customer_id = o.customer_id",
+    "category": "join"
+  },
+  {
+    "id": "join_03",
+    "question": "How many products are in each category? Show the category name and the count.",
+    "gold_sql": "SELECT c.name, COUNT(p.product_id) FROM categories c LEFT JOIN products p ON p.category_id = c.category_id GROUP BY c.name",
+    "category": "join"
+  },
+  {
+    "id": "join_04",
+    "question": "What is the average product price in each category? Show the category name and average price.",
+    "gold_sql": "SELECT c.name, AVG(p.price) FROM categories c JOIN products p ON p.category_id = c.category_id GROUP BY c.name",
+    "category": "join"
+  },
+  {
+    "id": "join_05",
+    "question": "Show the first names of customers who have a cancelled order.",
+    "gold_sql": "SELECT DISTINCT c.first_name FROM customers c JOIN orders o ON o.customer_id = c.customer_id WHERE o.status = 'cancelled'",
+    "category": "join"
+  },
+  {
+    "id": "join_06",
+    "question": "List the names of the products in the Electronics category.",
+    "gold_sql": "SELECT p.name FROM products p JOIN categories c ON c.category_id = p.category_id WHERE c.name = 'Electronics'",
+    "category": "join"
+  },
+  {
+    "id": "join_07",
+    "question": "What is the total amount of all orders placed by customers from the US?",
+    "gold_sql": "SELECT SUM(o.total_amount) FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE c.country = 'US'",
+    "category": "join"
+  },
+  {
+    "id": "join_08",
+    "question": "List the IDs of the orders placed by Alice Smith.",
+    "gold_sql": "SELECT o.order_id FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE c.first_name = 'Alice' AND c.last_name = 'Smith'",
+    "category": "join"
+  },
+  {
+    "id": "join_09",
+    "question": "For each order, show the order ID and the number of line items in it.",
+    "gold_sql": "SELECT o.order_id, COUNT(oi.item_id) FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id GROUP BY o.order_id",
+    "category": "join"
+  },
+  {
+    "id": "mjoin_01",
+    "question": "Which distinct products has Alice Smith bought? Show the product names.",
+    "gold_sql": "SELECT DISTINCT p.name FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id WHERE c.first_name = 'Alice' AND c.last_name = 'Smith'",
+    "category": "multi_join"
+  },
+  {
+    "id": "mjoin_02",
+    "question": "What is the revenue per category, computed as the sum of quantity times unit price over order items? Show the category name and revenue.",
+    "gold_sql": "SELECT c.name, SUM(oi.quantity * oi.unit_price) FROM order_items oi JOIN products p ON p.product_id = oi.product_id JOIN categories c ON c.category_id = p.category_id GROUP BY c.name",
+    "category": "multi_join"
+  },
+  {
+    "id": "mjoin_03",
+    "question": "Which customers have bought products from the Books category? Show their email addresses (each once).",
+    "gold_sql": "SELECT DISTINCT cu.email FROM customers cu JOIN orders o ON o.customer_id = cu.customer_id JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id JOIN categories c ON c.category_id = p.category_id WHERE c.name = 'Books'",
+    "category": "multi_join"
+  },
+  {
+    "id": "mjoin_04",
+    "question": "For each customer, how many distinct products have they purchased? Show the customer's first name, last name and the count.",
+    "gold_sql": "SELECT c.first_name, c.last_name, COUNT(DISTINCT oi.product_id) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id GROUP BY c.customer_id, c.first_name, c.last_name",
+    "category": "multi_join"
+  },
+  {
+    "id": "mjoin_05",
+    "question": "Which customers bought the 'Laptop Pro 14'? Show their first and last names.",
+    "gold_sql": "SELECT DISTINCT c.first_name, c.last_name FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id WHERE p.name = 'Laptop Pro 14'",
+    "category": "multi_join"
+  },
+  {
+    "id": "mjoin_06",
+    "question": "What is the total quantity sold per category for delivered orders only? Show the category name and total quantity.",
+    "gold_sql": "SELECT c.name, SUM(oi.quantity) FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id JOIN categories c ON c.category_id = p.category_id WHERE o.status = 'delivered' GROUP BY c.name",
+    "category": "multi_join"
+  },
+  {
+    "id": "ord_01",
+    "question": "What are the 3 most expensive products? Show the name and price, most expensive first.",
+    "gold_sql": "SELECT name, price FROM products ORDER BY price DESC LIMIT 3",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_02",
+    "question": "List all products sorted by price from cheapest to most expensive, showing the name and price.",
+    "gold_sql": "SELECT name, price FROM products ORDER BY price ASC",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_03",
+    "question": "Which customer has spent the most in total across all their orders? Show their first and last name.",
+    "gold_sql": "SELECT c.first_name, c.last_name FROM customers c JOIN orders o ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.first_name, c.last_name ORDER BY SUM(o.total_amount) DESC LIMIT 1",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_04",
+    "question": "Show the top 3 customers by total order amount, with their email and total, highest first.",
+    "gold_sql": "SELECT c.email, SUM(o.total_amount) AS total FROM customers c JOIN orders o ON o.customer_id = c.customer_id GROUP BY c.email ORDER BY total DESC LIMIT 3",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_05",
+    "question": "Which product has the largest stock quantity? Show its name.",
+    "gold_sql": "SELECT name FROM products ORDER BY stock_qty DESC LIMIT 1",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_06",
+    "question": "List the names of the 5 cheapest products, cheapest first.",
+    "gold_sql": "SELECT name FROM products ORDER BY price ASC LIMIT 5",
+    "category": "order_limit"
+  },
+  {
+    "id": "ord_07",
+    "question": "Show the 2 largest orders by total amount: the order ID and total amount, largest first.",
+    "gold_sql": "SELECT order_id, total_amount FROM orders ORDER BY total_amount DESC LIMIT 2",
+    "category": "order_limit"
+  },
+  {
+    "id": "date_01",
+    "question": "How many orders were placed in the last 30 days?",
+    "gold_sql": "SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '30 days'",
+    "category": "date_filter"
+  },
+  {
+    "id": "date_02",
+    "question": "How many orders were placed in the last 7 days?",
+    "gold_sql": "SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '7 days'",
+    "category": "date_filter"
+  },
+  {
+    "id": "date_03",
+    "question": "How many customers signed up this calendar year?",
+    "gold_sql": "SELECT COUNT(*) FROM customers WHERE created_at >= date_trunc('year', CURRENT_DATE)",
+    "category": "date_filter"
+  },
+  {
+    "id": "date_04",
+    "question": "For each year, how many orders were placed? Show the year as a number and the count.",
+    "gold_sql": "SELECT EXTRACT(YEAR FROM created_at) AS year, COUNT(*) FROM orders GROUP BY EXTRACT(YEAR FROM created_at)",
+    "category": "date_filter"
+  },
+  {
+    "id": "date_05",
+    "question": "What is the total amount of delivered orders placed in the last 90 days?",
+    "gold_sql": "SELECT SUM(total_amount) FROM orders WHERE status = 'delivered' AND created_at >= NOW() - INTERVAL '90 days'",
+    "category": "date_filter"
+  },
+  {
+    "id": "date_06",
+    "question": "Show the emails of customers who signed up in the last 365 days.",
+    "gold_sql": "SELECT email FROM customers WHERE created_at >= NOW() - INTERVAL '365 days'",
+    "category": "date_filter"
+  },
+  {
+    "id": "sub_01",
+    "question": "Which products are priced above the average product price? Show the name and price.",
+    "gold_sql": "SELECT name, price FROM products WHERE price > (SELECT AVG(price) FROM products)",
+    "category": "subquery"
+  },
+  {
+    "id": "sub_02",
+    "question": "Which orders have a total amount above the average order total? Show the order ID and total amount.",
+    "gold_sql": "SELECT order_id, total_amount FROM orders WHERE total_amount > (SELECT AVG(total_amount) FROM orders)",
+    "category": "subquery"
+  },
+  {
+    "id": "sub_03",
+    "question": "Which other products are in the same category as 'Running Shoes'? Show their names, excluding Running Shoes itself.",
+    "gold_sql": "SELECT name FROM products WHERE category_id = (SELECT category_id FROM products WHERE name = 'Running Shoes') AND name <> 'Running Shoes'",
+    "category": "subquery"
+  },
+  {
+    "id": "sub_04",
+    "question": "Which customers have placed an order with a total amount greater than 1000? Show their first and last names.",
+    "gold_sql": "SELECT first_name, last_name FROM customers WHERE customer_id IN (SELECT customer_id FROM orders WHERE total_amount > 1000)",
+    "category": "subquery"
+  },
+  {
+    "id": "sub_05",
+    "question": "Who placed the single largest order by total amount? Show the customer's first and last name.",
+    "gold_sql": "SELECT first_name, last_name FROM customers WHERE customer_id = (SELECT customer_id FROM orders ORDER BY total_amount DESC LIMIT 1)",
+    "category": "subquery"
+  },
+  {
+    "id": "sub_06",
+    "question": "What is the name of the cheapest product in the Electronics category?",
+    "gold_sql": "SELECT p.name FROM products p JOIN categories c ON c.category_id = p.category_id WHERE c.name = 'Electronics' AND p.price = (SELECT MIN(p2.price) FROM products p2 WHERE p2.category_id = c.category_id)",
+    "category": "subquery"
+  }
+]

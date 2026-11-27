@@ -1,0 +1,27 @@
+[
+  {
+    "question": "How many customers are there?",
+    "expected_keywords": ["COUNT", "customers"],
+    "dialect": "postgresql"
+  },
+  {
+    "question": "Show me the top 5 customers by total order value",
+    "expected_keywords": ["ORDER BY", "total_amount", "LIMIT 5"],
+    "dialect": "postgresql"
+  },
+  {
+    "question": "What is the total revenue by product category?",
+    "expected_keywords": ["SUM", "GROUP BY", "category"],
+    "dialect": "postgresql"
+  },
+  {
+    "question": "List all orders with status 'delivered' in the last 30 days",
+    "expected_keywords": ["delivered", "orders"],
+    "dialect": "postgresql"
+  },
+  {
+    "question": "Which products are out of stock?",
+    "expected_keywords": ["stock_qty", "products"],
+    "dialect": "postgresql"
+  }
+]
