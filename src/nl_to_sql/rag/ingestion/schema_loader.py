@@ -26,11 +26,14 @@ class SchemaLoader:
     def __init__(self, db_client: AsyncDatabaseClient) -> None:
         self._db_client = db_client
 
-    async def load(self, schema_name: str = "public") -> SchemaMetadata:
+    async def load(
+        self, schema_name: str = "public", *, schemas: list[str] | None = None
+    ) -> SchemaMetadata:
         """Reflect database schema and return a SchemaMetadata object.
 
         Args:
             schema_name: The database schema to reflect (default: 'public').
+            schemas: Reflect several schemas at once (overrides ``schema_name``).
 
         Returns:
             SchemaMetadata with all tables and columns.
@@ -38,11 +41,14 @@ class SchemaLoader:
         Raises:
             SchemaIngestionError: If reflection fails.
         """
-        log = logger.bind(schema=schema_name)
+        log = logger.bind(schemas=schemas or [schema_name])
         log.info("Loading schema from live database")
 
         try:
-            schema_dict = await self._db_client.reflect_schema(schema_name=schema_name)
+            if schemas:
+                schema_dict = await self._db_client.reflect_schema(schemas=schemas)
+            else:
+                schema_dict = await self._db_client.reflect_schema(schema_name=schema_name)
         except Exception as exc:
             raise SchemaIngestionError(
                 f"Failed to reflect database schema: {exc}", detail=str(exc)

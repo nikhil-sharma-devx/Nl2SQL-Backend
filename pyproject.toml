@@ -39,6 +39,7 @@ dependencies = [
     # Database (async SQLAlchemy)
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
+    "aiomysql>=0.2.0",  # MySQL connections (mysql+aiomysql)
     "alembic>=1.13.0",
 
     # Cron parsing (Scheduled Queries & Alerts)

@@ -191,7 +191,9 @@ class SQLColumnValidator:
         current_table: str | None = None
 
         # Pattern to match table declarations
-        table_pattern = re.compile(r'^Table[:\s]+(\w+)', re.MULTILINE)
+        # "Table: orders" or "Table: sales.orders" -> "orders": keyed by the
+        # bare name, matching how _resolve_alias resolves FROM/JOIN tables.
+        table_pattern = re.compile(r'^Table[:\s]+(?:\w+\.)?(\w+)', re.MULTILINE)
         # Pattern to match column declarations
         column_pattern = re.compile(r'^\s*[-•*]\s+(\w+)\s+', re.MULTILINE)
 

@@ -87,6 +87,15 @@ def _validate_db_url(url: str) -> None:
     # sqlite is file-based — no host to validate (must be checked before the
     # host requirement below, which only applies to networked databases).
     if scheme == "sqlite+aiosqlite":
+        # A SQLite "connection" is a path on THIS server: in production that
+        # would let any user read server-side .db files. Local development only.
+        from nl_to_sql.config.settings import get_settings
+
+        if get_settings().app_env == "production":
+            raise ConnectionValidationError(
+                "SQLite connections are only available in local development. "
+                "Use a PostgreSQL or MySQL database URL."
+            )
         return
     host = parsed.hostname
     if not host:
@@ -768,7 +777,12 @@ class ConnectionService:
         return info
 
     async def get_scoped_client(
-        self, user_id: str, connection_id: str, fallback: AsyncDatabaseClient
+        self,
+        user_id: str,
+        connection_id: str,
+        fallback: AsyncDatabaseClient,
+        *,
+        strict: bool = False,
     ) -> AsyncDatabaseClient:
         """Resolve the client for a connection AND apply its access policy.
 
@@ -776,8 +790,12 @@ class ConnectionService:
         to the platform client for the Server Default (exactly like
         ``get_client``), then wraps whichever client it got in a
         ``PolicyEnforcingClient`` when the connection has a non-empty policy.
+
+        ``strict=True`` (schema sync) raises instead of silently using the
+        platform database when a connection that HAS a URL can't be opened —
+        otherwise the default DB's tables get written into that connection.
         """
-        client = await self.get_client(user_id, connection_id) or fallback
+        client = await self.get_client(user_id, connection_id, strict=strict) or fallback
         policy, db_type = await self.get_policy(user_id, connection_id)
         if policy.is_empty:
             return client
@@ -819,7 +837,9 @@ class ConnectionService:
         await self._evict(active)
         logger.info("Connection DSN cleared (reverted to server default)", user_id=user_id)
 
-    async def get_client(self, user_id: str, connection_id: str) -> AsyncDatabaseClient | None:
+    async def get_client(
+        self, user_id: str, connection_id: str, *, strict: bool = False
+    ) -> AsyncDatabaseClient | None:
         """Return a live client for ``user_id``'s connection, or ``None`` for Server Default.
 
         ``None`` signals the caller to fall back to the platform database
@@ -848,6 +868,11 @@ class ConnectionService:
             logger.warning(
                 "Failed to decrypt connection DSN", connection_id=connection_id, error=str(exc)
             )
+            if strict:
+                raise ConnectionValidationError(
+                    "This connection's saved URL can't be read. Edit the connection and "
+                    "enter its database URL again."
+                ) from exc
             return None
         client = AsyncDatabaseClient(database_url=raw_url)
         evicted = self._client_cache.put(cache_key, client)

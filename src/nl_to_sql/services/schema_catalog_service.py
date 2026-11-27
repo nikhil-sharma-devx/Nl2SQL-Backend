@@ -122,10 +122,19 @@ class SchemaCatalogService:
         connection_id: str,
         db_client: AsyncDatabaseClient,
         schema_name: str = "public",
+        *,
+        schemas: list[str] | None = None,
     ) -> SyncResult:
-        """Reflect the connection's live DB into the catalog, then re-embed if changed."""
+        """Reflect the connection's live DB into the catalog, then re-embed if changed.
+
+        ``schemas`` syncs several schemas in one pass and makes them the
+        connection's reflected set: reflected tables from schemas NOT listed
+        are dropped (the user unticked them). Without it, only ``schema_name``
+        is touched (legacy single-schema behaviour). Uploaded tables are never
+        dropped by a sync.
+        """
         loader = SchemaLoader(db_client)
-        schema = await loader.load(schema_name)
+        schema = await loader.load(schema_name, schemas=schemas)
         new_hash = SchemaIngestionService.compute_schema_hash(schema)
         # Optional: attach distinct values of small categorical columns. Runs
         # through the request's scoped client, so the access policy applies.
@@ -140,7 +149,7 @@ class SchemaCatalogService:
             values = await profile_sample_values(schema, db_client, schema.dialect or "postgresql")
             schema = apply_sample_values(schema, values)
         now = datetime.utcnow()
-        live_names = {t.name for t in schema.tables}
+        live_keys = {(t.schema_name, t.name) for t in schema.tables}
         new_tables: list[str] = []
 
         async with self._session_factory() as db:
@@ -151,25 +160,21 @@ class SchemaCatalogService:
             ).scalar_one_or_none()
             old_hash = header.schema_hash if header else None
 
-            rows = (
-                await db.execute(
-                    select(UserSchemaTable).where(
-                        UserSchemaTable.connection_id == connection_id,
-                        UserSchemaTable.schema_name == schema_name,
-                    )
-                )
-            ).scalars().all()
-            existing = {r.table_name: r for r in rows}
+            scope = [UserSchemaTable.connection_id == connection_id]
+            if not schemas:
+                scope.append(UserSchemaTable.schema_name == schema_name)
+            rows = (await db.execute(select(UserSchemaTable).where(*scope))).scalars().all()
+            existing = {(r.schema_name, r.table_name): r for r in rows}
 
             for t in schema.tables:
                 cols = [c.model_dump() for c in t.columns]
-                row = existing.get(t.name)
+                row = existing.get((t.schema_name, t.name))
                 if row is None:
                     db.add(
                         UserSchemaTable(
                             user_id=user_id,
                             connection_id=connection_id,
-                            schema_name=schema_name,
+                            schema_name=t.schema_name,
                             table_name=t.name,
                             source="reflected",
                             columns=cols,
@@ -179,16 +184,19 @@ class SchemaCatalogService:
                             is_new=True,
                         )
                     )
-                    new_tables.append(t.name)
+                    new_tables.append(
+                        t.name if t.schema_name in ("", "public") else f"{t.schema_name}.{t.name}"
+                    )
                 else:
                     # Overlay: refresh reflected structure, keep sticky overrides.
                     row.columns = cols
                     row.reflected_description = t.description
                     row.last_seen_at = now
 
-            # Drop reflected rows for tables that no longer exist in the live DB.
+            # Drop reflected rows for tables that no longer exist in the live DB
+            # (or, with ``schemas``, whose schema is no longer selected).
             for r in rows:
-                if r.table_name not in live_names and r.source == "reflected":
+                if (r.schema_name, r.table_name) not in live_keys and r.source == "reflected":
                     await db.delete(r)
 
             if header is None:
@@ -213,9 +221,24 @@ class SchemaCatalogService:
             connection_id=connection_id,
             changed=changed,
             new_tables=new_tables,
-            total=len(live_names),
+            total=len(live_keys),
         )
-        return SyncResult(changed=changed, new_tables=new_tables, total_tables=len(live_names))
+        return SyncResult(changed=changed, new_tables=new_tables, total_tables=len(live_keys))
+
+    async def synced_schemas(self, connection_id: str) -> list[str]:
+        """Schemas the connection's reflected tables currently come from."""
+        async with self._session_factory() as db:
+            names = (
+                await db.execute(
+                    select(UserSchemaTable.schema_name)
+                    .where(
+                        UserSchemaTable.connection_id == connection_id,
+                        UserSchemaTable.source == "reflected",
+                    )
+                    .distinct()
+                )
+            ).scalars().all()
+        return sorted(names)
 
     # ── Upload (BYOS path) ────────────────────────────────────────────────────
 

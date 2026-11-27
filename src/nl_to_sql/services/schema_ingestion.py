@@ -166,9 +166,9 @@ class SchemaIngestionService:
         precise context about each table's structure and relationships.
         """
         lines: list[str] = [
-            # Use unqualified name for default schemas so the LLM generates
-            # clean SQL without schema prefix (e.g. FROM categories, not FROM public.categories)
-            f"Table: {table.name}",
+            # Unqualified for the default schema (FROM categories, not FROM
+            # public.categories); qualified anywhere else (FROM sales.orders).
+            f"Table: {table.name if table.schema_name in ('', 'public') else f'{table.schema_name}.{table.name}'}",
         ]
         if table.description:
             lines.append(f"Description: {table.description}")

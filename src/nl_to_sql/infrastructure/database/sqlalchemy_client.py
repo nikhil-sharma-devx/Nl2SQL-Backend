@@ -34,6 +34,21 @@ def _redact_sql_for_tracing(sql: str) -> str:
     return _NUMERIC_LITERAL_RE.sub("?", redacted)
 
 
+# PostgreSQL's own catalogs: never user tables, never listed or reflected.
+SYSTEM_SCHEMAS = frozenset({"pg_catalog", "information_schema", "pg_toast"})
+_USER_SCHEMA_FILTER_SQL = (
+    "ns.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') "
+    "AND ns.nspname NOT LIKE 'pg\\_temp\\_%' "
+    "AND ns.nspname NOT LIKE 'pg\\_toast\\_temp\\_%'"
+)
+# MySQL's system databases and SQLite's temp schema: never user tables.
+_GENERIC_SYSTEM_SCHEMAS = frozenset(
+    {"information_schema", "mysql", "performance_schema", "sys", "temp"}
+)
+# r = table, p = partitioned table, v = view, m = materialized view, f = foreign table
+_RELKINDS_SQL = "('r', 'p', 'v', 'm', 'f')"
+
+
 class AsyncDatabaseClient:
     """Async SQLAlchemy session factory for the target query database.
 
@@ -85,6 +100,7 @@ class AsyncDatabaseClient:
             pool_recycle=pool_recycle,
             connect_args=asyncpg_connect_args(database_url),
         )
+        self._install_readonly_hooks()
         self._session_factory = async_sessionmaker(
             bind=self._engine,
             expire_on_commit=False,
@@ -97,21 +113,47 @@ class AsyncDatabaseClient:
             max_overflow=max_overflow,
         )
 
+    def _install_readonly_hooks(self) -> None:
+        """SQLite: make every pooled connection read-only (``PRAGMA query_only``).
+
+        SQLite has no per-transaction READ ONLY, so the guard is set once per
+        DBAPI connection as the pool opens it. PostgreSQL and MySQL are guarded
+        per transaction in ``_apply_session_guards``.
+        """
+        if not self._readonly or self._engine.dialect.name != "sqlite":
+            return
+        from sqlalchemy import event
+
+        @event.listens_for(self._engine.sync_engine, "connect")
+        def _query_only(dbapi_conn: Any, _record: Any) -> None:
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA query_only = ON")
+            cur.close()
+
     async def _apply_session_guards(self, sess: AsyncSession) -> None:
-        """Harden a session before running generated SQL (PostgreSQL only).
+        """Harden a session before running generated SQL.
 
         - Statement timeout keeps a runaway query from pinning a pool
           connection indefinitely.
         - READ ONLY makes the transaction reject any write even if a
           non-SELECT slipped past the validator (belt-and-suspenders).
+
+        PostgreSQL: ``SET LOCAL statement_timeout`` + ``SET TRANSACTION READ ONLY``.
+        MySQL: ``max_execution_time`` (SELECTs) + ``SET TRANSACTION READ ONLY``
+        (applies to the transaction the next statement opens).
+        SQLite: read-only per connection (see ``_install_readonly_hooks``).
         """
         from sqlalchemy import text
 
-        if self._engine.dialect.name != "postgresql":
-            return
-        await sess.execute(text(f"SET LOCAL statement_timeout = {self._statement_timeout_ms}"))
-        if self._readonly:
-            await sess.execute(text("SET TRANSACTION READ ONLY"))
+        dialect = self._engine.dialect.name
+        if dialect == "postgresql":
+            await sess.execute(text(f"SET LOCAL statement_timeout = {self._statement_timeout_ms}"))
+            if self._readonly:
+                await sess.execute(text("SET TRANSACTION READ ONLY"))
+        elif dialect == "mysql":
+            await sess.execute(text(f"SET SESSION max_execution_time = {self._statement_timeout_ms}"))
+            if self._readonly:
+                await sess.execute(text("SET TRANSACTION READ ONLY"))
 
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession, None]:
@@ -371,7 +413,40 @@ class AsyncDatabaseClient:
         except Exception:
             return False
 
-    async def reflect_schema(self, schema_name: str = "public") -> dict[str, Any]:
+    async def list_schemas(self) -> list[dict[str, Any]]:
+        """List the database's schemas with how many queryable relations each has.
+
+        Every schema except PostgreSQL's own catalogs (``SYSTEM_SCHEMAS`` and
+        ``pg_temp_*`` / ``pg_toast_temp_*``). Counts tables, partitioned
+        tables, views, materialized views and foreign tables; partitions of a
+        partitioned table are not counted separately. Read-only transaction.
+        """
+        from sqlalchemy import text
+
+        if self._engine.dialect.name != "postgresql":
+            return await self._list_schemas_generic()
+
+        query = f"""
+        SELECT ns.nspname AS schema_name, count(cls.oid) AS table_count
+        FROM pg_catalog.pg_namespace ns
+        LEFT JOIN pg_catalog.pg_class cls
+            ON cls.relnamespace = ns.oid
+           AND cls.relkind IN {_RELKINDS_SQL}
+           AND NOT cls.relispartition
+        WHERE {_USER_SCHEMA_FILTER_SQL}
+        GROUP BY ns.nspname
+        ORDER BY ns.nspname
+        """  # noqa: S608 - only module constants interpolated; no user input
+        async with self.session() as sess:
+            await sess.execute(text("SET LOCAL statement_timeout = '30s'"))
+            if self._readonly:
+                await sess.execute(text("SET TRANSACTION READ ONLY"))
+            rows = (await sess.execute(text(query))).fetchall()
+        return [{"name": r[0], "table_count": int(r[1])} for r in rows]
+
+    async def reflect_schema(
+        self, schema_name: str = "public", *, schemas: list[str] | None = None
+    ) -> dict[str, Any]:
         """Reflect database schema from live PostgreSQL database.
 
         Uses pg_catalog system tables directly (instead of the slow
@@ -380,20 +455,29 @@ class AsyncDatabaseClient:
 
         Args:
             schema_name: The PostgreSQL schema to reflect (default: 'public').
+            schemas: Reflect several schemas in one pass instead (overrides
+                ``schema_name``). Each table carries its own ``schema_name``.
+
+        Reflects ordinary and partitioned tables, views, materialized views and
+        foreign tables (not individual partitions). A foreign key to a table
+        outside ``public`` is written ``schema.table.column``.
 
         Returns:
             Dictionary with database_name, dialect, and tables list.
         """
         from sqlalchemy import text
 
-        logger.info("Reflecting schema from live database", schema=schema_name)
+        targets = list(dict.fromkeys(schemas)) if schemas else [schema_name]
+        logger.info("Reflecting schema from live database", schemas=targets)
+        if self._engine.dialect.name != "postgresql":
+            return await self._reflect_generic(targets if schemas else None)
 
         # ── Fast pg_catalog query ──────────────────────────────────────────────
         # information_schema views are themselves complex multi-join views that
         # time out on Neon pooled endpoints.  Querying pg_catalog directly is
         # orders of magnitude faster because the tables are real system tables
         # with indexed OID look-ups.
-        schema_query = """
+        schema_query = f"""
         SELECT
             cls.relname                          AS table_name,
             att.attname                          AS column_name,
@@ -408,7 +492,9 @@ class AsyncDatabaseClient:
             fk_att.attname                       AS fk_column,
             /* optional comments */
             obj_description(cls.oid, 'pg_class')           AS table_comment,
-            col_description(cls.oid, att.attnum)           AS column_comment
+            col_description(cls.oid, att.attnum)           AS column_comment,
+            ns.nspname                           AS table_schema,
+            fk_ns.nspname                        AS fk_schema
         FROM pg_catalog.pg_class cls
         JOIN pg_catalog.pg_namespace ns
             ON ns.oid = cls.relnamespace
@@ -440,23 +526,31 @@ class AsyncDatabaseClient:
         ) fk_map ON fk_map.src_attnum = att.attnum
         LEFT JOIN pg_catalog.pg_class fk_cls
             ON fk_cls.oid = fk_map.confrelid
+        LEFT JOIN pg_catalog.pg_namespace fk_ns
+            ON fk_ns.oid = fk_cls.relnamespace
         LEFT JOIN pg_catalog.pg_attribute fk_att
             ON fk_att.attrelid = fk_map.confrelid
            AND fk_att.attnum = fk_map.ref_attnum
-        WHERE ns.nspname = :schema
-          AND cls.relkind = 'r'       -- ordinary tables only
-        ORDER BY cls.relname, att.attnum
-        """
+        WHERE ns.nspname = ANY(:schemas)
+          AND cls.relkind IN {_RELKINDS_SQL}
+          AND NOT cls.relispartition  -- a partitioned table, not each partition
+        ORDER BY ns.nspname, cls.relname, att.attnum
+        """  # noqa: S608 - only module constants interpolated; schemas are a bound param
 
         async with self.session() as sess:
             # Safety net: prevent indefinite hangs
             await sess.execute(text("SET LOCAL statement_timeout = '90s'"))
+            # Reflection only reads pg_catalog, but enforce it at the database
+            # too: a READ ONLY transaction rejects any write outright. Must come
+            # before the first query of the transaction.
+            if self._readonly:
+                await sess.execute(text("SET TRANSACTION READ ONLY"))
 
-            result = await sess.execute(text(schema_query), {"schema": schema_name})
+            result = await sess.execute(text(schema_query), {"schemas": targets})
             rows = result.fetchall()
 
         # ── Build schema structure ─────────────────────────────────────────────
-        tables_dict: dict[str, dict[str, Any]] = {}
+        tables_dict: dict[tuple[str, str], dict[str, Any]] = {}
 
         for row in rows:
             table_name = row[0]
@@ -468,11 +562,14 @@ class AsyncDatabaseClient:
             fk_ref_column = row[8]
             table_comment = row[9]
             col_comment = row[10]
+            table_schema = row[11]
+            fk_schema = row[12]
+            key = (table_schema, table_name)
 
-            if table_name not in tables_dict:
-                tables_dict[table_name] = {
+            if key not in tables_dict:
+                tables_dict[key] = {
                     "name": table_name,
-                    "schema_name": schema_name,
+                    "schema_name": table_schema,
                     "description": table_comment,
                     "columns": [],
                     "foreign_keys": {},
@@ -489,15 +586,20 @@ class AsyncDatabaseClient:
                 column_info["description"] = col_comment
 
             if fk_ref_table and fk_ref_column:
-                fk_key = f"{fk_ref_table}.{fk_ref_column}"
+                ref = (
+                    fk_ref_table
+                    if fk_schema in (None, "", "public")
+                    else f"{fk_schema}.{fk_ref_table}"
+                )
+                fk_key = f"{ref}.{fk_ref_column}"
                 column_info["foreign_key"] = fk_key
-                tables_dict[table_name]["foreign_keys"][column_name] = fk_key
+                tables_dict[key]["foreign_keys"][column_name] = fk_key
 
             # Avoid duplicate columns (can happen when a column participates
             # in multiple FK constraints)
-            existing_cols = {c["name"] for c in tables_dict[table_name]["columns"]}
+            existing_cols = {c["name"] for c in tables_dict[key]["columns"]}
             if column_name not in existing_cols:
-                tables_dict[table_name]["columns"].append(column_info)
+                tables_dict[key]["columns"].append(column_info)
 
         # Convert to list format
         tables_list = []
@@ -518,6 +620,89 @@ class AsyncDatabaseClient:
         )
 
         return schema_def
+
+    # ── MySQL / SQLite: SQLAlchemy inspector ─────────────────────────────────
+
+    async def _run_inspector(self, fn: Any) -> Any:
+        """Run ``fn(inspector)`` on one guarded (read-only) connection."""
+        from sqlalchemy import inspect
+
+        async with self._engine.connect() as conn:
+            if self._engine.dialect.name == "mysql":
+                from sqlalchemy import text
+
+                await conn.execute(text(f"SET SESSION max_execution_time = {self._statement_timeout_ms}"))
+                if self._readonly:
+                    await conn.execute(text("SET TRANSACTION READ ONLY"))
+            return await conn.run_sync(lambda sync_conn: fn(inspect(sync_conn)))
+
+    async def _list_schemas_generic(self) -> list[dict[str, Any]]:
+        def collect(insp: Any) -> list[dict[str, Any]]:
+            out = []
+            for name in insp.get_schema_names():
+                if name.lower() in _GENERIC_SYSTEM_SCHEMAS:
+                    continue
+                count = len(insp.get_table_names(schema=name)) + len(insp.get_view_names(schema=name))
+                out.append({"name": name, "table_count": count})
+            return sorted(out, key=lambda x: x["name"])
+
+        result: list[dict[str, Any]] = await self._run_inspector(collect)
+        return result
+
+    async def _reflect_generic(self, schemas: list[str] | None) -> dict[str, Any]:
+        """Tables + views with columns, primary and foreign keys (MySQL, SQLite).
+
+        Tables keep their real schema (MySQL database / SQLite ``main``) and are
+        always written ``schema.table`` downstream, which is valid SQL in both.
+        ``schemas=None`` means the connection's default schema.
+        """
+        dialect = self._engine.dialect.name
+
+        def collect(insp: Any) -> list[dict[str, Any]]:
+            targets = schemas or [insp.default_schema_name]
+            tables: list[dict[str, Any]] = []
+            for schema in targets:
+                names = list(insp.get_table_names(schema=schema)) + list(insp.get_view_names(schema=schema))
+                for name in names:
+                    try:
+                        pk_cols = set(insp.get_pk_constraint(name, schema=schema).get("constrained_columns") or [])
+                    except Exception:  # views have none
+                        pk_cols = set()
+                    fks: dict[str, str] = {}
+                    try:
+                        for fk in insp.get_foreign_keys(name, schema=schema):
+                            ref_schema = fk.get("referred_schema") or schema
+                            for local, remote in zip(
+                                fk.get("constrained_columns") or [], fk.get("referred_columns") or [], strict=False
+                            ):
+                                fks[local] = f"{ref_schema}.{fk['referred_table']}.{remote}"
+                    except Exception:
+                        pass
+                    try:
+                        comment = (insp.get_table_comment(name, schema=schema) or {}).get("text")
+                    except Exception:  # not supported by every dialect
+                        comment = None
+                    columns = []
+                    for col in insp.get_columns(name, schema=schema):
+                        info: dict[str, Any] = {
+                            "name": col["name"],
+                            "data_type": str(col["type"]).upper(),
+                            "nullable": bool(col.get("nullable", True)),
+                            "primary_key": col["name"] in pk_cols,
+                        }
+                        if col.get("comment"):
+                            info["description"] = col["comment"]
+                        if col["name"] in fks:
+                            info["foreign_key"] = fks[col["name"]]
+                        columns.append(info)
+                    tables.append(
+                        {"name": name, "schema_name": schema, "description": comment, "columns": columns}
+                    )
+            return tables
+
+        tables = await self._run_inspector(collect)
+        logger.info("Schema reflection complete", dialect=dialect, tables=len(tables))
+        return {"database_name": "reflected_db", "dialect": dialect, "tables": tables}
 
     async def switch_engine(
         self,
@@ -565,6 +750,7 @@ class AsyncDatabaseClient:
             connect_args=asyncpg_connect_args(new_url),
         )
 
+        self._install_readonly_hooks()
         # Reconfigure sessionmaker to bind to the new engine
         self._session_factory.configure(bind=self._engine)
 

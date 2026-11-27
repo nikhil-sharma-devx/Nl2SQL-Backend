@@ -87,8 +87,15 @@ class PolicyEnforcingClient(AsyncDatabaseClient):
     async def health_check(self) -> bool:
         return await self._inner.health_check()
 
-    async def reflect_schema(self, schema_name: str = "public") -> dict[str, Any]:
-        return await self._inner.reflect_schema(schema_name=schema_name)
+    async def reflect_schema(
+        self, schema_name: str = "public", *, schemas: list[str] | None = None
+    ) -> dict[str, Any]:
+        return await self._inner.reflect_schema(schema_name=schema_name, schemas=schemas)
+
+    async def list_schemas(self) -> list[dict[str, Any]]:
+        # Delegate explicitly: this wrapper never runs the base __init__, so the
+        # inherited implementation would miss the inner client's state.
+        return await self._inner.list_schemas()
 
     async def switch_engine(
         self,

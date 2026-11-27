@@ -128,7 +128,8 @@ async def profile_sample_values(
         qt = _quote(table.name, dialect)
         if qt is None:
             continue
-        if table.schema_name and table.schema_name not in ("public", "") and dialect != "mysql":
+        # Qualify outside PostgreSQL's default schema (MySQL `db`.`t`, SQLite "main"."t").
+        if table.schema_name and table.schema_name not in ("public", ""):
             qs = _quote(table.schema_name, dialect)
             if qs is None:
                 continue

@@ -10,14 +10,14 @@ from datetime import datetime
 from typing import Any, Literal, cast
 
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
     get_active_connection_id,
+    get_connection_service,
     get_current_user,
-    get_ingestion_pipeline,
-    get_request_db_client,
+    get_db_client,
     get_schema_catalog,
     get_schema_doc_service,
     get_vector_store,
@@ -26,8 +26,8 @@ from nl_to_sql.api.middleware.rate_limiter import limiter
 from nl_to_sql.core.interfaces.i_vector_store import IVectorStore
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.sqlalchemy_client import AsyncDatabaseClient
-from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
-from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
+from nl_to_sql.services.connection_service import ConnectionService
+from nl_to_sql.services.schema_catalog_service import SchemaCatalogService, SyncResult
 from nl_to_sql.services.schema_doc_service import SchemaDocService, SchemaExplanation
 
 logger = structlog.get_logger(__name__)
@@ -261,28 +261,137 @@ async def explain_schema(
 # ── Sync (auto-generate) + upload (BYOS) ────────────────────────────────────────
 
 
+_MAX_SYNC_SCHEMAS = 200
+
+
+class SchemaInfo(BaseModel):
+    name: str
+    table_count: int = Field(description="tables, views and other queryable relations")
+    synced: bool = Field(description="currently in this connection's catalog")
+
+
+class SchemaListResponse(BaseModel):
+    schemas: list[SchemaInfo]
+
+
+async def _resolve_sync_targets(
+    connection_id: str,
+    schema_name: str | None,
+    schemas: list[str] | None,
+    catalog: SchemaCatalogService,
+    db_client: AsyncDatabaseClient,
+) -> tuple[str, list[str] | None]:
+    """Decide what a sync reflects: ``(schema_name, schemas)`` for the catalog.
+
+    - ``schemas`` given: exactly those (the user's ticked set).
+    - ``schema_name`` given: that one schema only (legacy callers).
+    - neither: the schemas already in the catalog, or — first sync of a
+      connection — every user schema in the database that has tables.
+    """
+    if schemas:
+        cleaned = list(dict.fromkeys(n.strip() for n in schemas if n and n.strip()))
+        if len(cleaned) > _MAX_SYNC_SCHEMAS:
+            raise HTTPException(status_code=400, detail=f"Pick at most {_MAX_SYNC_SCHEMAS} schemas.")
+        for name in cleaned:
+            _validate_schema_name(name)
+        return "public", cleaned
+    if schema_name:
+        _validate_schema_name(schema_name)
+        return schema_name, None
+    already = await catalog.synced_schemas(connection_id)
+    if already:
+        return "public", already
+    try:
+        found = [s["name"] for s in await db_client.list_schemas() if s["table_count"] > 0]
+    except Exception as exc:  # e.g. a non-PostgreSQL database
+        logger.warning("Listing schemas failed; syncing public", error=str(exc))
+        found = []
+    return "public", (found or None)
+
+
+async def _sync_active_connection(
+    user_id: str,
+    connection_id: str,
+    schema_name: str | None,
+    schemas: list[str] | None,
+    catalog: SchemaCatalogService,
+    conns: ConnectionService,
+    default_client: AsyncDatabaseClient,
+) -> SyncResult:
+    """Reflect the active connection's live DB into its catalog.
+
+    The client is resolved from the SAME ``connection_id`` the catalog is
+    written under, in strict mode: a connection with a URL that can't be
+    opened is an error, never a silent fallback to the platform database
+    (which would file the default DB's tables under this connection).
+    """
+    db_client = await conns.get_scoped_client(user_id, connection_id, default_client, strict=True)
+    name, targets = await _resolve_sync_targets(
+        connection_id, schema_name, schemas, catalog, db_client
+    )
+    try:
+        return await catalog.sync_from_live_db(
+            user_id, connection_id, db_client, name, schemas=targets
+        )
+    except Exception as exc:
+        logger.error("Schema sync failed", connection_id=connection_id, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Schema sync failed: {exc}") from exc
+
+
+@router.get(
+    "/schemas",
+    response_model=SchemaListResponse,
+    summary="Schemas in the active connection's database (to choose what to sync)",
+)
+async def list_schemas(
+    current_user: UserPublic = Depends(get_current_user),
+    connection_id: str = Depends(get_active_connection_id),
+    catalog: SchemaCatalogService = Depends(get_schema_catalog),
+    conns: ConnectionService = Depends(get_connection_service),
+    default_client: AsyncDatabaseClient = Depends(get_db_client),
+) -> SchemaListResponse:
+    db_client = await conns.get_scoped_client(
+        current_user.id, connection_id, default_client, strict=True
+    )
+    try:
+        found = await db_client.list_schemas()
+    except Exception as exc:
+        logger.error("Listing schemas failed", connection_id=connection_id, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Couldn't list schemas: {exc}") from exc
+    synced = set(await catalog.synced_schemas(connection_id))
+    return SchemaListResponse(
+        schemas=[
+            SchemaInfo(name=s["name"], table_count=s["table_count"], synced=s["name"] in synced)
+            for s in found
+        ]
+    )
+
+
 @router.post(
     "/sync",
     response_model=SyncResponse,
-    summary="Reflect the user's live DB into the catalog and re-embed",
+    summary="Reflect the active connection's live DB into the catalog and re-embed",
+    description=(
+        "Pass `schemas` (repeatable) to sync exactly those schemas; reflected tables "
+        "from unlisted schemas are dropped. Without it, re-syncs the schemas already "
+        "in the catalog, or on the first sync every schema that has tables. "
+        "`schema_name` syncs a single schema (legacy)."
+    ),
 )
 @limiter.limit("10/minute")
 async def sync_schema(
     request: Request,
-    schema_name: str = "public",
+    schema_name: str | None = None,
+    schemas: list[str] | None = Query(default=None),
     current_user: UserPublic = Depends(get_current_user),
     connection_id: str = Depends(get_active_connection_id),
     catalog: SchemaCatalogService = Depends(get_schema_catalog),
-    db_client: AsyncDatabaseClient = Depends(get_request_db_client),
+    conns: ConnectionService = Depends(get_connection_service),
+    default_client: AsyncDatabaseClient = Depends(get_db_client),
 ) -> SyncResponse:
-    _validate_schema_name(schema_name)
-    try:
-        result = await catalog.sync_from_live_db(
-            current_user.id, connection_id, db_client, schema_name
-        )
-    except Exception as exc:
-        logger.error("Schema sync failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Schema sync failed: {exc}") from exc
+    result = await _sync_active_connection(
+        current_user.id, connection_id, schema_name, schemas, catalog, conns, default_client
+    )
     return SyncResponse(
         message="Schema synced from the live database.",
         changed=result.changed,
@@ -356,56 +465,102 @@ async def schema_status(
 @router.post(
     "/refresh",
     response_model=SchemaRefreshResponse,
-    summary="Refresh schema from live database (legacy global path)",
+    summary="Refresh schema from the active connection (alias of POST /schema/sync)",
     description=(
-        "Reflects the current schema tables from the active database connection "
-        "and re-ingests them into the vector store. Prefer POST /schema/sync, "
-        "which writes to the per-user catalog."
+        "Kept for older clients. Reflects the ACTIVE connection's live database "
+        "into that connection's catalog, exactly like POST /schema/sync. It used "
+        "to re-ingest the server's default database globally, which showed the "
+        "default tables no matter which connection was selected."
     ),
 )
 @limiter.limit("10/minute")
 async def refresh_schema(
     request: Request,
-    schema_name: str = "public",
+    schema_name: str | None = None,
+    schemas: list[str] | None = Query(default=None),
     current_user: UserPublic = Depends(get_current_user),
-    pipeline: IngestionPipeline = Depends(get_ingestion_pipeline),
+    connection_id: str = Depends(get_active_connection_id),
+    catalog: SchemaCatalogService = Depends(get_schema_catalog),
+    conns: ConnectionService = Depends(get_connection_service),
+    default_client: AsyncDatabaseClient = Depends(get_db_client),
 ) -> SchemaRefreshResponse:
-    """Reflect schema from the live DB and ingest into the vector store."""
-    _validate_schema_name(schema_name)
-    try:
-        chunks_ingested = await pipeline.run(schema_name=schema_name, reset=True)
-    except Exception as exc:
-        logger.error("Schema refresh failed", error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Schema refresh failed: {exc}",
-        ) from exc
-
-    return SchemaRefreshResponse(
-        message="Schema refreshed successfully from the live database.",
-        tables_found=chunks_ingested,
-        chunks_ingested=chunks_ingested,
+    result = await _sync_active_connection(
+        current_user.id, connection_id, schema_name, schemas, catalog, conns, default_client
     )
+    return SchemaRefreshResponse(
+        message="Schema refreshed from the active connection.",
+        tables_found=result.total_tables,
+        chunks_ingested=result.total_tables,
+    )
+
+
+def _sql_name(schema: str | None, table: str) -> str:
+    """The name to write in SQL: bare in ``public``, ``schema.table`` elsewhere."""
+    return table if schema in (None, "", "public") else f"{schema}.{table}"
 
 
 @router.get(
     "/visualize",
     summary="Get schema visualization data",
-    description="Returns the full schema structure including tables, columns, and foreign keys for graph rendering.",
+    description=(
+        "Tables, columns and foreign keys of the ACTIVE connection for the schema "
+        "graph and visual query builder. Served from the synced catalog (every "
+        "synced schema), so it matches what the AI sees; before the first sync it "
+        "reads the live database's schemas instead. Each table's `name` is how to "
+        "write it in SQL (`orders` in public, `sales.orders` elsewhere); "
+        "`foreign_key` values use the same form plus `.column`. `schema_name` "
+        "limits the result to one schema."
+    ),
 )
 async def visualize_schema(
-    schema_name: str = "public",
+    schema_name: str | None = None,
     current_user: UserPublic = Depends(get_current_user),
-    db_client: AsyncDatabaseClient = Depends(get_request_db_client),
+    connection_id: str = Depends(get_active_connection_id),
+    catalog: SchemaCatalogService = Depends(get_schema_catalog),
+    conns: ConnectionService = Depends(get_connection_service),
+    default_client: AsyncDatabaseClient = Depends(get_db_client),
 ) -> dict[str, Any]:
-    """Reflect schema from the active connection's DB and return it for visualization."""
-    _validate_schema_name(schema_name)
+    if schema_name:
+        _validate_schema_name(schema_name)
+
+    data = await catalog.get_catalog(current_user.id, connection_id, schema_name)
+    if data["tables"]:
+        return {
+            "database_name": data["database_name"],
+            "dialect": data["dialect"],
+            "source": "catalog",
+            "last_synced_at": data["last_synced_at"],
+            "tables": [
+                {
+                    "name": _sql_name(t["schema_name"], t["table_name"]),
+                    "schema_name": t["schema_name"],
+                    "table_name": t["table_name"],
+                    "description": t["description"],
+                    "columns": t["columns"],
+                }
+                for t in data["tables"]
+            ],
+        }
+
+    # Nothing synced yet: read the live DB (strict client — never the platform
+    # DB in place of this connection; read-only transaction).
+    db_client = await conns.get_scoped_client(
+        current_user.id, connection_id, default_client, strict=True
+    )
     try:
-        schema_def = await db_client.reflect_schema(schema_name=schema_name)
-        return schema_def
+        if schema_name:
+            targets = [schema_name]
+        else:
+            targets = [x["name"] for x in await db_client.list_schemas() if x["table_count"] > 0]
+        live = await db_client.reflect_schema(schemas=targets or ["public"])
     except Exception as exc:
         logger.error("Schema visualization failed", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=f"Schema visualization failed: {exc}",
         ) from exc
+    for t in live["tables"]:
+        t["table_name"] = t["name"]
+        t["name"] = _sql_name(t.get("schema_name"), t["name"])
+    live["source"] = "live"
+    return live
