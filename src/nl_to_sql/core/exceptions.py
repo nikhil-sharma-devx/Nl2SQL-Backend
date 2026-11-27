@@ -27,6 +27,14 @@ class RateLimitError(NLToSQLBaseError):
         self.retry_after = retry_after  # seconds to wait before retrying
 
 
+class DailyQuotaExceededError(RateLimitError):
+    """Raised when a user has used up their daily AI-query allowance.
+
+    Subclasses RateLimitError so the envelope carries ``retry_after`` (seconds
+    until the allowance resets at midnight UTC).
+    """
+
+
 class AuthRateLimitError(RateLimitError):
     """Raised when login / OTP / password-reset attempts exceed their throttle.
 

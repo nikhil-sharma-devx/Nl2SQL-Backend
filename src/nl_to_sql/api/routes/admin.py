@@ -22,8 +22,10 @@ from nl_to_sql.api.dependencies import (
     auth_cache_invalidate_user,
     get_account_reactivation_service,
     get_admin_service,
+    get_audit_log_service,
     get_connection_service,
     get_current_user,
+    get_usage_quota_service,
     get_workspace_service,
     require_admin,
     require_owner,
@@ -35,7 +37,9 @@ from nl_to_sql.services.account_reactivation_service import (
     ReactivationRequestView,
 )
 from nl_to_sql.services.admin_service import AdminAccount, AdminService, AdminUserSummary
+from nl_to_sql.services.audit_log_service import AUDIT_ACTIONS, AuditEventView, AuditLogService
 from nl_to_sql.services.connection_service import ConnectionService
+from nl_to_sql.services.usage_quota_service import MAX_DAILY_LIMIT, UsageQuotaService
 from nl_to_sql.services.workspace_service import WorkspaceService
 
 logger = structlog.get_logger(__name__)
@@ -52,6 +56,9 @@ class AdminUserOut(BaseModel):
     auth_provider: str
     is_admin: bool
     is_owner: bool
+    daily_query_limit: int | None = Field(
+        description="own daily AI-query cap; null = platform default"
+    )
     created_at: datetime
     chat_count: int
     connection_count: int
@@ -159,9 +166,18 @@ async def claim_owner(
     body: AdminSetupRequest,
     current_user: UserPublic = Depends(get_current_user),
     svc: AdminService = Depends(get_admin_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> AdminAccountOut:
     account = await svc.claim_owner(current_user.id, body.token)
     auth_cache_invalidate_user(current_user.id)
+    await audit.record(
+        actor_id=current_user.id,
+        actor_email=current_user.email,
+        action="owner_claimed",
+        target_type="user",
+        target_id=account.id,
+        target_label=account.email,
+    )
     return _account_out(account)
 
 
@@ -188,9 +204,18 @@ async def grant_admin(
     body: AdminGrantRequest,
     admin: UserPublic = Depends(require_admin),
     svc: AdminService = Depends(get_admin_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> AdminAccountOut:
     account = await svc.grant_admin(admin.id, body.user_id)
     auth_cache_invalidate_user(body.user_id)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="admin_granted",
+        target_type="user",
+        target_id=account.id,
+        target_label=account.email,
+    )
     return _account_out(account)
 
 
@@ -205,9 +230,18 @@ async def revoke_admin(
     user_id: str,
     owner: UserPublic = Depends(require_owner),
     svc: AdminService = Depends(get_admin_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> None:
-    await svc.revoke_admin(owner.id, user_id)
+    email = await svc.revoke_admin(owner.id, user_id)
     auth_cache_invalidate_user(user_id)
+    await audit.record(
+        actor_id=owner.id,
+        actor_email=owner.email,
+        action="admin_revoked",
+        target_type="user",
+        target_id=user_id,
+        target_label=email,
+    )
 
 
 # ── Reactivation requests ───────────────────────────────────────────────────
@@ -268,9 +302,19 @@ async def approve_reactivation(
     request_id: str,
     admin: UserPublic = Depends(require_admin),
     svc: AccountReactivationService = Depends(get_account_reactivation_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> ReactivationRequestOut:
     view = await svc.decide(admin.id, request_id, approve=True)
     auth_cache_invalidate_user(view.user_id)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="reactivation_approved",
+        target_type="user",
+        target_id=view.user_id,
+        target_label=view.email,
+        details={"request_id": view.id},
+    )
     return _request_out(view)
 
 
@@ -285,8 +329,19 @@ async def reject_reactivation(
     request_id: str,
     admin: UserPublic = Depends(require_admin),
     svc: AccountReactivationService = Depends(get_account_reactivation_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> ReactivationRequestOut:
-    return _request_out(await svc.decide(admin.id, request_id, approve=False))
+    view = await svc.decide(admin.id, request_id, approve=False)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="reactivation_rejected",
+        target_type="user",
+        target_id=view.user_id,
+        target_label=view.email,
+        details={"request_id": view.id},
+    )
+    return _request_out(view)
 
 
 # ── Users ────────────────────────────────────────────────────────────────────
@@ -334,11 +389,20 @@ async def set_user_status(
     admin: UserPublic = Depends(require_admin),
     svc: AdminService = Depends(get_admin_service),
     reactivation: AccountReactivationService = Depends(get_account_reactivation_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> AdminUserOut:
     summary = await svc.set_active(admin.id, user_id, body.is_active, actor_is_owner=admin.is_owner)
     auth_cache_invalidate_user(user_id)
     if body.is_active:
         await reactivation.close_pending_on_reactivate(admin.id, user_id)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="user_reactivated" if body.is_active else "user_deactivated",
+        target_type="user",
+        target_id=user_id,
+        target_label=summary.email,
+    )
     return _user_out(summary)
 
 
@@ -368,8 +432,17 @@ async def delete_user_chat(
     session_id: str,
     admin: UserPublic = Depends(require_admin),
     svc: AdminService = Depends(get_admin_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> None:
     await svc.delete_session(admin.id, user_id, session_id)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="chat_deleted",
+        target_type="chat",
+        target_id=session_id,
+        details={"user_id": user_id},
+    )
 
 
 @router.delete(
@@ -384,6 +457,7 @@ async def delete_user_connection(
     connection_id: str,
     admin: UserPublic = Depends(require_admin),
     conns: ConnectionService = Depends(get_connection_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> None:
     # Same path the owner's own delete uses: ownership-scoped delete, then
     # best-effort cleanup of the derived catalog and vectors.
@@ -404,6 +478,14 @@ async def delete_user_connection(
         user_id=user_id,
         connection_id=connection_id,
     )
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="connection_deleted",
+        target_type="connection",
+        target_id=connection_id,
+        details={"user_id": user_id},
+    )
 
 
 @router.delete(
@@ -417,5 +499,101 @@ async def delete_workspace(
     workspace_id: str,
     admin: UserPublic = Depends(require_admin),
     workspaces: WorkspaceService = Depends(get_workspace_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
 ) -> None:
     await workspaces.force_delete(admin.id, workspace_id)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="workspace_deleted",
+        target_type="workspace",
+        target_id=workspace_id,
+    )
+
+
+# ── Daily query limits ───────────────────────────────────────────────────────
+
+
+class DailyLimitUpdate(BaseModel):
+    daily_query_limit: int | None = Field(
+        ge=0,
+        le=MAX_DAILY_LIMIT,
+        description="queries per UTC day; 0 = unlimited; null = use the platform default",
+    )
+
+
+class DailyLimitOut(BaseModel):
+    user_id: str
+    daily_query_limit: int | None
+    effective_limit: int | None = Field(description="what applies now; null = unlimited")
+    queries_today: int
+
+
+@router.put(
+    "/users/{user_id}/limit",
+    response_model=DailyLimitOut,
+    summary="Set an account's daily AI-query limit",
+)
+@limiter.limit("30/minute")
+async def set_daily_limit(
+    request: Request,
+    user_id: str,
+    body: DailyLimitUpdate,
+    admin: UserPublic = Depends(require_admin),
+    quota: UsageQuotaService = Depends(get_usage_quota_service),
+    audit: AuditLogService = Depends(get_audit_log_service),
+) -> DailyLimitOut:
+    email, old = await quota.set_limit(user_id, body.daily_query_limit)
+    await audit.record(
+        actor_id=admin.id,
+        actor_email=admin.email,
+        action="query_limit_changed",
+        target_type="user",
+        target_id=user_id,
+        target_label=email,
+        details={"from": old, "to": body.daily_query_limit},
+    )
+    return DailyLimitOut(
+        user_id=user_id,
+        daily_query_limit=body.daily_query_limit,
+        effective_limit=await quota.effective_limit(user_id),  # None for admins (exempt)
+        queries_today=await quota.used_today(user_id),
+    )
+
+
+# ── Audit log ────────────────────────────────────────────────────────────────
+
+
+class AuditEventOut(BaseModel):
+    id: str
+    actor_email: str
+    action: str
+    target_type: str
+    target_id: str | None
+    target_label: str | None
+    details: dict[str, Any] | None
+    created_at: datetime
+
+
+class AuditEventList(BaseModel):
+    items: list[AuditEventOut]
+    total: int
+    actions: list[str] = Field(description="every action that can appear, for filtering")
+
+
+@router.get("/audit", response_model=AuditEventList, summary="Admin actions, newest first")
+async def list_audit_events(
+    action: str | None = Query(default=None, max_length=40),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _admin: UserPublic = Depends(require_admin),
+    audit: AuditLogService = Depends(get_audit_log_service),
+) -> AuditEventList:
+    items, total = await audit.list_events(limit, offset, action or None)
+    return AuditEventList(
+        items=[_audit_out(e) for e in items], total=total, actions=list(AUDIT_ACTIONS)
+    )
+
+
+def _audit_out(e: AuditEventView) -> AuditEventOut:
+    return AuditEventOut(**e.__dict__)

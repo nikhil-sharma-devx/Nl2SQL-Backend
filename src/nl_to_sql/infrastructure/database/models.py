@@ -1,12 +1,13 @@
 """SQLAlchemy ORM models for application data storage."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -66,6 +67,9 @@ class User(Base):
     is_owner: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # Daily AI-query cap set by an admin; NULL = the platform default
+    # (DEFAULT_DAILY_QUERY_LIMIT, 0 = unlimited). Admins are never limited.
+    daily_query_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -1040,4 +1044,44 @@ class AccountReactivationRequest(Base):
             postgresql_where=text("status = 'pending'"),
             sqlite_where=text("status = 'pending'"),
         ),
+    )
+
+
+class UserDailyUsage(Base):
+    """AI queries a user ran on one UTC day — the basis of the daily limit.
+
+    Separate from chat history on purpose: deleting chats must not give the
+    allowance back. Incremented atomically by services/usage_quota_service.py.
+    """
+
+    __tablename__ = "user_daily_usage"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class AdminAuditEvent(Base):
+    """Append-only record of an admin action (who did what to whom, when).
+
+    ``actor_email`` / ``target_label`` are snapshots so the log stays readable
+    after an account is deleted. Written only by services/audit_log_service.py.
+    """
+
+    __tablename__ = "admin_audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    actor_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    details: Mapped[Any] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, index=True
     )

@@ -32,6 +32,7 @@ from nl_to_sql.services.account_reactivation_service import AccountReactivationS
 from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.analytics_service import AnalyticsService
 from nl_to_sql.services.api_key_service import APIKeyService
+from nl_to_sql.services.audit_log_service import AuditLogService
 from nl_to_sql.services.auth_service import send_email
 from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
@@ -62,6 +63,7 @@ from nl_to_sql.services.sql_validator import SQLValidatorService
 from nl_to_sql.services.starter_content_service import StarterContentService
 from nl_to_sql.services.training_data_service import TrainingDataService
 from nl_to_sql.services.ttl_manager import TTLManager
+from nl_to_sql.services.usage_quota_service import UsageQuotaService
 from nl_to_sql.services.workspace_service import WorkspaceService
 
 
@@ -416,6 +418,19 @@ class ApplicationContainer(containers.DeclarativeContainer):
         session_factory=session_service.provided._session_factory,
         send_email=providers.Object(send_email),
         admin_page_url=providers.Callable(_admin_page_url, config),
+    )
+
+    # Append-only log of admin actions (Admin → Audit log).
+    audit_log_service = providers.Singleton(
+        AuditLogService,
+        session_factory=session_service.provided._session_factory,
+    )
+
+    # Per-user daily AI-query allowance (enforced on /query and /query/stream).
+    usage_quota_service = providers.Singleton(
+        UsageQuotaService,
+        session_factory=session_service.provided._session_factory,
+        default_limit=config.provided.default_daily_query_limit,
     )
 
     # Teams: membership + roles + connection sharing (role rules live here only).

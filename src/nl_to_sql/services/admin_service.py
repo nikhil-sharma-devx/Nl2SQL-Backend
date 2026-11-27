@@ -59,6 +59,7 @@ class AdminUserSummary:
     auth_provider: str
     is_admin: bool
     is_owner: bool
+    daily_query_limit: int | None
     created_at: datetime
     chat_count: int
     connection_count: int
@@ -204,7 +205,7 @@ class AdminService:
         logger.info("Admin granted", admin_id=admin_id, user_id=user_id)
         return account
 
-    async def revoke_admin(self, owner_id: str, user_id: str) -> None:
+    async def revoke_admin(self, owner_id: str, user_id: str) -> str:
         """Owner-only (enforced by ``require_owner`` on the route): remove admin."""
         async with self._session_factory() as db:
             user = await self._get_user(db, user_id)
@@ -215,7 +216,9 @@ class AdminService:
             user.is_admin = False
             user.updated_at = datetime.utcnow()
             await db.commit()
+            email = user.email
         logger.info("Admin revoked", owner_id=owner_id, user_id=user_id)
+        return email
 
     # ── Users ────────────────────────────────────────────────────────────────
 
@@ -282,6 +285,7 @@ class AdminService:
             auth_provider=u.auth_provider,
             is_admin=bool(u.is_admin),
             is_owner=bool(u.is_owner),
+            daily_query_limit=u.daily_query_limit,
             created_at=u.created_at,
             chat_count=int(chats),
             connection_count=int(conns),

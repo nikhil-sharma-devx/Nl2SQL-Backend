@@ -7,7 +7,7 @@ from functools import lru_cache
 from typing import Annotated
 
 import structlog
-from fastapi import HTTPException, Security, status
+from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from nl_to_sql.config.container import ApplicationContainer
@@ -19,6 +19,7 @@ from nl_to_sql.rag.ingestion.pipeline import IngestionPipeline
 from nl_to_sql.services.account_reactivation_service import AccountReactivationService
 from nl_to_sql.services.admin_service import AdminService
 from nl_to_sql.services.api_key_service import APIKeyService
+from nl_to_sql.services.audit_log_service import AuditLogService
 from nl_to_sql.services.auth_throttle_service import AuthThrottleService
 from nl_to_sql.services.chat_session_service import ChatSessionService
 from nl_to_sql.services.connection_service import ConnectionService
@@ -32,6 +33,7 @@ from nl_to_sql.services.schema_catalog_service import SchemaCatalogService
 from nl_to_sql.services.schema_doc_service import SchemaDocService
 from nl_to_sql.services.schema_ingestion import SchemaIngestionService
 from nl_to_sql.services.starter_content_service import StarterContentService
+from nl_to_sql.services.usage_quota_service import UsageQuotaService
 from nl_to_sql.services.workspace_service import WorkspaceService
 
 logger = structlog.get_logger(__name__)
@@ -224,6 +226,16 @@ def get_connection_service() -> ConnectionService:
 def get_admin_service() -> AdminService:
     """Dependency: AdminService (cross-user; only for require_admin routes)."""
     return _get_container().admin_service()
+
+
+def get_audit_log_service() -> AuditLogService:
+    """Dependency: AuditLogService (records and lists admin actions)."""
+    return _get_container().audit_log_service()
+
+
+def get_usage_quota_service() -> UsageQuotaService:
+    """Dependency: UsageQuotaService (per-user daily AI-query allowance)."""
+    return _get_container().usage_quota_service()
 
 
 def get_account_reactivation_service() -> AccountReactivationService:
@@ -449,3 +461,16 @@ async def require_owner(
             detail="Only the owner can remove admins.",
         )
     return current_user
+
+
+async def consume_daily_query(
+    current_user: UserPublic = Security(get_current_user),
+    quota: UsageQuotaService = Depends(get_usage_quota_service),
+) -> None:
+    """FastAPI dependency: count one AI query against the user's daily allowance.
+
+    Raises ``DailyQuotaExceededError`` (429 DAILY_LIMIT_REACHED, Retry-After =
+    seconds to midnight UTC) once the allowance is used up — before the route
+    body runs, so a streaming response never starts. Admins are never limited.
+    """
+    await quota.consume(current_user.id, current_user.is_admin)

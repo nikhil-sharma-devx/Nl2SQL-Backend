@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from nl_to_sql.api.dependencies import (
+    consume_daily_query,
     get_active_connection_id,
     get_connection_service,
     get_current_user,
@@ -239,6 +240,7 @@ async def nl_to_sql_query(
     session_service: ChatSessionService = Depends(get_session_service),
     connection_id: str = Depends(get_active_connection_id),
     metrics_svc: MetricsService = Depends(get_metrics_service),
+    _quota: None = Depends(consume_daily_query),
 ) -> QueryResponse:
     """Main endpoint: NL question → SQL response."""
     user_settings = await _load_user_settings(current_user.id, session_service._session_factory)
@@ -371,6 +373,7 @@ async def nl_to_sql_query_stream(
     session_service: ChatSessionService = Depends(get_session_service),
     connection_id: str = Depends(get_active_connection_id),
     metrics_svc: MetricsService = Depends(get_metrics_service),
+    _quota: None = Depends(consume_daily_query),
 ) -> StreamingResponse:
     """Streaming endpoint: NL question → SQL response (streamed)."""
     user_settings = await _load_user_settings(current_user.id, session_service._session_factory)

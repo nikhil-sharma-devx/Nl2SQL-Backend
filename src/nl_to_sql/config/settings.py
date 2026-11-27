@@ -353,6 +353,9 @@ class Settings(BaseSettings):
     # This token only unlocks the one-time setup page that claims the first
     # owner while none exists; empty disables setup entirely. Once an owner
     # exists the token is inert, so it can be removed from .env afterwards.
+    # Daily AI-query allowance for users without their own limit (set per user
+    # on the Admin page). 0 = unlimited. Admins are never limited.
+    default_daily_query_limit: int = Field(default=0, ge=0)
     admin_setup_token: SecretStr = Field(
         default=SecretStr(""),
         description="One-time token for POST /api/v1/admin/setup (claims the owner account)",

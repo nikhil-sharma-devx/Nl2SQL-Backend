@@ -7,10 +7,15 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from nl_to_sql.api.dependencies import get_current_user, get_session_service
+from nl_to_sql.api.dependencies import (
+    get_current_user,
+    get_session_service,
+    get_usage_quota_service,
+)
 from nl_to_sql.core.models.auth import UserPublic
 from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
 from nl_to_sql.services.chat_session_service import ChatSessionService
+from nl_to_sql.services.usage_quota_service import UsageQuotaService
 
 logger = structlog.get_logger(__name__)
 
@@ -26,6 +31,9 @@ class UsageResponse(BaseModel):
     tokens_out: int
     est_cost_usd: float
     period: str
+    # Daily AI-query allowance (resets at midnight UTC). None = unlimited.
+    queries_today: int = 0
+    daily_limit: int | None = None
 
 
 @router.get("/usage", response_model=UsageResponse, summary="Get usage stats for the current user")
@@ -33,6 +41,7 @@ async def get_usage(
     period: Literal["today", "7d", "30d"] = Query(default="7d"),
     current_user: UserPublic = Depends(get_current_user),
     session_service: ChatSessionService = Depends(get_session_service),
+    quota: UsageQuotaService = Depends(get_usage_quota_service),
 ) -> UsageResponse:
     """Return aggregated usage derived from chat_messages — always populated."""
     now = datetime.utcnow()
@@ -68,4 +77,6 @@ async def get_usage(
         tokens_out=0,
         est_cost_usd=round(total_tokens * _COST_PER_TOKEN, 6),
         period=period,
+        queries_today=await quota.used_today(current_user.id),
+        daily_limit=await quota.limit_for(current_user.id, current_user.is_admin),
     )
