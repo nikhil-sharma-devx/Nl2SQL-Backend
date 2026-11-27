@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from nl_to_sql.core.exceptions import SessionNotFoundError
 from nl_to_sql.core.models.query import QueryResponse
-from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession
+from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, SqlVersion
 from nl_to_sql.infrastructure.database.url_utils import asyncpg_connect_args, to_async_database_url
 
 logger = structlog.get_logger(__name__)
@@ -133,7 +133,7 @@ class ChatSessionService:
             return result.scalar_one_or_none()
 
     async def list_sessions(
-        self, limit: int = 50, offset: int = 0, user_id: str | None = None
+        self, limit: int = 50, offset: int = 0, *, user_id: str
     ) -> list[SessionInfo]:
         """List chat sessions ordered by most recently updated.
 
@@ -165,8 +165,7 @@ class ChatSessionService:
                 .limit(limit)
                 .offset(offset)
             )
-            if user_id is not None:
-                query = query.where(ChatSession.user_id == user_id)
+            query = query.where(ChatSession.user_id == user_id)
 
             result = await session.execute(query)
             return [
@@ -180,17 +179,16 @@ class ChatSessionService:
                 for row in result.all()
             ]
 
-    async def count_sessions(self, user_id: str | None = None) -> int:
+    async def count_sessions(self, *, user_id: str) -> int:
         """Return total count of sessions, optionally filtered by user."""
         async with self._session_factory() as session:
             query = select(sqlalchemy.func.count()).select_from(ChatSession)
-            if user_id is not None:
-                query = query.where(ChatSession.user_id == user_id)
+            query = query.where(ChatSession.user_id == user_id)
             result = await session.execute(query)
             return result.scalar() or 0
 
     async def list_all_messages(
-        self, limit: int = 50, offset: int = 0, user_id: str | None = None
+        self, limit: int = 50, offset: int = 0, *, user_id: str
     ) -> list[ChatMessage]:
         """Return chat messages paginated, newest first, scoped to the user's own sessions.
 
@@ -207,12 +205,11 @@ class ChatSessionService:
                 .limit(limit)
                 .offset(offset)
             )
-            if user_id is not None:
-                query = query.where(ChatSession.user_id == user_id)
+            query = query.where(ChatSession.user_id == user_id)
             result = await session.execute(query)
             return list(result.scalars().all())
 
-    async def count_all_messages(self, user_id: str | None = None) -> int:
+    async def count_all_messages(self, *, user_id: str) -> int:
         """Return total count of chat messages, optionally scoped to a user's own sessions."""
         async with self._session_factory() as session:
             query = (
@@ -220,8 +217,7 @@ class ChatSessionService:
                 .select_from(ChatMessage)
                 .join(ChatSession, ChatMessage.session_id == ChatSession.id)
             )
-            if user_id is not None:
-                query = query.where(ChatSession.user_id == user_id)
+            query = query.where(ChatSession.user_id == user_id)
             result = await session.execute(query)
             return result.scalar() or 0
 
@@ -306,42 +302,46 @@ class ChatSessionService:
         )
         return message
 
+    @staticmethod
+    async def _purge(session: AsyncSession, session_ids: Any) -> None:
+        """Delete chats bottom-up: SQL versions, then messages, then the chats.
+
+        Bulk ``delete()`` skips ORM cascades, and the database has no
+        ON DELETE CASCADE on ``chat_messages.session_id`` or
+        ``sql_versions.message_id`` — deleting the chat row alone violates
+        the foreign keys whenever the chat has messages.
+        ``session_ids`` is a list or a select of ids.
+        """
+        message_ids = select(ChatMessage.id).where(ChatMessage.session_id.in_(session_ids))
+        await session.execute(delete(SqlVersion).where(SqlVersion.message_id.in_(message_ids)))
+        await session.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+        await session.execute(delete(ChatSession).where(ChatSession.id.in_(session_ids)))
+
     async def delete_session(self, session_id: str) -> None:
-        """Delete a chat session and all its messages.
+        """Delete a chat session with its messages and SQL versions.
 
         Args:
             session_id: The session UUID to delete.
         """
         async with self._session_factory() as session:
-            await session.execute(delete(ChatSession).where(ChatSession.id == session_id))
+            await self._purge(session, [session_id])
             await session.commit()
 
         self._logger.info("Chat session deleted", session_id=session_id)
 
-    async def delete_all_sessions(self, user_id: str | None = None) -> None:
-        """Delete chat sessions (optionally scoped to a user).
+    async def delete_all_sessions(self, *, user_id: str) -> None:
+        """Delete every chat session of one user.
 
-        Args:
-            user_id: If provided, only delete sessions belonging to this user.
-                     If None, deletes ALL sessions (admin use).
+        ``user_id`` is required (no "all users" default): forgetting it must be
+        an error, never a platform-wide wipe or a cross-user read.
         """
         async with self._session_factory() as session:
-            if user_id is not None:
-                # Fetch session IDs for this user, then delete their messages first
-                result = await session.execute(
-                    select(ChatSession.id).where(ChatSession.user_id == user_id)
-                )
-                session_ids = [row[0] for row in result.all()]
-                if session_ids:
-                    await session.execute(
-                        delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids))
-                    )
-                    await session.execute(
-                        delete(ChatSession).where(ChatSession.id.in_(session_ids))
-                    )
-            else:
-                await session.execute(delete(ChatMessage))
-                await session.execute(delete(ChatSession))
+            result = await session.execute(
+                select(ChatSession.id).where(ChatSession.user_id == user_id)
+            )
+            session_ids = [row[0] for row in result.all()]
+            if session_ids:
+                await self._purge(session, session_ids)
             await session.commit()
 
         self._logger.info("Chat sessions deleted", user_id=user_id)

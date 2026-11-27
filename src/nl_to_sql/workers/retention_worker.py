@@ -11,7 +11,12 @@ import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from nl_to_sql.infrastructure.database.models import ChatMessage, ChatSession, UserSettings
+from nl_to_sql.infrastructure.database.models import (
+    ChatMessage,
+    ChatSession,
+    SqlVersion,
+    UserSettings,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -56,16 +61,18 @@ async def _purge_user_history(
     else:
         return 0
 
-    async with session_factory() as db:
-        result = await db.execute(
-            delete(ChatMessage)
-            .where(
-                ChatMessage.session_id.in_(
-                    select(ChatSession.id).where(ChatSession.user_id == user_id)
-                )
-            )
-            .where(ChatMessage.timestamp < cutoff)
+    expired = (
+        select(ChatMessage.id)
+        .where(
+            ChatMessage.session_id.in_(select(ChatSession.id).where(ChatSession.user_id == user_id))
         )
+        .where(ChatMessage.timestamp < cutoff)
+    )
+    async with session_factory() as db:
+        # SQL versions first: sql_versions.message_id has no ON DELETE CASCADE,
+        # so deleting a message that has versions violates the foreign key.
+        await db.execute(delete(SqlVersion).where(SqlVersion.message_id.in_(expired)))
+        result = await db.execute(delete(ChatMessage).where(ChatMessage.id.in_(expired)))
         count: int = result.rowcount  # type: ignore[attr-defined]
         await db.commit()
 
